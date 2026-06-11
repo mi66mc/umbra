@@ -10,6 +10,24 @@ pub type RevisionId = i64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum OrgRole {
+    Owner,
+    Admin,
+    Member,
+}
+
+impl OrgRole {
+    pub fn can_manage_members(self) -> bool {
+        matches!(self, Self::Owner | Self::Admin)
+    }
+
+    pub fn can_create_vaults(self) -> bool {
+        matches!(self, Self::Owner | Self::Admin)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum VaultKind {
     Personal,
     Shared,
@@ -128,6 +146,20 @@ pub struct Vault {
     pub org_id: Option<OrgId>,
     pub name: String,
     pub kind: VaultKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Org {
+    pub id: OrgId,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrgMember {
+    pub org_id: OrgId,
+    pub user_id: UserId,
+    pub role: OrgRole,
+    pub state: MemberState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
