@@ -71,6 +71,20 @@ ephemeral X25519 private key + recipient X25519 public key
   -> XChaCha20-Poly1305 key
 ```
 
+For every vault key wrapping, the granting client creates a fresh ephemeral X25519 keypair. The ephemeral public key is stored in the wrapping envelope so the recipient can derive the same shared secret with their private key. The ephemeral private key is used once and discarded.
+
+```txt
+granting client:
+  ephemeral_private + ana_public_key -> wrapping_key
+  stores ephemeral_public in envelope
+  discards ephemeral_private
+
+Ana client:
+  ana_private_key + ephemeral_public -> same wrapping_key
+```
+
+Every member does not have a permanent "ephemeral". Every wrapping has its own ephemeral public key. If the vault key is rewrapped or rotated, new wrapping envelopes get new ephemeral public keys.
+
 ## AAD
 
 AAD means additional authenticated data.

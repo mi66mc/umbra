@@ -12,9 +12,10 @@ The first implementation targets:
 - Separate Rust packages for CLI and server.
 - JSON crypto envelopes initially.
 - Shared vaults through per-recipient vault key wrappings.
-- Organizations reserved in the model through nullable `org_id`, but not fully implemented in the MVP.
+- Organizations for team grouping, with vault access still granted per vault.
+- OPAQUE-based password authentication DTOs and initial server flow.
 
-Local offline vaults, web UI, browser extension, desktop, mobile, SQLite, OPAQUE, WebAuthn, and HPKE are future work.
+Local offline vaults, web UI, browser extension, desktop, mobile, SQLite, WebAuthn, and HPKE are future work.
 
 ## Workspace
 
@@ -118,6 +119,48 @@ Vault items must support simple and complex secrets. The encrypted plaintext sch
 - custom
 
 The server stores the item kind and encrypted envelope, but not plaintext fields.
+
+## Organizations And Vault Access
+
+Organizations are explicit team/workspace containers. A user does not need an organization for personal use.
+
+```txt
+solo user vault:
+  vault.org_id = null
+
+team vault:
+  vault.org_id = org_id
+```
+
+Organization membership controls who can manage the organization and create organization vaults. It does not decrypt vaults and does not automatically grant access to every vault in the organization.
+
+Vault access requires all of:
+
+- active `vault_members` row;
+- role that permits the requested server action;
+- usable `vault_key_wrapping` for the user/device key generation.
+
+This split matters because the server can authorize sync, but only the client can unwrap the vault key.
+
+## Removing Members And Rotation
+
+Removing a vault member is a server-side authorization change first:
+
+```txt
+1. mark vault_members.state = removed
+2. revoke active vault_key_wrappings for that user
+3. set vaults.needs_key_rotation = true
+```
+
+That stops future sync and future key unwraps, but it cannot erase secrets the removed user already saw. Strong cryptographic removal requires an owner/admin client to rotate the vault key:
+
+```txt
+1. owner/admin unlocks the old vault key locally
+2. client generates a new random vault key
+3. client re-encrypts current item revisions
+4. client creates new wrappings for remaining active members
+5. server stores the new generation and clears needs_key_rotation
+```
 
 ## Sync
 
