@@ -8,11 +8,24 @@ Umbra's cryptography is client-side. The server stores encrypted envelopes and p
 KDF: Argon2id
 Key separation: HKDF-SHA256
 Encryption: XChaCha20-Poly1305
+Recipient key agreement: X25519 ephemeral ECDH
 Nonce: 24 random bytes
 Envelope: JSON v1
 ```
 
-The concrete implementation crates will be selected in `umbra-crypto`. The current scaffold records the data model before wiring crypto primitives.
+The initial implementation uses:
+
+```txt
+argon2
+chacha20poly1305
+hkdf
+sha2
+x25519-dalek
+rand_core
+base64ct
+zeroize
+subtle
+```
 
 ## Account KEK
 
@@ -37,6 +50,8 @@ The public key can be stored on the server and used by other authorized clients 
 
 Changing the user's password should only require re-encrypting the private key, not every vault key and item.
 
+The MVP user keypair is an X25519 encryption keypair, not a signing keypair. Device signatures can be added later with a separate signature key.
+
 ## Vault Keys
 
 Each vault has a random vault key:
@@ -46,6 +61,15 @@ vault_key = random 32 bytes
 ```
 
 Items in that vault are encrypted with keys derived from the vault key. The vault key is wrapped for each authorized recipient.
+
+Vault key wrapping uses:
+
+```txt
+ephemeral X25519 private key + recipient X25519 public key
+  -> shared secret
+  -> HKDF-SHA256 with wrapping AAD
+  -> XChaCha20-Poly1305 key
+```
 
 ## AAD
 
@@ -95,7 +119,8 @@ The client should reconstruct expected AAD deterministically from trusted contex
   "type": "vault_key_wrapping",
   "wrapping": {
     "method": "user_public_key",
-    "recipient_public_key": "base64url..."
+    "recipient_public_key": "base64url...",
+    "ephemeral_public_key": "base64url..."
   },
   "encryption": {
     "alg": "xchacha20-poly1305",
@@ -124,3 +149,17 @@ The client should reconstruct expected AAD deterministically from trusted contex
 - User private key wrap and unwrap works.
 - Vault key wrap and unwrap works.
 - Item encrypt and decrypt works.
+
+## Implemented Public API
+
+```txt
+generate_user_keypair()
+derive_account_kek(password, secret_key, params)
+encrypt_user_private_key(account_kek, private_key, aad)
+decrypt_user_private_key(account_kek, expected_aad, envelope)
+generate_vault_key()
+wrap_vault_key_for_user(public_key, vault_key, aad)
+unwrap_vault_key(private_key, expected_aad, envelope)
+encrypt_item(vault_key, aad, plaintext)
+decrypt_item(vault_key, expected_aad, envelope)
+```
