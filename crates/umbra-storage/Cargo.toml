@@ -1,0 +1,11 @@
+[package]
+name = "umbra-storage"
+description = "Database access layer for Umbra."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+umbra-core = { path = "../umbra-core" }

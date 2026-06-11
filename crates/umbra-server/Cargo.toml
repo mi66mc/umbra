@@ -1,0 +1,17 @@
+[package]
+name = "umbra-server"
+description = "HTTP server for Umbra."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "umbra-server"
+path = "src/main.rs"
+
+[dependencies]
+umbra-migrations = { path = "../umbra-migrations" }
+umbra-protocol = { path = "../umbra-protocol" }
+umbra-storage = { path = "../umbra-storage" }

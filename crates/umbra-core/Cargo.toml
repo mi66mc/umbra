@@ -1,0 +1,14 @@
+[package]
+name = "umbra-core"
+description = "Pure domain types and rules for Umbra."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+uuid.workspace = true

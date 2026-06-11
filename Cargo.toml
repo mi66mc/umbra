@@ -1,0 +1,24 @@
+[workspace]
+members = [
+    "crates/umbra-cli",
+    "crates/umbra-core",
+    "crates/umbra-crypto",
+    "crates/umbra-migrations",
+    "crates/umbra-protocol",
+    "crates/umbra-server",
+    "crates/umbra-storage",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/mi66mc/umbra"
+rust-version = "1.85"
+version = "0.1.0"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+uuid = { version = "1", features = ["serde", "v4"] }
