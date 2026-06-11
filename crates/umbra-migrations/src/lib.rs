@@ -49,7 +49,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn embeds_initial_migration() {
-        assert_eq!(MIGRATOR.iter().count(), 1);
+    fn embeds_migrations() {
+        assert_eq!(MIGRATOR.iter().count(), 2);
     }
 }

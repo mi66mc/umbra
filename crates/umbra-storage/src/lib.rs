@@ -2,8 +2,8 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sqlx::{PgPool, Row, postgres::PgPoolOptions};
 use umbra_core::{
-    DeviceId, ItemId, ItemKind, MemberState, OrgId, RevisionId, UserId, VaultId, VaultKind,
-    VaultRole,
+    DeviceId, ItemId, ItemKind, MemberState, OrgId, OrgRole, RevisionId, UserId, VaultId,
+    VaultKind, VaultRole,
 };
 use uuid::Uuid;
 
@@ -83,6 +83,45 @@ impl Storage {
         user_from_row(row)
     }
 
+    pub async fn upsert_user_auth(
+        &self,
+        input: UpsertUserAuth,
+    ) -> Result<UserAuthRecord, StorageError> {
+        let row = sqlx::query(
+            r#"
+            INSERT INTO user_auth (user_id, auth_method, auth_data)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (user_id)
+            DO UPDATE SET auth_method = EXCLUDED.auth_method, auth_data = EXCLUDED.auth_data, updated_at = now()
+            RETURNING user_id, auth_method, auth_data, created_at, updated_at
+            "#,
+        )
+        .bind(input.user_id)
+        .bind(input.auth_method)
+        .bind(input.auth_data)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        user_auth_from_row(row)
+    }
+
+    pub async fn find_user_auth(&self, user_id: UserId) -> Result<UserAuthRecord, StorageError> {
+        let row = sqlx::query(
+            r#"
+            SELECT user_id, auth_method, auth_data, created_at, updated_at
+            FROM user_auth
+            WHERE user_id = $1
+            "#,
+        )
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+
+        user_auth_from_row(row)
+    }
+
     pub async fn create_device(&self, input: CreateDevice) -> Result<DeviceRecord, StorageError> {
         let id = input.id.unwrap_or_else(Uuid::new_v4);
         let row = sqlx::query(
@@ -139,7 +178,7 @@ impl Storage {
             r#"
             INSERT INTO vaults (id, org_id, name, kind, created_by, crypto_policy)
             VALUES ($1, $2, $3, $4, $5, $6)
-            RETURNING id, org_id, name, kind, vault_revision, created_by, created_at, updated_at, deleted_at, crypto_policy
+            RETURNING id, org_id, name, kind, vault_revision, current_key_generation, needs_key_rotation, created_by, created_at, updated_at, deleted_at, crypto_policy
             "#,
         )
         .bind(id)
@@ -158,7 +197,7 @@ impl Storage {
     pub async fn find_vault_by_id(&self, vault_id: VaultId) -> Result<VaultRecord, StorageError> {
         let row = sqlx::query(
             r#"
-            SELECT id, org_id, name, kind, vault_revision, created_by, created_at, updated_at, deleted_at, crypto_policy
+            SELECT id, org_id, name, kind, vault_revision, current_key_generation, needs_key_rotation, created_by, created_at, updated_at, deleted_at, crypto_policy
             FROM vaults
             WHERE id = $1
             "#,
@@ -177,7 +216,7 @@ impl Storage {
     ) -> Result<Vec<VaultRecord>, StorageError> {
         let rows = sqlx::query(
             r#"
-            SELECT v.id, v.org_id, v.name, v.kind, v.vault_revision, v.created_by, v.created_at, v.updated_at, v.deleted_at, v.crypto_policy
+            SELECT v.id, v.org_id, v.name, v.kind, v.vault_revision, v.current_key_generation, v.needs_key_rotation, v.created_by, v.created_at, v.updated_at, v.deleted_at, v.crypto_policy
             FROM vaults v
             JOIN vault_members vm ON vm.vault_id = v.id
             WHERE vm.user_id = $1 AND vm.state = 'active' AND v.deleted_at IS NULL
@@ -189,6 +228,125 @@ impl Storage {
         .await?;
 
         rows.into_iter().map(vault_from_row).collect()
+    }
+
+    pub async fn create_org(&self, input: CreateOrg) -> Result<OrgRecord, StorageError> {
+        let id = input.id.unwrap_or_else(Uuid::new_v4);
+        let row = sqlx::query(
+            r#"
+            INSERT INTO orgs (id, name, created_by)
+            VALUES ($1, $2, $3)
+            RETURNING id, name, created_by, created_at, updated_at, deleted_at
+            "#,
+        )
+        .bind(id)
+        .bind(input.name)
+        .bind(input.created_by)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        org_from_row(row)
+    }
+
+    pub async fn find_org_by_id(&self, org_id: OrgId) -> Result<OrgRecord, StorageError> {
+        let row = sqlx::query(
+            r#"
+            SELECT id, name, created_by, created_at, updated_at, deleted_at
+            FROM orgs
+            WHERE id = $1
+            "#,
+        )
+        .bind(org_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+
+        org_from_row(row)
+    }
+
+    pub async fn list_orgs_for_user(
+        &self,
+        user_id: UserId,
+    ) -> Result<Vec<OrgRecord>, StorageError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT o.id, o.name, o.created_by, o.created_at, o.updated_at, o.deleted_at
+            FROM orgs o
+            JOIN org_members om ON om.org_id = o.id
+            WHERE om.user_id = $1 AND om.state = 'active' AND o.deleted_at IS NULL
+            ORDER BY o.created_at ASC
+            "#,
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter().map(org_from_row).collect()
+    }
+
+    pub async fn upsert_org_member(
+        &self,
+        input: UpsertOrgMember,
+    ) -> Result<OrgMemberRecord, StorageError> {
+        let row = sqlx::query(
+            r#"
+            INSERT INTO org_members (org_id, user_id, role, state)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (org_id, user_id)
+            DO UPDATE SET role = EXCLUDED.role, state = EXCLUDED.state, updated_at = now()
+            RETURNING org_id, user_id, role, state, created_at, updated_at
+            "#,
+        )
+        .bind(input.org_id)
+        .bind(input.user_id)
+        .bind(org_role_to_str(input.role))
+        .bind(member_state_to_str(input.state))
+        .fetch_one(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        org_member_from_row(row)
+    }
+
+    pub async fn list_org_members(
+        &self,
+        org_id: OrgId,
+    ) -> Result<Vec<OrgMemberRecord>, StorageError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT org_id, user_id, role, state, created_at, updated_at
+            FROM org_members
+            WHERE org_id = $1
+            ORDER BY created_at ASC
+            "#,
+        )
+        .bind(org_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter().map(org_member_from_row).collect()
+    }
+
+    pub async fn find_org_member(
+        &self,
+        org_id: OrgId,
+        user_id: UserId,
+    ) -> Result<OrgMemberRecord, StorageError> {
+        let row = sqlx::query(
+            r#"
+            SELECT org_id, user_id, role, state, created_at, updated_at
+            FROM org_members
+            WHERE org_id = $1 AND user_id = $2
+            "#,
+        )
+        .bind(org_id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+
+        org_member_from_row(row)
     }
 
     pub async fn upsert_vault_member(
@@ -263,9 +421,9 @@ impl Storage {
         let id = input.id.unwrap_or_else(Uuid::new_v4);
         let row = sqlx::query(
             r#"
-            INSERT INTO vault_key_wrappings (id, vault_id, user_id, device_id, wrapping_type, envelope)
-            VALUES ($1, $2, $3, $4, $5, $6)
-            RETURNING id, vault_id, user_id, device_id, wrapping_type, envelope, created_at, rotated_at, revoked_at
+            INSERT INTO vault_key_wrappings (id, vault_id, user_id, device_id, wrapping_type, envelope, key_generation)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            RETURNING id, vault_id, user_id, device_id, wrapping_type, envelope, key_generation, created_at, rotated_at, revoked_at
             "#,
         )
         .bind(id)
@@ -274,6 +432,7 @@ impl Storage {
         .bind(input.device_id)
         .bind(input.wrapping_type)
         .bind(input.envelope)
+        .bind(input.key_generation)
         .fetch_one(&self.pool)
         .await
         .map_err(map_sqlx_error)?;
@@ -288,7 +447,7 @@ impl Storage {
     ) -> Result<Vec<VaultKeyWrappingRecord>, StorageError> {
         let rows = sqlx::query(
             r#"
-            SELECT id, vault_id, user_id, device_id, wrapping_type, envelope, created_at, rotated_at, revoked_at
+            SELECT id, vault_id, user_id, device_id, wrapping_type, envelope, key_generation, created_at, rotated_at, revoked_at
             FROM vault_key_wrappings
             WHERE user_id = $1 AND vault_id = $2 AND revoked_at IS NULL
             ORDER BY created_at ASC
@@ -300,6 +459,52 @@ impl Storage {
         .await?;
 
         rows.into_iter().map(vault_key_wrapping_from_row).collect()
+    }
+
+    pub async fn remove_vault_member(
+        &self,
+        vault_id: VaultId,
+        user_id: UserId,
+    ) -> Result<(), StorageError> {
+        let mut tx = self.pool.begin().await?;
+
+        let member_result = sqlx::query(
+            r#"
+            UPDATE vault_members
+            SET state = 'removed', updated_at = now()
+            WHERE vault_id = $1 AND user_id = $2
+            "#,
+        )
+        .bind(vault_id)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+
+        if member_result.rows_affected() == 0 {
+            return Err(StorageError::NotFound);
+        }
+
+        sqlx::query(
+            r#"
+            UPDATE vault_key_wrappings
+            SET revoked_at = now()
+            WHERE vault_id = $1 AND user_id = $2 AND revoked_at IS NULL
+            "#,
+        )
+        .bind(vault_id)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "UPDATE vaults SET needs_key_rotation = true, updated_at = now() WHERE id = $1",
+        )
+        .bind(vault_id)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(())
     }
 
     pub async fn revoke_key_wrapping(&self, wrapping_id: Uuid) -> Result<(), StorageError> {
@@ -348,9 +553,9 @@ impl Storage {
 
         let row = sqlx::query(
             r#"
-            INSERT INTO item_revisions (id, item_id, vault_id, revision, vault_revision, author_user_id, envelope)
-            VALUES ($1, $2, $3, 1, $4, $5, $6)
-            RETURNING id, item_id, vault_id, revision, vault_revision, author_user_id, envelope, created_at
+            INSERT INTO item_revisions (id, item_id, vault_id, revision, vault_revision, author_user_id, envelope, key_generation)
+            VALUES ($1, $2, $3, 1, $4, $5, $6, (SELECT current_key_generation FROM vaults WHERE id = $3))
+            RETURNING id, item_id, vault_id, revision, vault_revision, key_generation, author_user_id, envelope, created_at
             "#,
         )
         .bind(revision_id)
@@ -414,9 +619,9 @@ impl Storage {
 
         let row = sqlx::query(
             r#"
-            INSERT INTO item_revisions (id, item_id, vault_id, revision, vault_revision, author_user_id, envelope)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
-            RETURNING id, item_id, vault_id, revision, vault_revision, author_user_id, envelope, created_at
+            INSERT INTO item_revisions (id, item_id, vault_id, revision, vault_revision, author_user_id, envelope, key_generation)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, (SELECT current_key_generation FROM vaults WHERE id = $3))
+            RETURNING id, item_id, vault_id, revision, vault_revision, key_generation, author_user_id, envelope, created_at
             "#,
         )
         .bind(revision_id)
@@ -441,7 +646,7 @@ impl Storage {
     ) -> Result<Vec<ItemRevisionRecord>, StorageError> {
         let rows = sqlx::query(
             r#"
-            SELECT id, item_id, vault_id, revision, vault_revision, author_user_id, envelope, created_at
+            SELECT id, item_id, vault_id, revision, vault_revision, key_generation, author_user_id, envelope, created_at
             FROM item_revisions
             WHERE vault_id = $1 AND vault_revision > $2
             ORDER BY vault_revision ASC
@@ -453,6 +658,152 @@ impl Storage {
         .await?;
 
         rows.into_iter().map(item_revision_from_row).collect()
+    }
+
+    pub async fn rotation_status(
+        &self,
+        vault_id: VaultId,
+    ) -> Result<RotationStatusRecord, StorageError> {
+        let row = sqlx::query(
+            r#"
+            SELECT id, current_key_generation, needs_key_rotation
+            FROM vaults
+            WHERE id = $1
+            "#,
+        )
+        .bind(vault_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+
+        Ok(RotationStatusRecord {
+            vault_id: row.try_get("id")?,
+            current_key_generation: row.try_get("current_key_generation")?,
+            needs_key_rotation: row.try_get("needs_key_rotation")?,
+        })
+    }
+
+    pub async fn finish_vault_key_rotation(
+        &self,
+        input: FinishVaultKeyRotation,
+    ) -> Result<RotationStatusRecord, StorageError> {
+        if input.to_generation != input.from_generation + 1 {
+            return Err(StorageError::Conflict);
+        }
+
+        let mut tx = self.pool.begin().await?;
+        let current_generation: i64 =
+            sqlx::query_scalar("SELECT current_key_generation FROM vaults WHERE id = $1")
+                .bind(input.vault_id)
+                .fetch_optional(&mut *tx)
+                .await?
+                .ok_or(StorageError::NotFound)?;
+
+        if current_generation != input.from_generation {
+            return Err(StorageError::Conflict);
+        }
+
+        sqlx::query(
+            r#"
+            UPDATE vault_key_wrappings
+            SET revoked_at = now(), rotated_at = now()
+            WHERE vault_id = $1 AND revoked_at IS NULL
+            "#,
+        )
+        .bind(input.vault_id)
+        .execute(&mut *tx)
+        .await?;
+
+        for wrapping in input.new_wrappings {
+            sqlx::query(
+                r#"
+                INSERT INTO vault_key_wrappings (id, vault_id, user_id, device_id, wrapping_type, envelope, key_generation)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                "#,
+            )
+            .bind(wrapping.id.unwrap_or_else(Uuid::new_v4))
+            .bind(input.vault_id)
+            .bind(wrapping.user_id)
+            .bind(wrapping.device_id)
+            .bind(wrapping.wrapping_type)
+            .bind(wrapping.envelope)
+            .bind(input.to_generation)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        }
+
+        for revision in input.reencrypted_revisions {
+            let current_revision: i64 = sqlx::query_scalar(
+                "SELECT current_revision FROM items WHERE id = $1 AND vault_id = $2",
+            )
+            .bind(revision.item_id)
+            .bind(input.vault_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or(StorageError::NotFound)?;
+
+            if current_revision != revision.expected_revision {
+                return Err(StorageError::Conflict);
+            }
+
+            let next_revision = current_revision + 1;
+            let vault_revision: i64 = sqlx::query_scalar(
+                r#"
+                UPDATE vaults
+                SET vault_revision = vault_revision + 1, updated_at = now()
+                WHERE id = $1
+                RETURNING vault_revision
+                "#,
+            )
+            .bind(input.vault_id)
+            .fetch_one(&mut *tx)
+            .await?;
+
+            sqlx::query("UPDATE items SET current_revision = $1, updated_at = now() WHERE id = $2")
+                .bind(next_revision)
+                .bind(revision.item_id)
+                .execute(&mut *tx)
+                .await?;
+
+            sqlx::query(
+                r#"
+                INSERT INTO item_revisions (id, item_id, vault_id, revision, vault_revision, author_user_id, envelope, key_generation)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                "#,
+            )
+            .bind(revision.revision_id.unwrap_or_else(Uuid::new_v4))
+            .bind(revision.item_id)
+            .bind(input.vault_id)
+            .bind(next_revision)
+            .bind(vault_revision)
+            .bind(input.author_user_id)
+            .bind(revision.envelope)
+            .bind(input.to_generation)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        }
+
+        let row = sqlx::query(
+            r#"
+            UPDATE vaults
+            SET current_key_generation = $2, needs_key_rotation = false, updated_at = now()
+            WHERE id = $1
+            RETURNING id, current_key_generation, needs_key_rotation
+            "#,
+        )
+        .bind(input.vault_id)
+        .bind(input.to_generation)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(RotationStatusRecord {
+            vault_id: row.try_get("id")?,
+            current_key_generation: row.try_get("current_key_generation")?,
+            needs_key_rotation: row.try_get("needs_key_rotation")?,
+        })
     }
 
     pub async fn append_audit_log(
@@ -480,6 +831,49 @@ impl Storage {
 
         audit_log_from_row(row)
     }
+
+    pub async fn create_session(
+        &self,
+        input: CreateSession,
+    ) -> Result<SessionRecord, StorageError> {
+        let id = input.id.unwrap_or_else(Uuid::new_v4);
+        let row = sqlx::query(
+            r#"
+            INSERT INTO sessions (id, user_id, device_id, token_hash, expires_at)
+            VALUES ($1, $2, $3, $4, $5)
+            RETURNING id, user_id, device_id, token_hash, created_at, expires_at, revoked_at
+            "#,
+        )
+        .bind(id)
+        .bind(input.user_id)
+        .bind(input.device_id)
+        .bind(input.token_hash)
+        .bind(input.expires_at)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        session_from_row(row)
+    }
+
+    pub async fn find_active_session_by_hash(
+        &self,
+        token_hash: &str,
+    ) -> Result<SessionRecord, StorageError> {
+        let row = sqlx::query(
+            r#"
+            SELECT id, user_id, device_id, token_hash, created_at, expires_at, revoked_at
+            FROM sessions
+            WHERE token_hash = $1 AND revoked_at IS NULL AND expires_at > now()
+            "#,
+        )
+        .bind(token_hash)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+
+        session_from_row(row)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -501,6 +895,22 @@ pub struct UserRecord {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub disabled_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpsertUserAuth {
+    pub user_id: UserId,
+    pub auth_method: String,
+    pub auth_data: Value,
+}
+
+#[derive(Debug, Clone)]
+pub struct UserAuthRecord {
+    pub user_id: UserId,
+    pub auth_method: String,
+    pub auth_data: Value,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone)]
@@ -543,11 +953,48 @@ pub struct VaultRecord {
     pub name: String,
     pub kind: VaultKind,
     pub vault_revision: RevisionId,
+    pub current_key_generation: RevisionId,
+    pub needs_key_rotation: bool,
     pub created_by: Option<UserId>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub deleted_at: Option<DateTime<Utc>>,
     pub crypto_policy: Value,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateOrg {
+    pub id: Option<OrgId>,
+    pub name: String,
+    pub created_by: Option<UserId>,
+}
+
+#[derive(Debug, Clone)]
+pub struct OrgRecord {
+    pub id: OrgId,
+    pub name: String,
+    pub created_by: Option<UserId>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub deleted_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpsertOrgMember {
+    pub org_id: OrgId,
+    pub user_id: UserId,
+    pub role: OrgRole,
+    pub state: MemberState,
+}
+
+#[derive(Debug, Clone)]
+pub struct OrgMemberRecord {
+    pub org_id: OrgId,
+    pub user_id: UserId,
+    pub role: OrgRole,
+    pub state: MemberState,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone)]
@@ -576,6 +1023,7 @@ pub struct CreateVaultKeyWrapping {
     pub device_id: Option<DeviceId>,
     pub wrapping_type: String,
     pub envelope: Value,
+    pub key_generation: RevisionId,
 }
 
 #[derive(Debug, Clone)]
@@ -586,6 +1034,7 @@ pub struct VaultKeyWrappingRecord {
     pub device_id: Option<DeviceId>,
     pub wrapping_type: String,
     pub envelope: Value,
+    pub key_generation: RevisionId,
     pub created_at: DateTime<Utc>,
     pub rotated_at: Option<DateTime<Utc>>,
     pub revoked_at: Option<DateTime<Utc>>,
@@ -618,9 +1067,35 @@ pub struct ItemRevisionRecord {
     pub vault_id: VaultId,
     pub revision: RevisionId,
     pub vault_revision: RevisionId,
+    pub key_generation: RevisionId,
     pub author_user_id: Option<UserId>,
     pub envelope: Value,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RotationStatusRecord {
+    pub vault_id: VaultId,
+    pub current_key_generation: RevisionId,
+    pub needs_key_rotation: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct FinishVaultKeyRotation {
+    pub vault_id: VaultId,
+    pub author_user_id: Option<UserId>,
+    pub from_generation: RevisionId,
+    pub to_generation: RevisionId,
+    pub new_wrappings: Vec<CreateVaultKeyWrapping>,
+    pub reencrypted_revisions: Vec<RotationItemRevisionInput>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RotationItemRevisionInput {
+    pub revision_id: Option<Uuid>,
+    pub item_id: ItemId,
+    pub expected_revision: RevisionId,
+    pub envelope: Value,
 }
 
 #[derive(Debug, Clone)]
@@ -644,6 +1119,26 @@ pub struct AuditLogRecord {
     pub target_id: Option<Uuid>,
     pub metadata: Value,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateSession {
+    pub id: Option<Uuid>,
+    pub user_id: UserId,
+    pub device_id: Option<DeviceId>,
+    pub token_hash: String,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionRecord {
+    pub id: Uuid,
+    pub user_id: UserId,
+    pub device_id: Option<DeviceId>,
+    pub token_hash: String,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub revoked_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -690,6 +1185,16 @@ fn user_from_row(row: sqlx::postgres::PgRow) -> Result<UserRecord, StorageError>
     })
 }
 
+fn user_auth_from_row(row: sqlx::postgres::PgRow) -> Result<UserAuthRecord, StorageError> {
+    Ok(UserAuthRecord {
+        user_id: row.try_get("user_id")?,
+        auth_method: row.try_get("auth_method")?,
+        auth_data: row.try_get("auth_data")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
 fn device_from_row(row: sqlx::postgres::PgRow) -> Result<DeviceRecord, StorageError> {
     Ok(DeviceRecord {
         id: row.try_get("id")?,
@@ -712,11 +1217,37 @@ fn vault_from_row(row: sqlx::postgres::PgRow) -> Result<VaultRecord, StorageErro
         name: row.try_get("name")?,
         kind: str_to_vault_kind(&kind)?,
         vault_revision: row.try_get("vault_revision")?,
+        current_key_generation: row.try_get("current_key_generation")?,
+        needs_key_rotation: row.try_get("needs_key_rotation")?,
         created_by: row.try_get("created_by")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
         deleted_at: row.try_get("deleted_at")?,
         crypto_policy: row.try_get("crypto_policy")?,
+    })
+}
+
+fn org_from_row(row: sqlx::postgres::PgRow) -> Result<OrgRecord, StorageError> {
+    Ok(OrgRecord {
+        id: row.try_get("id")?,
+        name: row.try_get("name")?,
+        created_by: row.try_get("created_by")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+        deleted_at: row.try_get("deleted_at")?,
+    })
+}
+
+fn org_member_from_row(row: sqlx::postgres::PgRow) -> Result<OrgMemberRecord, StorageError> {
+    let role: String = row.try_get("role")?;
+    let state: String = row.try_get("state")?;
+    Ok(OrgMemberRecord {
+        org_id: row.try_get("org_id")?,
+        user_id: row.try_get("user_id")?,
+        role: str_to_org_role(&role)?,
+        state: str_to_member_state(&state)?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
     })
 }
 
@@ -743,6 +1274,7 @@ fn vault_key_wrapping_from_row(
         device_id: row.try_get("device_id")?,
         wrapping_type: row.try_get("wrapping_type")?,
         envelope: row.try_get("envelope")?,
+        key_generation: row.try_get("key_generation")?,
         created_at: row.try_get("created_at")?,
         rotated_at: row.try_get("rotated_at")?,
         revoked_at: row.try_get("revoked_at")?,
@@ -756,6 +1288,7 @@ fn item_revision_from_row(row: sqlx::postgres::PgRow) -> Result<ItemRevisionReco
         vault_id: row.try_get("vault_id")?,
         revision: row.try_get("revision")?,
         vault_revision: row.try_get("vault_revision")?,
+        key_generation: row.try_get("key_generation")?,
         author_user_id: row.try_get("author_user_id")?,
         envelope: row.try_get("envelope")?,
         created_at: row.try_get("created_at")?,
@@ -775,12 +1308,44 @@ fn audit_log_from_row(row: sqlx::postgres::PgRow) -> Result<AuditLogRecord, Stor
     })
 }
 
+fn session_from_row(row: sqlx::postgres::PgRow) -> Result<SessionRecord, StorageError> {
+    Ok(SessionRecord {
+        id: row.try_get("id")?,
+        user_id: row.try_get("user_id")?,
+        device_id: row.try_get("device_id")?,
+        token_hash: row.try_get("token_hash")?,
+        created_at: row.try_get("created_at")?,
+        expires_at: row.try_get("expires_at")?,
+        revoked_at: row.try_get("revoked_at")?,
+    })
+}
+
 fn vault_kind_to_str(kind: VaultKind) -> &'static str {
     match kind {
         VaultKind::Personal => "personal",
         VaultKind::Shared => "shared",
         VaultKind::Project => "project",
         VaultKind::Org => "org",
+    }
+}
+
+fn org_role_to_str(role: OrgRole) -> &'static str {
+    match role {
+        OrgRole::Owner => "owner",
+        OrgRole::Admin => "admin",
+        OrgRole::Member => "member",
+    }
+}
+
+fn str_to_org_role(value: &str) -> Result<OrgRole, StorageError> {
+    match value {
+        "owner" => Ok(OrgRole::Owner),
+        "admin" => Ok(OrgRole::Admin),
+        "member" => Ok(OrgRole::Member),
+        value => Err(StorageError::InvalidDatabaseValue {
+            field: "org_members.role",
+            value: value.to_owned(),
+        }),
     }
 }
 
