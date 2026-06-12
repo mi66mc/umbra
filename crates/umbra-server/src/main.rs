@@ -64,6 +64,10 @@ enum Command {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+    Opaque {
+        #[command(subcommand)]
+        command: OpaqueCommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -76,12 +80,26 @@ enum ConfigCommand {
     Print,
 }
 
+#[derive(Subcommand)]
+enum OpaqueCommand {
+    Setup {
+        #[command(subcommand)]
+        command: OpaqueSetupCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum OpaqueSetupCommand {
+    Generate,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AppConfig {
     server: ServerSettings,
     database: DatabaseSettings,
     migrations: MigrationSettings,
     security: SecuritySettings,
+    auth: AuthSettings,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,6 +125,17 @@ struct SecuritySettings {
     session_ttl_minutes: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AuthSettings {
+    opaque: OpaqueSettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OpaqueSettings {
+    server_setup: Option<String>,
+    allow_ephemeral_setup: bool,
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -124,6 +153,12 @@ impl Default for AppConfig {
             },
             security: SecuritySettings {
                 session_ttl_minutes: 60,
+            },
+            auth: AuthSettings {
+                opaque: OpaqueSettings {
+                    server_setup: None,
+                    allow_ephemeral_setup: false,
+                },
             },
         }
     }
@@ -172,6 +207,15 @@ async fn main() -> Result<(), ServerError> {
             println!("{}", serde_json::to_string_pretty(&config)?);
             Ok(())
         }
+        Command::Opaque {
+            command:
+                OpaqueCommand::Setup {
+                    command: OpaqueSetupCommand::Generate,
+                },
+        } => {
+            println!("{}", generate_opaque_server_setup_secret());
+            Ok(())
+        }
     }
 }
 
@@ -192,6 +236,10 @@ fn load_config(path: Option<&str>) -> Result<AppConfig, ServerError> {
         .set_default(
             "security.session_ttl_minutes",
             defaults.security.session_ttl_minutes,
+        )?
+        .set_default(
+            "auth.opaque.allow_ephemeral_setup",
+            defaults.auth.opaque.allow_ephemeral_setup,
         )?;
 
     if let Some(path) = path {
@@ -227,14 +275,19 @@ async fn serve(config: AppConfig) -> Result<(), ServerError> {
         return Err(ServerError::MigrationsPending);
     }
 
+    let opaque_setup = opaque_server_setup_from_config(&config)?;
     let state = AppState {
         config: config.clone(),
         storage,
-        opaque_server_setup: Arc::new(ServerSetup::<OpaqueCipherSuite>::new(&mut OsRng)),
+        opaque_server_setup: Arc::new(opaque_setup),
         pending_logins: Arc::new(Mutex::new(HashMap::new())),
     };
 
-    warn!("OPAQUE server setup is generated at startup; configure persistence before production");
+    if config.auth.opaque.server_setup.is_none() {
+        warn!(
+            "OPAQUE server setup is ephemeral; configure auth.opaque.server_setup before production"
+        );
+    }
 
     let app = router(state);
     let addr: SocketAddr = config
@@ -308,7 +361,13 @@ async fn doctor(config: AppConfig) -> Result<(), ServerError> {
         "migrations: {:?}",
         umbra_migrations::status(storage.pool()).await?
     );
-    println!("opaque_server_setup: ephemeral startup setup; not production-ready");
+    if config.auth.opaque.server_setup.is_some() {
+        println!("opaque_server_setup: persistent");
+    } else if config.auth.opaque.allow_ephemeral_setup {
+        println!("opaque_server_setup: ephemeral");
+    } else {
+        println!("opaque_server_setup: missing");
+    }
     println!("tls/reverse_proxy: verify externally");
     Ok(())
 }
@@ -897,6 +956,33 @@ fn random_token() -> String {
     encode_b64(&bytes)
 }
 
+fn generate_opaque_server_setup_secret() -> String {
+    let setup = ServerSetup::<OpaqueCipherSuite>::new(&mut OsRng);
+    encode_b64(setup.serialize().as_slice())
+}
+
+fn opaque_server_setup_from_config(
+    config: &AppConfig,
+) -> Result<ServerSetup<OpaqueCipherSuite>, ServerError> {
+    if let Some(secret) = &config.auth.opaque.server_setup {
+        return opaque_server_setup_from_secret(secret);
+    }
+
+    if config.auth.opaque.allow_ephemeral_setup {
+        return Ok(ServerSetup::<OpaqueCipherSuite>::new(&mut OsRng));
+    }
+
+    Err(ServerError::MissingOpaqueServerSetup)
+}
+
+fn opaque_server_setup_from_secret(
+    secret: &str,
+) -> Result<ServerSetup<OpaqueCipherSuite>, ServerError> {
+    let bytes = decode_b64(secret)?;
+    ServerSetup::<OpaqueCipherSuite>::deserialize(&bytes)
+        .map_err(|_| ServerError::BadRequest("invalid opaque server setup"))
+}
+
 #[derive(Debug, thiserror::Error)]
 enum ServerError {
     #[error("config error: {0}")]
@@ -915,6 +1001,8 @@ enum ServerError {
     Serve(#[from] axum::Error),
     #[error("invalid bind address {0}")]
     InvalidBindAddress(String),
+    #[error("missing opaque server setup")]
+    MissingOpaqueServerSetup,
     #[error("migrations pending")]
     MigrationsPending,
     #[error("unauthorized")]
@@ -938,5 +1026,256 @@ impl IntoResponse for ServerError {
         };
         let body = Json(json!({ "error": self.to_string() }));
         (status, body).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Method, Request, header},
+    };
+    use opaque_ke::{
+        ClientLogin, ClientLoginFinishParameters, ClientRegistration,
+        ClientRegistrationFinishParameters, CredentialResponse, RegistrationResponse,
+    };
+    use serial_test::serial;
+    use tower::ServiceExt;
+    use umbra_protocol::{DeviceRegisterRequest, RegisterResponse};
+
+    #[test]
+    fn opaque_setup_secret_roundtrips() {
+        let secret = generate_opaque_server_setup_secret();
+        let setup = opaque_server_setup_from_secret(&secret).expect("generated secret is valid");
+        let encoded = encode_b64(setup.serialize().as_slice());
+
+        assert_eq!(secret, encoded);
+    }
+
+    #[test]
+    fn production_config_requires_persistent_opaque_setup() {
+        let config = AppConfig::default();
+
+        let err = opaque_server_setup_from_config(&config).unwrap_err();
+
+        assert!(matches!(err, ServerError::MissingOpaqueServerSetup));
+    }
+
+    #[test]
+    fn dev_config_can_use_ephemeral_opaque_setup_when_explicitly_allowed() {
+        let mut config = AppConfig::default();
+        config.auth.opaque.allow_ephemeral_setup = true;
+
+        opaque_server_setup_from_config(&config).expect("dev ephemeral setup is allowed");
+    }
+
+    #[tokio::test]
+    async fn health_responds_without_database_query() {
+        let response = health().await.into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    #[serial(postgres)]
+    async fn opaque_login_token_can_create_org_and_personal_vault() {
+        let storage = fresh_test_storage().await;
+        let app = router(test_state_with_storage(storage));
+        let email = "miguel@example.com";
+        let password = b"correct horse battery staple";
+
+        let token = register_and_login(app.clone(), email, password).await;
+
+        let (status, org): (StatusCode, OrgResponse) = json_request(
+            app.clone(),
+            Method::POST,
+            "/api/v1/orgs",
+            Some(&token),
+            &CreateOrgRequest {
+                protocol_version: PROTOCOL_VERSION,
+                name: "BlackWire".to_owned(),
+            },
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(org.name, "BlackWire");
+
+        let (status, vault): (StatusCode, VaultResponse) = json_request(
+            app,
+            Method::POST,
+            "/api/v1/vaults",
+            Some(&token),
+            &CreateVaultRequest {
+                protocol_version: PROTOCOL_VERSION,
+                name: "Personal".to_owned(),
+                kind: VaultKind::Personal,
+                initial_key_wrapping: json!({"wrapped": true}),
+            },
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(vault.org_id, None);
+        assert_eq!(vault.current_key_generation, 1);
+    }
+
+    async fn register_and_login(app: Router, email: &str, password: &[u8]) -> String {
+        let registration_start =
+            ClientRegistration::<OpaqueCipherSuite>::start(&mut OsRng, password).unwrap();
+        let (status, start_response): (StatusCode, OpaqueRegisterStartResponse) = json_request(
+            app.clone(),
+            Method::POST,
+            "/api/v1/auth/register/start",
+            None,
+            &OpaqueRegisterStartRequest {
+                protocol_version: PROTOCOL_VERSION,
+                email: email.to_owned(),
+                registration_request: encode_b64(registration_start.message.serialize().as_slice()),
+            },
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let registration_response = RegistrationResponse::<OpaqueCipherSuite>::deserialize(
+            &decode_b64(&start_response.registration_response).unwrap(),
+        )
+        .unwrap();
+        let registration_finish = registration_start
+            .state
+            .finish(
+                &mut OsRng,
+                password,
+                registration_response,
+                ClientRegistrationFinishParameters::default(),
+            )
+            .unwrap();
+        let (status, _register): (StatusCode, RegisterResponse) = json_request(
+            app.clone(),
+            Method::POST,
+            "/api/v1/auth/register/finish",
+            None,
+            &OpaqueRegisterFinishRequest {
+                protocol_version: PROTOCOL_VERSION,
+                registration_id: start_response.registration_id,
+                email: email.to_owned(),
+                display_name: Some("Miguel".to_owned()),
+                public_key: "user-public-key".to_owned(),
+                encrypted_private_key: json!({"ciphertext": "private"}),
+                initial_device: DeviceRegisterRequest {
+                    name: "dev laptop".to_owned(),
+                    public_key: "device-public-key".to_owned(),
+                    fingerprint: "device-fingerprint".to_owned(),
+                },
+                registration_upload: encode_b64(registration_finish.message.serialize().as_slice()),
+            },
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let login_start = ClientLogin::<OpaqueCipherSuite>::start(&mut OsRng, password).unwrap();
+        let (status, login_response): (StatusCode, OpaqueLoginStartResponse) = json_request(
+            app.clone(),
+            Method::POST,
+            "/api/v1/auth/login/start",
+            None,
+            &OpaqueLoginStartRequest {
+                protocol_version: PROTOCOL_VERSION,
+                email: email.to_owned(),
+                credential_request: encode_b64(login_start.message.serialize().as_slice()),
+            },
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let credential_response = CredentialResponse::<OpaqueCipherSuite>::deserialize(
+            &decode_b64(&login_response.credential_response).unwrap(),
+        )
+        .unwrap();
+        let login_finish = login_start
+            .state
+            .finish(
+                &mut OsRng,
+                password,
+                credential_response,
+                ClientLoginFinishParameters::default(),
+            )
+            .unwrap();
+        let (status, finish): (StatusCode, OpaqueLoginFinishResponse) = json_request(
+            app,
+            Method::POST,
+            "/api/v1/auth/login/finish",
+            None,
+            &OpaqueLoginFinishRequest {
+                protocol_version: PROTOCOL_VERSION,
+                login_id: login_response.login_id,
+                credential_finalization: encode_b64(login_finish.message.serialize().as_slice()),
+            },
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        finish.session_token
+    }
+
+    async fn json_request<T, R>(
+        app: Router,
+        method: Method,
+        uri: &str,
+        token: Option<&str>,
+        body: &T,
+    ) -> (StatusCode, R)
+    where
+        T: Serialize,
+        R: for<'de> Deserialize<'de>,
+    {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(token) = token {
+            builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+        }
+        let response = app
+            .oneshot(
+                builder
+                    .body(Body::from(serde_json::to_vec(body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (status, serde_json::from_slice(&body).unwrap())
+    }
+
+    fn test_state_with_storage(storage: Storage) -> AppState {
+        let mut config = AppConfig::default();
+        config.auth.opaque.server_setup = Some(generate_opaque_server_setup_secret());
+        AppState {
+            opaque_server_setup: Arc::new(opaque_server_setup_from_config(&config).unwrap()),
+            config,
+            storage,
+            pending_logins: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    async fn test_storage_without_migrations() -> Storage {
+        let database_url = std::env::var("UMBRA_TEST_DATABASE_URL")
+            .expect("UMBRA_TEST_DATABASE_URL must point to a dedicated test database");
+        Storage::connect(&database_url).await.unwrap()
+    }
+
+    async fn fresh_test_storage() -> Storage {
+        let storage = test_storage_without_migrations().await;
+        sqlx::query("DROP SCHEMA public CASCADE")
+            .execute(storage.pool())
+            .await
+            .unwrap();
+        sqlx::query("CREATE SCHEMA public")
+            .execute(storage.pool())
+            .await
+            .unwrap();
+        umbra_migrations::run(storage.pool()).await.unwrap();
+        storage
     }
 }

@@ -34,3 +34,6 @@ umbra-migrations = { path = "../umbra-migrations" }
 umbra-protocol = { path = "../umbra-protocol" }
 umbra-storage = { path = "../umbra-storage" }
 uuid.workspace = true
+
+[dev-dependencies]
+serial_test.workspace = true
