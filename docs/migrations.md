@@ -61,6 +61,16 @@ Self-host/dev may opt in:
 auto_migrate = true
 ```
 
+## Test Database
+
+Integration tests use a separate PostgreSQL database:
+
+```txt
+UMBRA_TEST_DATABASE_URL=postgres://umbra:umbra@localhost:5432/umbra_test
+```
+
+`docker compose up -d postgres` creates both `umbra` and `umbra_test` on a fresh volume. If the Postgres volume already existed before this setup, create `umbra_test` manually or recreate the volume.
+
 ## Crypto Migrations
 
 Crypto migrations are client-side because they require plaintext keys or items:

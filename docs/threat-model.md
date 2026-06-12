@@ -31,5 +31,7 @@
 - Audit log without secrets.
 - Vault key rotation after member removal.
 - KDF policy and calibration.
-- Future OPAQUE/WebAuthn/passkeys.
+- OPAQUE server setup secret kept outside PostgreSQL.
+- OPAQUE for password authentication.
+- Future WebAuthn/passkeys.
 - Future signed builds.

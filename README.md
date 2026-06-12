@@ -17,8 +17,22 @@ The server stores users, devices, vault metadata, memberships, encrypted envelop
 ## Development
 
 ```bash
+docker compose up -d postgres
+$env:UMBRA_TEST_DATABASE_URL="postgres://umbra:umbra@localhost:5432/umbra_test"
 cargo test
 cargo build
 cargo run -p umbra-cli
 cargo run -p umbra-server
+```
+
+Generate a persistent OPAQUE server setup secret before running a non-dev server:
+
+```bash
+cargo run -p umbra-server -- opaque setup generate
+```
+
+Set it as:
+
+```txt
+UMBRA__AUTH__OPAQUE__SERVER_SETUP=<generated-secret>
 ```

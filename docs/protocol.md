@@ -81,7 +81,13 @@ Login:
 4. server creates a bearer session token
 ```
 
-The current server setup key is generated at process startup. That is acceptable for local development only; production must persist or configure server setup material before OPAQUE sessions are durable across restarts.
+The OPAQUE server setup must be persistent outside PostgreSQL. Generate it with:
+
+```bash
+umbra-server opaque setup generate
+```
+
+Then inject it as `UMBRA__AUTH__OPAQUE__SERVER_SETUP` or `auth.opaque.server_setup` in config. Development may opt into ephemeral setup with `UMBRA__AUTH__OPAQUE__ALLOW_EPHEMERAL_SETUP=true`, but production should fail closed when the persistent setup is missing.
 
 ## Vault Grants
 

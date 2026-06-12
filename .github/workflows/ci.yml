@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: umbra
+          POSTGRES_PASSWORD: umbra
+          POSTGRES_DB: umbra
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U umbra -d umbra"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      UMBRA_TEST_DATABASE_URL: postgres://umbra:umbra@localhost:5432/umbra_test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.85.0
+          components: rustfmt, clippy
+
+      - name: Install PostgreSQL client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+
+      - name: Create test database
+        run: |
+          PGPASSWORD=umbra psql -h localhost -U umbra -d umbra -c "CREATE DATABASE umbra_test;"
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Test
+        run: cargo test --all
+
+      - name: Build
+        run: cargo build
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
