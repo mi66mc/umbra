@@ -18,4 +18,5 @@ umbra-core = { path = "../umbra-core" }
 uuid.workspace = true
 
 [dev-dependencies]
+serial_test.workspace = true
 umbra-migrations = { path = "../umbra-migrations" }
