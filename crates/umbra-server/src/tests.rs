@@ -15,12 +15,14 @@ use serial_test::serial;
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::Mutex;
 use tower::ServiceExt;
-use umbra_core::VaultKind;
+use umbra_core::{VaultKind, VaultRole};
 use umbra_protocol::{
-    CreateOrgRequest, CreateVaultRequest, DeviceRegisterRequest, OpaqueLoginFinishRequest,
+    AddVaultMemberRequest, CreateItemRequest, CreateOrgRequest, CreateVaultRequest,
+    DeviceRegisterRequest, ItemRevisionResponse, OpaqueLoginFinishRequest,
     OpaqueLoginFinishResponse, OpaqueLoginStartRequest, OpaqueLoginStartResponse,
     OpaqueRegisterFinishRequest, OpaqueRegisterStartRequest, OpaqueRegisterStartResponse,
-    OrgResponse, PROTOCOL_VERSION, RegisterResponse, VaultResponse,
+    OrgResponse, PROTOCOL_VERSION, RegisterResponse, SyncRequest, SyncResponse, UpdateItemRequest,
+    VaultResponse, VaultSyncCursor,
 };
 use umbra_storage::Storage;
 
@@ -108,6 +110,158 @@ async fn opaque_login_token_can_create_org_and_personal_vault() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(vault.org_id, None);
     assert_eq!(vault.current_key_generation, 1);
+}
+
+#[tokio::test]
+#[serial(postgres)]
+async fn viewer_cannot_create_item() {
+    let Some(storage) = fresh_test_storage().await else {
+        return;
+    };
+    let app = router(test_state_with_storage(storage));
+
+    let owner_token = register_and_login(app.clone(), "owner@example.com", b"owner password").await;
+    let viewer_token =
+        register_and_login(app.clone(), "viewer@example.com", b"viewer password").await;
+
+    let (_status, owner_vault): (StatusCode, VaultResponse) = json_request(
+        app.clone(),
+        Method::POST,
+        "/api/v1/vaults",
+        Some(&owner_token),
+        &CreateVaultRequest {
+            protocol_version: PROTOCOL_VERSION,
+            name: "Shared".to_owned(),
+            kind: VaultKind::Shared,
+            initial_key_wrapping: json!({"owner": true}),
+        },
+    )
+    .await;
+
+    let viewer_user_id = login_user_id(app.clone(), "viewer@example.com", b"viewer password").await;
+    let (status, _body): (StatusCode, serde_json::Value) = json_request(
+        app.clone(),
+        Method::POST,
+        &format!("/api/v1/vaults/{}/members", owner_vault.vault_id),
+        Some(&owner_token),
+        &AddVaultMemberRequest {
+            protocol_version: PROTOCOL_VERSION,
+            user_id: viewer_user_id,
+            role: VaultRole::Viewer,
+            vault_key_wrapping: json!({"viewer": true}),
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _body): (StatusCode, serde_json::Value) = json_request(
+        app,
+        Method::POST,
+        &format!("/api/v1/vaults/{}/items", owner_vault.vault_id),
+        Some(&viewer_token),
+        &CreateItemRequest {
+            protocol_version: PROTOCOL_VERSION,
+            vault_id: owner_vault.vault_id,
+            kind: umbra_core::ItemKind::ApiKey,
+            envelope: json!({"ciphertext": "viewer-write"}),
+        },
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+#[serial(postgres)]
+async fn owner_can_create_update_and_sync_item_revisions() {
+    let Some(storage) = fresh_test_storage().await else {
+        return;
+    };
+    let app = router(test_state_with_storage(storage));
+    let token = register_and_login(app.clone(), "items@example.com", b"items password").await;
+
+    let (_status, vault): (StatusCode, VaultResponse) = json_request(
+        app.clone(),
+        Method::POST,
+        "/api/v1/vaults",
+        Some(&token),
+        &CreateVaultRequest {
+            protocol_version: PROTOCOL_VERSION,
+            name: "Personal".to_owned(),
+            kind: VaultKind::Personal,
+            initial_key_wrapping: json!({"wrapped": true}),
+        },
+    )
+    .await;
+
+    let (status, created): (StatusCode, ItemRevisionResponse) = json_request(
+        app.clone(),
+        Method::POST,
+        &format!("/api/v1/vaults/{}/items", vault.vault_id),
+        Some(&token),
+        &CreateItemRequest {
+            protocol_version: PROTOCOL_VERSION,
+            vault_id: vault.vault_id,
+            kind: umbra_core::ItemKind::ApiKey,
+            envelope: json!({"ciphertext": "v1"}),
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(created.revision, 1);
+    assert_eq!(created.vault_revision, 1);
+
+    let (status, updated): (StatusCode, ItemRevisionResponse) = json_request(
+        app.clone(),
+        Method::PUT,
+        &format!(
+            "/api/v1/vaults/{}/items/{}",
+            vault.vault_id, created.item_id
+        ),
+        Some(&token),
+        &UpdateItemRequest {
+            protocol_version: PROTOCOL_VERSION,
+            vault_id: vault.vault_id,
+            item_id: created.item_id,
+            expected_revision: 1,
+            envelope: json!({"ciphertext": "v2"}),
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(updated.revision, 2);
+    assert_eq!(updated.vault_revision, 2);
+
+    let (status, sync): (StatusCode, SyncResponse) = json_request(
+        app,
+        Method::POST,
+        "/api/v1/sync",
+        Some(&token),
+        &SyncRequest {
+            protocol_version: PROTOCOL_VERSION,
+            device_id: uuid::Uuid::new_v4(),
+            vaults: vec![VaultSyncCursor {
+                vault_id: vault.vault_id,
+                since_vault_revision: 0,
+            }],
+        },
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(sync.protocol_version, PROTOCOL_VERSION);
+    assert_eq!(sync.vaults.len(), 1);
+    assert_eq!(sync.vaults[0].latest_vault_revision, 2);
+    assert_eq!(sync.vaults[0].items.len(), 2);
+    assert_eq!(
+        sync.vaults[0].items[0].envelope,
+        json!({"ciphertext": "v1"})
+    );
+    assert_eq!(
+        sync.vaults[0].items[1].envelope,
+        json!({"ciphertext": "v2"})
+    );
+    assert_eq!(sync.vaults[0].key_wrappings.len(), 1);
 }
 
 async fn register_and_login(app: Router, email: &str, password: &[u8]) -> String {
@@ -206,6 +360,52 @@ async fn register_and_login(app: Router, email: &str, password: &[u8]) -> String
     assert_eq!(status, StatusCode::OK);
 
     finish.session_token
+}
+
+async fn login_user_id(app: Router, email: &str, password: &[u8]) -> uuid::Uuid {
+    let login_start = ClientLogin::<OpaqueCipherSuite>::start(&mut OsRng, password).unwrap();
+    let (status, login_response): (StatusCode, OpaqueLoginStartResponse) = json_request(
+        app.clone(),
+        Method::POST,
+        "/api/v1/auth/login/start",
+        None,
+        &OpaqueLoginStartRequest {
+            protocol_version: PROTOCOL_VERSION,
+            email: email.to_owned(),
+            credential_request: encode_b64(login_start.message.serialize().as_slice()),
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let credential_response = CredentialResponse::<OpaqueCipherSuite>::deserialize(
+        &decode_b64(&login_response.credential_response).unwrap(),
+    )
+    .unwrap();
+    let login_finish = login_start
+        .state
+        .finish(
+            &mut OsRng,
+            password,
+            credential_response,
+            ClientLoginFinishParameters::default(),
+        )
+        .unwrap();
+    let (status, finish): (StatusCode, OpaqueLoginFinishResponse) = json_request(
+        app,
+        Method::POST,
+        "/api/v1/auth/login/finish",
+        None,
+        &OpaqueLoginFinishRequest {
+            protocol_version: PROTOCOL_VERSION,
+            login_id: login_response.login_id,
+            credential_finalization: encode_b64(login_finish.message.serialize().as_slice()),
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    finish.user_id
 }
 
 async fn json_request<T, R>(

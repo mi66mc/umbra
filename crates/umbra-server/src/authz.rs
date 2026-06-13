@@ -82,3 +82,23 @@ pub(crate) async fn ensure_vault_admin(
         Err(ServerError::Forbidden)
     }
 }
+
+pub(crate) async fn ensure_vault_writer(
+    state: &AppState,
+    vault_id: Uuid,
+    user_id: Uuid,
+) -> Result<(), ServerError> {
+    let members = state.storage.list_vault_members(vault_id).await?;
+    let Some(member) = members
+        .into_iter()
+        .find(|member| member.user_id == user_id && member.state == MemberState::Active)
+    else {
+        return Err(ServerError::Forbidden);
+    };
+
+    if member.role.can_write_items() {
+        Ok(())
+    } else {
+        Err(ServerError::Forbidden)
+    }
+}

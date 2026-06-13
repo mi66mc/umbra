@@ -15,22 +15,23 @@ use tower_http::trace::TraceLayer;
 use umbra_core::{MemberState, OrgRole, VaultKind, VaultRole};
 use umbra_migrations::MigrationStatus;
 use umbra_protocol::{
-    AddOrgMemberRequest, AddVaultMemberRequest, CreateOrgRequest, CreateOrgVaultRequest,
-    CreateVaultRequest, OpaqueLoginFinishRequest, OpaqueLoginFinishResponse,
-    OpaqueLoginStartRequest, OpaqueLoginStartResponse, OpaqueRegisterFinishRequest,
-    OpaqueRegisterStartRequest, OpaqueRegisterStartResponse, OrgResponse, RotateVaultKeyRequest,
-    RotationStatusResponse, VaultResponse,
+    AddOrgMemberRequest, AddVaultMemberRequest, CreateItemRequest, CreateOrgRequest,
+    CreateOrgVaultRequest, CreateVaultRequest, ItemRevisionResponse, OpaqueLoginFinishRequest,
+    OpaqueLoginFinishResponse, OpaqueLoginStartRequest, OpaqueLoginStartResponse,
+    OpaqueRegisterFinishRequest, OpaqueRegisterStartRequest, OpaqueRegisterStartResponse,
+    OrgResponse, PROTOCOL_VERSION, RotateVaultKeyRequest, RotationStatusResponse, SyncRequest,
+    SyncResponse, UpdateItemRequest, VaultKeyWrappingResponse, VaultResponse, VaultSyncChanges,
 };
 use umbra_storage::{
-    CreateDevice, CreateOrg, CreateSession, CreateUser, CreateVault, CreateVaultKeyWrapping,
-    FinishVaultKeyRotation, RotationItemRevisionInput, UpsertOrgMember, UpsertUserAuth,
-    UpsertVaultMember,
+    CreateDevice, CreateEncryptedItem, CreateItemRevision, CreateOrg, CreateSession, CreateUser,
+    CreateVault, CreateVaultKeyWrapping, FinishVaultKeyRotation, RotationItemRevisionInput,
+    UpsertOrgMember, UpsertUserAuth, UpsertVaultMember,
 };
 use uuid::Uuid;
 
 use crate::authz::{
     authenticate, ensure_org_manager, ensure_org_vault_creator, ensure_vault_admin,
-    ensure_vault_member,
+    ensure_vault_member, ensure_vault_writer,
 };
 use crate::error::ServerError;
 use crate::state::{AppState, OpaqueCipherSuite, PendingLogin};
@@ -54,6 +55,12 @@ pub(crate) fn router(state: AppState) -> Router {
         .route(
             "/api/v1/vaults",
             post(create_personal_vault).get(list_vaults),
+        )
+        .route("/api/v1/sync", post(sync))
+        .route("/api/v1/vaults/:vault_id/items", post(create_item))
+        .route(
+            "/api/v1/vaults/:vault_id/items/:item_id",
+            post(update_item).put(update_item),
         )
         .route("/api/v1/vaults/:vault_id/members", post(add_vault_member))
         .route(
@@ -478,6 +485,107 @@ async fn remove_vault_member(
     Ok(StatusCode::NO_CONTENT)
 }
 
+async fn create_item(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(vault_id): Path<Uuid>,
+    Json(request): Json<CreateItemRequest>,
+) -> Result<Json<ItemRevisionResponse>, ServerError> {
+    ensure_protocol(request.protocol_version)?;
+    if request.vault_id != vault_id {
+        return Err(ServerError::BadRequest("vault id mismatch"));
+    }
+
+    let user_id = authenticate(&state, &headers).await?;
+    ensure_vault_writer(&state, vault_id, user_id).await?;
+
+    let revision = state
+        .storage
+        .create_encrypted_item(CreateEncryptedItem {
+            item_id: None,
+            revision_id: None,
+            vault_id,
+            kind: request.kind,
+            author_user_id: Some(user_id),
+            envelope: request.envelope,
+        })
+        .await?;
+
+    Ok(Json(item_revision_response(revision)))
+}
+
+async fn update_item(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((vault_id, item_id)): Path<(Uuid, Uuid)>,
+    Json(request): Json<UpdateItemRequest>,
+) -> Result<Json<ItemRevisionResponse>, ServerError> {
+    ensure_protocol(request.protocol_version)?;
+    if request.vault_id != vault_id || request.item_id != item_id {
+        return Err(ServerError::BadRequest("item path mismatch"));
+    }
+
+    let user_id = authenticate(&state, &headers).await?;
+    ensure_vault_writer(&state, vault_id, user_id).await?;
+
+    let revision = state
+        .storage
+        .create_item_revision(CreateItemRevision {
+            revision_id: None,
+            item_id,
+            vault_id,
+            expected_revision: request.expected_revision,
+            author_user_id: Some(user_id),
+            envelope: request.envelope,
+        })
+        .await?;
+
+    Ok(Json(item_revision_response(revision)))
+}
+
+async fn sync(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<SyncRequest>,
+) -> Result<Json<SyncResponse>, ServerError> {
+    ensure_protocol(request.protocol_version)?;
+    let user_id = authenticate(&state, &headers).await?;
+    let mut vaults = Vec::with_capacity(request.vaults.len());
+
+    for cursor in request.vaults {
+        ensure_vault_member(&state, cursor.vault_id, user_id).await?;
+
+        let vault = state.storage.find_vault_by_id(cursor.vault_id).await?;
+        let items = state
+            .storage
+            .list_item_revisions_since(cursor.vault_id, cursor.since_vault_revision)
+            .await?
+            .into_iter()
+            .map(item_revision_response)
+            .collect();
+        let key_wrappings = state
+            .storage
+            .list_key_wrappings_for_user_vault(user_id, cursor.vault_id)
+            .await?
+            .into_iter()
+            .map(vault_key_wrapping_response)
+            .collect();
+
+        vaults.push(VaultSyncChanges {
+            vault_id: cursor.vault_id,
+            latest_vault_revision: vault.vault_revision,
+            items,
+            deleted_items: vec![],
+            key_wrappings,
+        });
+    }
+
+    Ok(Json(SyncResponse {
+        protocol_version: PROTOCOL_VERSION,
+        vaults,
+    }))
+}
+
 async fn rotation_status(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -550,5 +658,31 @@ fn vault_response(vault: umbra_storage::VaultRecord) -> VaultResponse {
         kind: vault.kind,
         current_key_generation: vault.current_key_generation,
         needs_key_rotation: vault.needs_key_rotation,
+    }
+}
+
+fn item_revision_response(revision: umbra_storage::ItemRevisionRecord) -> ItemRevisionResponse {
+    ItemRevisionResponse {
+        item_id: revision.item_id,
+        vault_id: revision.vault_id,
+        revision: revision.revision,
+        vault_revision: revision.vault_revision,
+        key_generation: revision.key_generation,
+        author_user_id: revision.author_user_id,
+        envelope: revision.envelope,
+    }
+}
+
+fn vault_key_wrapping_response(
+    wrapping: umbra_storage::VaultKeyWrappingRecord,
+) -> VaultKeyWrappingResponse {
+    VaultKeyWrappingResponse {
+        id: wrapping.id,
+        vault_id: wrapping.vault_id,
+        user_id: wrapping.user_id,
+        device_id: wrapping.device_id,
+        wrapping_type: wrapping.wrapping_type,
+        envelope: wrapping.envelope,
+        key_generation: wrapping.key_generation,
     }
 }
