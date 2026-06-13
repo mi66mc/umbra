@@ -225,6 +225,28 @@ pub struct DeleteItemRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ItemRevisionResponse {
+    pub item_id: ItemId,
+    pub vault_id: VaultId,
+    pub revision: RevisionId,
+    pub vault_revision: RevisionId,
+    pub key_generation: RevisionId,
+    pub author_user_id: Option<UserId>,
+    pub envelope: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VaultKeyWrappingResponse {
+    pub id: uuid::Uuid,
+    pub vault_id: VaultId,
+    pub user_id: UserId,
+    pub device_id: Option<DeviceId>,
+    pub wrapping_type: String,
+    pub envelope: serde_json::Value,
+    pub key_generation: RevisionId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SyncRequest {
     pub protocol_version: u16,
     pub device_id: DeviceId,
@@ -247,7 +269,74 @@ pub struct SyncResponse {
 pub struct VaultSyncChanges {
     pub vault_id: VaultId,
     pub latest_vault_revision: RevisionId,
-    pub items: Vec<serde_json::Value>,
+    pub items: Vec<ItemRevisionResponse>,
     pub deleted_items: Vec<ItemId>,
-    pub key_wrappings: Vec<serde_json::Value>,
+    pub key_wrappings: Vec<VaultKeyWrappingResponse>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use uuid::Uuid;
+
+    #[test]
+    fn item_revision_response_roundtrips() {
+        let response = ItemRevisionResponse {
+            item_id: Uuid::new_v4(),
+            vault_id: Uuid::new_v4(),
+            revision: 2,
+            vault_revision: 7,
+            key_generation: 1,
+            author_user_id: Some(Uuid::new_v4()),
+            envelope: json!({"version": 1, "ciphertext": "abc"}),
+        };
+
+        let encoded = serde_json::to_string(&response).unwrap();
+        let decoded: ItemRevisionResponse = serde_json::from_str(&encoded).unwrap();
+
+        assert_eq!(decoded, response);
+    }
+
+    #[test]
+    fn sync_response_uses_typed_changes() {
+        let vault_id = Uuid::new_v4();
+        let item_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let response = SyncResponse {
+            protocol_version: PROTOCOL_VERSION,
+            vaults: vec![VaultSyncChanges {
+                vault_id,
+                latest_vault_revision: 10,
+                items: vec![ItemRevisionResponse {
+                    item_id,
+                    vault_id,
+                    revision: 1,
+                    vault_revision: 10,
+                    key_generation: 1,
+                    author_user_id: Some(user_id),
+                    envelope: json!({"ciphertext": "encrypted"}),
+                }],
+                deleted_items: vec![],
+                key_wrappings: vec![VaultKeyWrappingResponse {
+                    id: Uuid::new_v4(),
+                    vault_id,
+                    user_id,
+                    device_id: None,
+                    wrapping_type: "user_public_key".to_owned(),
+                    envelope: json!({"wrapped": true}),
+                    key_generation: 1,
+                }],
+            }],
+        };
+
+        let encoded = serde_json::to_value(&response).unwrap();
+
+        assert_eq!(encoded["protocol_version"], json!(1));
+        assert_eq!(encoded["vaults"][0]["items"][0]["revision"], json!(1));
+        assert_eq!(
+            encoded["vaults"][0]["key_wrappings"][0]["wrapping_type"],
+            json!("user_public_key")
+        );
+    }
 }
