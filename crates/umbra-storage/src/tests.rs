@@ -222,6 +222,25 @@ async fn postgres_vault_access_and_rotation_flow() {
         .unwrap();
     assert_eq!(revisions.len(), 2);
     assert_eq!(revisions[1].key_generation, 2);
+
+    let later_revisions = storage
+        .list_item_revisions_since(vault.id, 1)
+        .await
+        .unwrap();
+    assert_eq!(later_revisions.len(), 1);
+    assert_eq!(later_revisions[0].revision, 2);
+    assert_eq!(
+        later_revisions[0].envelope,
+        serde_json::json!({"ciphertext": "v2"})
+    );
+
+    let current_wrappings = storage
+        .list_key_wrappings_for_user_vault(owner.id, vault.id)
+        .await
+        .unwrap();
+    assert_eq!(current_wrappings.len(), 1);
+    assert_eq!(current_wrappings[0].key_generation, 2);
+    assert_eq!(current_wrappings[0].revoked_at, None);
 }
 
 async fn fresh_test_storage() -> Option<Storage> {
