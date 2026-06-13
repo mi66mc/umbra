@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::config::CliConfig;
@@ -11,12 +13,15 @@ pub struct UmbraHttpClient {
 }
 
 impl UmbraHttpClient {
-    pub fn new(config: &CliConfig) -> Self {
-        Self {
+    pub fn new(config: &CliConfig) -> Result<Self, CliError> {
+        Ok(Self {
             base_url: config.server_url.trim_end_matches('/').to_owned(),
             token: config.session_token.clone(),
-            inner: reqwest::Client::new(),
-        }
+            inner: reqwest::Client::builder()
+                .timeout(Duration::from_secs(30))
+                .connect_timeout(Duration::from_secs(10))
+                .build()?,
+        })
     }
 
     pub async fn get<R>(&self, path: &str) -> Result<R, CliError>

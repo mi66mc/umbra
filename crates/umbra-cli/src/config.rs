@@ -24,10 +24,18 @@ pub fn config_path() -> PathBuf {
         return PathBuf::from(path);
     }
 
-    let base = std::env::var("APPDATA")
-        .map(PathBuf::from)
-        .or_else(|_| std::env::var("XDG_CONFIG_HOME").map(PathBuf::from))
-        .unwrap_or_else(|_| PathBuf::from("."));
+    let base = if cfg!(windows) {
+        std::env::var("APPDATA").ok().map(PathBuf::from)
+    } else {
+        None
+    }
+    .or_else(|| std::env::var("XDG_CONFIG_HOME").ok().map(PathBuf::from))
+    .or_else(|| {
+        std::env::var("HOME")
+            .ok()
+            .map(|home| PathBuf::from(home).join(".config"))
+    })
+    .unwrap_or_else(|| PathBuf::from("."));
     base.join("umbra").join("config.toml")
 }
 

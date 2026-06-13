@@ -22,25 +22,24 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
         }
         Command::Vault(VaultCommand::List) => {
             require_token(&config)?;
-            let client = UmbraHttpClient::new(&config);
+            let client = UmbraHttpClient::new(&config)?;
             let vaults: Vec<VaultResponse> = client.get("/api/v1/vaults").await?;
             println!("{}", serde_json::to_string_pretty(&vaults)?);
             Ok(())
         }
         Command::Vault(VaultCommand::Create {
             name,
-            kind,
             wrapping_json,
         }) => {
             require_token(&config)?;
-            let client = UmbraHttpClient::new(&config);
+            let client = UmbraHttpClient::new(&config)?;
             let vault: VaultResponse = client
                 .post(
                     "/api/v1/vaults",
                     &CreateVaultRequest {
                         protocol_version: PROTOCOL_VERSION,
                         name,
-                        kind,
+                        kind: VaultKind::Personal,
                         initial_key_wrapping: serde_json::from_str(&wrapping_json)?,
                     },
                 )
@@ -54,7 +53,7 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
             envelope_json,
         }) => {
             require_token(&config)?;
-            let client = UmbraHttpClient::new(&config);
+            let client = UmbraHttpClient::new(&config)?;
             let response: Value = client
                 .post(
                     &format!("/api/v1/vaults/{vault_id}/items"),
@@ -76,7 +75,7 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
             envelope_json,
         }) => {
             require_token(&config)?;
-            let client = UmbraHttpClient::new(&config);
+            let client = UmbraHttpClient::new(&config)?;
             let response: Value = client
                 .put(
                     &format!("/api/v1/vaults/{vault_id}/items/{item_id}"),
@@ -97,7 +96,7 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
             since_vault_revision,
         }) => {
             require_token(&config)?;
-            let client = UmbraHttpClient::new(&config);
+            let client = UmbraHttpClient::new(&config)?;
             let response: SyncResponse = client
                 .post(
                     "/api/v1/sync",
@@ -122,16 +121,6 @@ fn require_token(config: &CliConfig) -> Result<(), CliError> {
         Ok(())
     } else {
         Err(CliError::MissingSessionToken)
-    }
-}
-
-pub fn parse_vault_kind(value: &str) -> Result<VaultKind, String> {
-    match value {
-        "personal" => Ok(VaultKind::Personal),
-        "shared" => Ok(VaultKind::Shared),
-        "project" => Ok(VaultKind::Project),
-        "org" => Ok(VaultKind::Org),
-        _ => Err("expected one of: personal, shared, project, org".to_owned()),
     }
 }
 

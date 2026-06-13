@@ -1,7 +1,7 @@
 use clap::Parser;
 
 use crate::config::CliConfig;
-use crate::{Cli, Command};
+use crate::{AuthCommand, Cli, Command, TokenCommand, VaultCommand};
 
 #[test]
 fn parses_token_set_command() {
@@ -16,12 +16,52 @@ fn parses_token_set_command() {
         "abc",
     ]);
 
-    match cli.command {
-        Command::Auth(auth) => {
-            assert!(format!("{auth:?}").contains("Token"));
-        }
-        _ => panic!("expected auth command"),
-    }
+    let Command::Auth(AuthCommand::Token(TokenCommand::Set { server_url, token })) = cli.command
+    else {
+        panic!("expected auth token set command");
+    };
+
+    assert_eq!(server_url, "http://localhost:8080");
+    assert_eq!(token, "abc");
+}
+
+#[test]
+fn parses_vault_create_as_personal_without_kind() {
+    let cli = Cli::parse_from([
+        "umbra",
+        "vault",
+        "create",
+        "personal",
+        "--wrapping-json",
+        r#"{"alg":"test"}"#,
+    ]);
+
+    let Command::Vault(VaultCommand::Create {
+        name,
+        wrapping_json,
+    }) = cli.command
+    else {
+        panic!("expected vault create command");
+    };
+
+    assert_eq!(name, "personal");
+    assert_eq!(wrapping_json, r#"{"alg":"test"}"#);
+}
+
+#[test]
+fn rejects_vault_create_kind_option() {
+    let result = Cli::try_parse_from([
+        "umbra",
+        "vault",
+        "create",
+        "shared",
+        "--kind",
+        "shared",
+        "--wrapping-json",
+        r#"{"alg":"test"}"#,
+    ]);
+
+    assert!(result.is_err());
 }
 
 #[test]

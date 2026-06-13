@@ -7,10 +7,10 @@ mod http;
 mod tests;
 
 use clap::{Parser, Subcommand};
-use umbra_core::{ItemId, ItemKind, RevisionId, VaultId, VaultKind};
+use umbra_core::{ItemId, ItemKind, RevisionId, VaultId};
 
-use crate::commands::{parse_item_kind, parse_vault_kind};
-use crate::config::load_config;
+use crate::commands::parse_item_kind;
+use crate::config::{CliConfig, load_config};
 use crate::error::CliError;
 
 #[derive(Debug, Parser)]
@@ -54,8 +54,6 @@ pub enum VaultCommand {
     List,
     Create {
         name: String,
-        #[arg(long, value_parser = parse_vault_kind, default_value = "personal")]
-        kind: VaultKind,
         #[arg(long)]
         wrapping_json: String,
     },
@@ -96,6 +94,21 @@ pub enum SyncCommand {
 #[tokio::main]
 async fn main() -> Result<(), CliError> {
     let cli = Cli::parse();
-    let config = load_config()?;
+    let config = load_config_for_command(&cli.command)?;
     commands::run(cli.command, config).await
+}
+
+fn load_config_for_command(command: &Command) -> Result<CliConfig, CliError> {
+    match load_config() {
+        Ok(config) => Ok(config),
+        Err(CliError::TomlDecode(_))
+            if matches!(
+                command,
+                Command::Auth(AuthCommand::Token(TokenCommand::Set { .. }))
+            ) =>
+        {
+            Ok(CliConfig::default())
+        }
+        Err(error) => Err(error),
+    }
 }
