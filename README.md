@@ -36,3 +36,29 @@ Set it as:
 ```txt
 UMBRA__AUTH__OPAQUE__SERVER_SETUP=<generated-secret>
 ```
+
+## Remote CLI MVP
+
+This stage supports a developer remote flow with a pre-existing session token:
+
+```bash
+umbra auth token set \
+  --server-url http://127.0.0.1:8080 \
+  --token "$UMBRA_SESSION_TOKEN"
+
+umbra vault list
+
+umbra vault create Personal \
+  --wrapping-json '{"version":1,"type":"vault_key_wrapping","ciphertext":"example"}'
+
+umbra item create \
+  --vault-id "$VAULT_ID" \
+  --kind api_key \
+  --envelope-json '{"version":1,"suite":"UMBRA_XCHACHA20POLY1305_HKDFSHA256_V1","ciphertext":"example"}'
+
+umbra sync run \
+  --vault-id "$VAULT_ID" \
+  --since-vault-revision 0
+```
+
+The server still stores only encrypted envelopes. Human-friendly `umbra auth login`, local unlock, vault key cache, and client-side item encryption are the next CLI layer.

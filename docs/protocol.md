@@ -57,7 +57,7 @@ DELETE /api/v1/vaults/:vault_id/items/:item_id
 POST /api/v1/sync
 ```
 
-The server currently implements the OPAQUE register/login flow, organization creation/listing/member management, personal vault creation, organization vault creation, direct vault member grants, member removal, rotation status, and rotation completion.
+The server currently implements the OPAQUE register/login flow, organization creation/listing/member management, personal vault creation, organization vault creation, direct vault member grants, member removal, rotation status, rotation completion, encrypted item creation/update, and revision sync.
 
 ## Auth Flow
 
@@ -112,3 +112,58 @@ Adding a user to a vault requires a client-generated vault key wrapping:
 ```
 
 The server stores this as an opaque JSON envelope. It does not validate or decrypt the vault key.
+
+## Item And Sync API
+
+Items are stored as encrypted revision envelopes. The server validates vault membership and write roles, but never decrypts item envelopes.
+
+```http
+POST /api/v1/vaults/:vault_id/items
+PUT /api/v1/vaults/:vault_id/items/:item_id
+POST /api/v1/sync
+```
+
+`POST /api/v1/sync` accepts per-vault cursors:
+
+```json
+{
+  "protocol_version": 1,
+  "device_id": "00000000-0000-0000-0000-000000000000",
+  "vaults": [
+    {
+      "vault_id": "00000000-0000-0000-0000-000000000000",
+      "since_vault_revision": 0
+    }
+  ]
+}
+```
+
+The response includes typed encrypted item revisions and vault key wrappings:
+
+```json
+{
+  "protocol_version": 1,
+  "vaults": [
+    {
+      "vault_id": "00000000-0000-0000-0000-000000000000",
+      "latest_vault_revision": 2,
+      "items": [
+        {
+          "item_id": "00000000-0000-0000-0000-000000000000",
+          "vault_id": "00000000-0000-0000-0000-000000000000",
+          "revision": 1,
+          "vault_revision": 1,
+          "key_generation": 1,
+          "author_user_id": "00000000-0000-0000-0000-000000000000",
+          "envelope": {
+            "version": 1,
+            "ciphertext": "base64url..."
+          }
+        }
+      ],
+      "deleted_items": [],
+      "key_wrappings": []
+    }
+  ]
+}
+```
