@@ -180,7 +180,10 @@ fn config_roundtrips_toml() {
     let profile = decoded.profiles.get("personal").unwrap();
     assert_eq!(profile.server_url, "http://localhost:8080");
     assert_eq!(profile.legacy_session_token.as_deref(), Some("abc"));
-    assert_eq!(profile.client_public_key.as_deref(), Some("client-public-key"));
+    assert_eq!(
+        profile.client_public_key.as_deref(),
+        Some("client-public-key")
+    );
     assert_eq!(
         profile
             .encrypted_user_private_key
