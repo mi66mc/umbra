@@ -6,23 +6,48 @@ use umbra_protocol::{
 };
 use uuid::Uuid;
 
-use crate::config::{CliConfig, save_config};
+use crate::config::{
+    CliConfig, active_profile, active_profile_mut, save_config, set_active_profile,
+};
 use crate::error::CliError;
 use crate::http::UmbraHttpClient;
-use crate::{AuthCommand, Command, ItemCommand, SyncCommand, TokenCommand, VaultCommand};
+use crate::{
+    AuthCommand, Command, ItemCommand, ProfileCommand, SyncCommand, TokenCommand, VaultCommand,
+};
 
 pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError> {
     match command {
         Command::Auth(AuthCommand::Token(TokenCommand::Set { server_url, token })) => {
-            config.server_url = server_url;
-            config.session_token = Some(token);
+            let profile = active_profile_mut(&mut config);
+            profile.server_url = server_url;
+            profile.legacy_session_token = Some(token);
+            profile.session_id = None;
             save_config(&config)?;
             println!("token saved");
             Ok(())
         }
+        Command::Profile(ProfileCommand::List) => {
+            for (name, profile) in &config.profiles {
+                let marker = if name == &config.active_profile {
+                    "*"
+                } else {
+                    " "
+                };
+                let email = profile.email.as_deref().unwrap_or("-");
+                println!("{marker} {name}\t{email}\t{}", profile.server_url);
+            }
+            Ok(())
+        }
+        Command::Profile(ProfileCommand::Use { name }) => {
+            set_active_profile(&mut config, name.clone());
+            save_config(&config)?;
+            println!("active profile: {name}");
+            Ok(())
+        }
         Command::Vault(VaultCommand::List) => {
-            require_token(&config)?;
-            let client = UmbraHttpClient::new(&config)?;
+            let profile = active_profile(&config)?;
+            require_login(profile)?;
+            let client = UmbraHttpClient::new(profile)?;
             let vaults: Vec<VaultResponse> = client.get("/api/v1/vaults").await?;
             println!("{}", serde_json::to_string_pretty(&vaults)?);
             Ok(())
@@ -31,8 +56,9 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
             name,
             wrapping_json,
         }) => {
-            require_token(&config)?;
-            let client = UmbraHttpClient::new(&config)?;
+            let profile = active_profile(&config)?;
+            require_login(profile)?;
+            let client = UmbraHttpClient::new(profile)?;
             let vault: VaultResponse = client
                 .post(
                     "/api/v1/vaults",
@@ -52,8 +78,9 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
             kind,
             envelope_json,
         }) => {
-            require_token(&config)?;
-            let client = UmbraHttpClient::new(&config)?;
+            let profile = active_profile(&config)?;
+            require_login(profile)?;
+            let client = UmbraHttpClient::new(profile)?;
             let response: Value = client
                 .post(
                     &format!("/api/v1/vaults/{vault_id}/items"),
@@ -74,8 +101,9 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
             expected_revision,
             envelope_json,
         }) => {
-            require_token(&config)?;
-            let client = UmbraHttpClient::new(&config)?;
+            let profile = active_profile(&config)?;
+            require_login(profile)?;
+            let client = UmbraHttpClient::new(profile)?;
             let response: Value = client
                 .put(
                     &format!("/api/v1/vaults/{vault_id}/items/{item_id}"),
@@ -95,14 +123,16 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
             vault_id,
             since_vault_revision,
         }) => {
-            require_token(&config)?;
-            let client = UmbraHttpClient::new(&config)?;
+            let profile = active_profile(&config)?;
+            require_login(profile)?;
+            let client = UmbraHttpClient::new(profile)?;
+            let device_id = profile.device_id.unwrap_or_else(Uuid::new_v4);
             let response: SyncResponse = client
                 .post(
                     "/api/v1/sync",
                     &SyncRequest {
                         protocol_version: PROTOCOL_VERSION,
-                        device_id: Uuid::new_v4(),
+                        device_id,
                         vaults: vec![VaultSyncCursor {
                             vault_id,
                             since_vault_revision,
@@ -116,11 +146,15 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
     }
 }
 
-fn require_token(config: &CliConfig) -> Result<(), CliError> {
-    if config.session_token.is_some() {
+fn require_login(profile: &crate::config::ProfileConfig) -> Result<(), CliError> {
+    if profile.legacy_session_token.is_some()
+        || (profile.session_id.is_some()
+            && profile.device_id.is_some()
+            && profile.device_private_key.is_some())
+    {
         Ok(())
     } else {
-        Err(CliError::MissingSessionToken)
+        Err(CliError::NotLoggedIn)
     }
 }
 

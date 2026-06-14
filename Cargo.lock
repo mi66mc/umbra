@@ -2837,13 +2837,19 @@ dependencies = [
 name = "umbra-cli"
 version = "0.1.0"
 dependencies = [
+ "base64ct",
+ "chrono",
  "clap",
+ "ed25519-dalek",
+ "rand_core 0.6.4",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror",
  "tokio",
  "toml",
+ "umbra-auth",
  "umbra-core",
  "umbra-protocol",
  "uuid",

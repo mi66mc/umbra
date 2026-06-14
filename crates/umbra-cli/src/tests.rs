@@ -1,7 +1,7 @@
 use clap::Parser;
 
-use crate::config::CliConfig;
-use crate::{AuthCommand, Cli, Command, TokenCommand, VaultCommand};
+use crate::config::{CliConfig, ProfileConfig};
+use crate::{AuthCommand, Cli, Command, ProfileCommand, TokenCommand, VaultCommand};
 
 #[test]
 fn parses_token_set_command() {
@@ -66,14 +66,50 @@ fn rejects_vault_create_kind_option() {
 
 #[test]
 fn config_roundtrips_toml() {
-    let config = CliConfig {
+    let mut config = CliConfig::default();
+    let profile = ProfileConfig {
         server_url: "http://localhost:8080".to_owned(),
-        session_token: Some("abc".to_owned()),
+        legacy_session_token: Some("abc".to_owned()),
+        ..ProfileConfig::default()
     };
+    config.profiles.insert("personal".to_owned(), profile);
+    config.active_profile = "personal".to_owned();
 
     let encoded = toml::to_string(&config).unwrap();
     let decoded: CliConfig = toml::from_str(&encoded).unwrap();
 
-    assert_eq!(decoded.server_url, "http://localhost:8080");
-    assert_eq!(decoded.session_token.as_deref(), Some("abc"));
+    let profile = decoded.profiles.get("personal").unwrap();
+    assert_eq!(profile.server_url, "http://localhost:8080");
+    assert_eq!(profile.legacy_session_token.as_deref(), Some("abc"));
+}
+
+#[test]
+fn parses_profile_commands() {
+    let list = Cli::parse_from(["umbra", "profile", "list"]);
+    assert!(matches!(
+        list.command,
+        Command::Profile(ProfileCommand::List)
+    ));
+
+    let use_profile = Cli::parse_from(["umbra", "profile", "use", "personal"]);
+    assert!(matches!(
+        use_profile.command,
+        Command::Profile(ProfileCommand::Use { .. })
+    ));
+}
+
+#[test]
+fn signed_profile_roundtrips() {
+    let profile = ProfileConfig {
+        session_id: Some(uuid::Uuid::new_v4()),
+        device_id: Some(uuid::Uuid::new_v4()),
+        device_private_key: Some("private".to_owned()),
+        ..ProfileConfig::default()
+    };
+
+    let encoded = toml::to_string(&profile).unwrap();
+    let decoded: ProfileConfig = toml::from_str(&encoded).unwrap();
+
+    assert_eq!(decoded.session_id, profile.session_id);
+    assert_eq!(decoded.device_private_key.as_deref(), Some("private"));
 }

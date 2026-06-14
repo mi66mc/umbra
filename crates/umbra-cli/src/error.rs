@@ -10,8 +10,16 @@ pub enum CliError {
     TomlDecode(#[from] toml::de::Error),
     #[error("toml encode error: {0}")]
     TomlEncode(#[from] toml::ser::Error),
-    #[error("missing session token; run `umbra auth token set --server-url <url> --token <token>`")]
-    MissingSessionToken,
+    #[error("auth error: {0}")]
+    Auth(#[from] umbra_auth::AuthError),
+    #[error("missing profile `{0}`")]
+    MissingProfile(String),
+    #[error(
+        "profile is not logged in; run `umbra login --profile <name>` or `umbra auth token set`"
+    )]
+    NotLoggedIn,
+    #[error("invalid base64url encoding")]
+    InvalidEncoding,
     #[error("server returned {status}: {body}")]
     ServerStatus {
         status: reqwest::StatusCode,

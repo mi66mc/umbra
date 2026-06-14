@@ -2,6 +2,7 @@ mod commands;
 mod config;
 mod error;
 mod http;
+mod keys;
 
 #[cfg(test)]
 mod tests;
@@ -26,11 +27,19 @@ pub enum Command {
     #[command(subcommand)]
     Auth(AuthCommand),
     #[command(subcommand)]
+    Profile(ProfileCommand),
+    #[command(subcommand)]
     Vault(VaultCommand),
     #[command(subcommand)]
     Item(ItemCommand),
     #[command(subcommand)]
     Sync(SyncCommand),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ProfileCommand {
+    List,
+    Use { name: String },
 }
 
 #[derive(Debug, Subcommand)]
