@@ -14,6 +14,11 @@ use crate::error::CliError;
 use crate::http::{PublicHttpClient, decode_b64, encode_b64};
 use crate::keys::DeviceSigningKey;
 
+pub(crate) struct AccountRegistrationMaterial {
+    pub(crate) public_key: String,
+    pub(crate) encrypted_private_key: serde_json::Value,
+}
+
 pub async fn register(
     client: &PublicHttpClient,
     email: &str,
@@ -21,6 +26,7 @@ pub async fn register(
     password: &[u8],
     device_name: &str,
     device_key: &DeviceSigningKey,
+    account_material: AccountRegistrationMaterial,
 ) -> Result<RegisterResponse, CliError> {
     let registration_start = ClientRegistration::<OpaqueCipherSuite>::start(&mut OsRng, password)
         .map_err(|_| CliError::Opaque("registration start failed"))?;
@@ -56,10 +62,8 @@ pub async fn register(
                 registration_id: start_response.registration_id,
                 email: email.to_owned(),
                 display_name,
-                public_key: "account-public-key-mvp".to_owned(),
-                encrypted_private_key: serde_json::json!({
-                    "mvp": "encrypted-private-key-not-unlocked-yet"
-                }),
+                public_key: account_material.public_key,
+                encrypted_private_key: account_material.encrypted_private_key,
                 initial_device: DeviceRegisterRequest {
                     name: device_name.to_owned(),
                     public_key: device_key.public_key_base64url(),

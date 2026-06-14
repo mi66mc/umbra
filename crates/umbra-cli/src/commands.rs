@@ -41,6 +41,14 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
                     .interact_text()?,
             };
             let device_key = DeviceSigningKey::generate();
+            let account_crypto = crate::crypto_state::NewAccountCrypto::generate(
+                &umbra_crypto::MasterPassword::new(password.as_bytes().to_vec()),
+            )?;
+            let account_public_key = account_crypto.public_key.to_base64url();
+            let encrypted_user_private_key =
+                serde_json::to_value(&account_crypto.encrypted_private_key)?;
+            let user_secret_key = account_crypto.user_secret_key.to_base64url();
+            let kdf_params = account_crypto.kdf_params;
             let client = PublicHttpClient::new(&server)?;
             let response = crate::opaque::register(
                 &client,
@@ -49,6 +57,10 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
                 password.as_bytes(),
                 &device_name,
                 &device_key,
+                crate::opaque::AccountRegistrationMaterial {
+                    public_key: account_public_key.clone(),
+                    encrypted_private_key: encrypted_user_private_key.clone(),
+                },
             )
             .await?;
             let profile_config = active_profile_mut(&mut config);
@@ -57,6 +69,10 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
             profile_config.user_id = Some(response.user_id);
             profile_config.device_id = Some(response.device_id);
             profile_config.device_private_key = Some(device_key.to_base64url());
+            profile_config.client_public_key = Some(account_public_key);
+            profile_config.encrypted_user_private_key = Some(encrypted_user_private_key);
+            profile_config.kdf_params = Some(kdf_params);
+            profile_config.user_secret_key = Some(user_secret_key);
             profile_config.session_id = None;
             profile_config.legacy_session_token = None;
             save_config(&config)?;
