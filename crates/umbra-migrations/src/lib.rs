@@ -50,6 +50,6 @@ mod tests {
 
     #[test]
     fn embeds_migrations() {
-        assert_eq!(MIGRATOR.iter().count(), 2);
+        assert_eq!(MIGRATOR.iter().count(), 3);
     }
 }
