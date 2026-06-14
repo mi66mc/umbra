@@ -26,6 +26,8 @@ pub enum CliError {
     Input(&'static str),
     #[error("prompt error: {0}")]
     Prompt(#[from] dialoguer::Error),
+    #[error("cache error: {0}")]
+    Cache(#[from] rusqlite::Error),
     #[error("server returned {status}: {body}")]
     ServerStatus {
         status: reqwest::StatusCode,
