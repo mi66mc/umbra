@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{fmt, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::error::CliError;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CliConfig {
     #[serde(default = "default_profile_name")]
     pub active_profile: String,
@@ -18,7 +18,7 @@ pub struct CliConfig {
     pub session_token: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProfileConfig {
     #[serde(default = "default_server_url")]
     pub server_url: String,
@@ -33,7 +33,49 @@ pub struct ProfileConfig {
     #[serde(default)]
     pub device_private_key: Option<String>,
     #[serde(default)]
+    pub client_public_key: Option<String>,
+    #[serde(default)]
+    pub encrypted_user_private_key: Option<serde_json::Value>,
+    #[serde(default)]
+    pub kdf_params: Option<umbra_crypto::Argon2idParams>,
+    #[serde(default)]
+    pub user_secret_key: Option<String>,
+    #[serde(default)]
     pub legacy_session_token: Option<String>,
+}
+
+impl fmt::Debug for CliConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CliConfig")
+            .field("active_profile", &self.active_profile)
+            .field("profiles", &self.profiles)
+            .field("server_url", &self.server_url)
+            .field("session_token", &self.session_token)
+            .finish()
+    }
+}
+
+impl fmt::Debug for ProfileConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let user_secret_key = self.user_secret_key.as_ref().map(|_| "[redacted]");
+
+        f.debug_struct("ProfileConfig")
+            .field("server_url", &self.server_url)
+            .field("email", &self.email)
+            .field("user_id", &self.user_id)
+            .field("device_id", &self.device_id)
+            .field("session_id", &self.session_id)
+            .field("device_private_key", &self.device_private_key)
+            .field("client_public_key", &self.client_public_key)
+            .field(
+                "encrypted_user_private_key",
+                &self.encrypted_user_private_key,
+            )
+            .field("kdf_params", &self.kdf_params)
+            .field("user_secret_key", &user_secret_key)
+            .field("legacy_session_token", &self.legacy_session_token)
+            .finish()
+    }
 }
 
 impl Default for CliConfig {
@@ -58,6 +100,10 @@ impl Default for ProfileConfig {
             device_id: None,
             session_id: None,
             device_private_key: None,
+            client_public_key: None,
+            encrypted_user_private_key: None,
+            kdf_params: None,
+            user_secret_key: None,
             legacy_session_token: None,
         }
     }

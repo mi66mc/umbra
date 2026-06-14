@@ -157,6 +157,18 @@ fn config_roundtrips_toml() {
     let profile = ProfileConfig {
         server_url: "http://localhost:8080".to_owned(),
         legacy_session_token: Some("abc".to_owned()),
+        client_public_key: Some("client-public-key".to_owned()),
+        encrypted_user_private_key: Some(serde_json::json!({
+            "version": 1,
+            "suite": "UMBRA_XCHACHA20POLY1305_HKDFSHA256_V1",
+            "nonce": "nonce",
+            "aad": "aad",
+            "ciphertext": "ciphertext"
+        })),
+        kdf_params: Some(umbra_crypto::Argon2idParams::balanced_with_salt(
+            umbra_crypto::Salt::from_bytes([1u8; 16]).to_base64url(),
+        )),
+        user_secret_key: Some("secret-key".to_owned()),
         ..ProfileConfig::default()
     };
     config.profiles.insert("personal".to_owned(), profile);
@@ -168,6 +180,37 @@ fn config_roundtrips_toml() {
     let profile = decoded.profiles.get("personal").unwrap();
     assert_eq!(profile.server_url, "http://localhost:8080");
     assert_eq!(profile.legacy_session_token.as_deref(), Some("abc"));
+    assert_eq!(profile.client_public_key.as_deref(), Some("client-public-key"));
+    assert_eq!(
+        profile
+            .encrypted_user_private_key
+            .as_ref()
+            .and_then(|value| value.get("ciphertext"))
+            .and_then(serde_json::Value::as_str),
+        Some("ciphertext")
+    );
+    let kdf_params = profile.kdf_params.as_ref().unwrap();
+    assert_eq!(kdf_params.profile, umbra_crypto::KdfProfile::Balanced);
+    assert_eq!(profile.user_secret_key.as_deref(), Some("secret-key"));
+}
+
+#[test]
+fn debug_redacts_user_secret_key() {
+    let profile = ProfileConfig {
+        user_secret_key: Some("super-secret-key".to_owned()),
+        ..ProfileConfig::default()
+    };
+    let debug = format!("{profile:?}");
+
+    assert!(!debug.contains("super-secret-key"));
+    assert!(debug.contains("[redacted]"));
+
+    let mut config = CliConfig::default();
+    config.profiles.insert("personal".to_owned(), profile);
+    let debug = format!("{config:?}");
+
+    assert!(!debug.contains("super-secret-key"));
+    assert!(debug.contains("[redacted]"));
 }
 
 #[test]
