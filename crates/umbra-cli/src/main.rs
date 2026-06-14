@@ -1,6 +1,7 @@
 mod cache;
 mod commands;
 mod config;
+mod crypto_state;
 mod error;
 mod http;
 mod keys;
