@@ -3018,6 +3018,7 @@ dependencies = [
  "toml",
  "umbra-auth",
  "umbra-core",
+ "umbra-crypto",
  "umbra-protocol",
  "uuid",
 ]

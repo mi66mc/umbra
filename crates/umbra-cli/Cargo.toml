@@ -30,5 +30,6 @@ tokio.workspace = true
 toml = "0.8"
 umbra-auth = { path = "../umbra-auth" }
 umbra-core = { path = "../umbra-core" }
+umbra-crypto = { path = "../umbra-crypto" }
 umbra-protocol = { path = "../umbra-protocol" }
 uuid.workspace = true
