@@ -75,3 +75,20 @@ umbra auth token set \
   --server-url http://127.0.0.1:8080 \
   --token "$UMBRA_SESSION_TOKEN"
 ```
+
+## Local CLI Cache
+
+The CLI stores a per-profile SQLite cache under the local Umbra data directory.
+
+The cache contains encrypted envelopes, key wrappings, sync cursors, and metadata. It does not contain plaintext secrets or plaintext vault keys.
+
+Useful commands:
+
+```bash
+umbra sync run --vault "$VAULT_ID"
+umbra cache status
+umbra item list --vault-id "$VAULT_ID" --cached
+umbra item get --vault-id "$VAULT_ID" --item-id "$ITEM_ID" --cached
+```
+
+`sync run` uses the cached vault revision cursor by default. Use `--force-full` to request from revision `0`.

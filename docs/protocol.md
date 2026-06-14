@@ -199,3 +199,16 @@ The response includes typed encrypted item revisions and vault key wrappings:
   ]
 }
 ```
+
+## Cacheable Sync Data
+
+`SyncResponse` is safe for the CLI to cache because item data and vault keys are still encrypted envelopes.
+
+The client may persist:
+
+- `latest_vault_revision`;
+- item revision envelopes;
+- vault key wrapping envelopes;
+- item ids, vault ids, revision numbers, and key generation metadata.
+
+The server remains the source of truth. The cache is a local acceleration and offline inspection layer, not an authority for membership or writes.

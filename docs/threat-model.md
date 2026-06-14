@@ -50,3 +50,13 @@ They do not hide:
 - ciphertexts.
 
 They also do not solve first-contact active MITM by themselves. Production deployments should still prefer HTTPS. Plain HTTP with signed requests is mainly useful for local networks, development, and self-hosted environments where the operator accepts metadata exposure but does not want bearer tokens to leak.
+
+## Local SQLite Cache
+
+The first CLI cache stores encrypted envelopes and metadata in SQLite.
+
+It does not store plaintext secrets, plaintext vault keys, or master passwords.
+
+A local attacker who steals the cache can see metadata such as vault ids, item ids, revision counts, timestamps, and any non-secret names stored outside envelopes. They still need client-side key material to decrypt item contents.
+
+Future work may encrypt sensitive metadata or the full SQLite database with a local cache key.
