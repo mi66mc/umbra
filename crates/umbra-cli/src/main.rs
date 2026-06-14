@@ -51,6 +51,8 @@ pub enum Command {
     #[command(subcommand)]
     Auth(AuthCommand),
     #[command(subcommand)]
+    Cache(CacheCommand),
+    #[command(subcommand)]
     Profile(ProfileCommand),
     #[command(subcommand)]
     Vault(VaultCommand),
@@ -72,6 +74,11 @@ impl CipherSuite for OpaqueCipherSuite {
 pub enum ProfileCommand {
     List,
     Use { name: String },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CacheCommand {
+    Status,
 }
 
 #[derive(Debug, Subcommand)]
@@ -102,6 +109,20 @@ pub enum VaultCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum ItemCommand {
+    List {
+        #[arg(long)]
+        vault_id: VaultId,
+        #[arg(long)]
+        cached: bool,
+    },
+    Get {
+        #[arg(long)]
+        vault_id: VaultId,
+        #[arg(long)]
+        item_id: ItemId,
+        #[arg(long)]
+        cached: bool,
+    },
     Create {
         #[arg(long)]
         vault_id: VaultId,
@@ -127,8 +148,10 @@ pub enum SyncCommand {
     Run {
         #[arg(long = "vault", alias = "vault-id")]
         vault_id: VaultId,
-        #[arg(long, default_value_t = 0)]
-        since_vault_revision: RevisionId,
+        #[arg(long)]
+        since_vault_revision: Option<RevisionId>,
+        #[arg(long)]
+        force_full: bool,
     },
 }
 

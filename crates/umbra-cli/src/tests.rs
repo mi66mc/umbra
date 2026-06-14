@@ -1,7 +1,7 @@
 use clap::Parser;
 
 use crate::config::{CliConfig, ProfileConfig};
-use crate::{AuthCommand, Cli, Command, ProfileCommand, TokenCommand, VaultCommand};
+use crate::{AuthCommand, CacheCommand, Cli, Command, ProfileCommand, TokenCommand, VaultCommand};
 
 #[test]
 fn parses_token_set_command() {
@@ -85,6 +85,57 @@ fn parses_sugar_commands() {
 }
 
 #[test]
+fn parses_sync_force_full() {
+    let sync = Cli::parse_from([
+        "umbra",
+        "sync",
+        "run",
+        "--vault",
+        "00000000-0000-0000-0000-000000000001",
+        "--force-full",
+    ]);
+
+    assert!(matches!(
+        sync.command,
+        Command::Sync(crate::SyncCommand::Run {
+            force_full: true,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn parses_cached_item_commands() {
+    let list = Cli::parse_from([
+        "umbra",
+        "item",
+        "list",
+        "--vault-id",
+        "00000000-0000-0000-0000-000000000001",
+        "--cached",
+    ]);
+    assert!(matches!(
+        list.command,
+        Command::Item(crate::ItemCommand::List { cached: true, .. })
+    ));
+
+    let get = Cli::parse_from([
+        "umbra",
+        "item",
+        "get",
+        "--vault-id",
+        "00000000-0000-0000-0000-000000000001",
+        "--item-id",
+        "00000000-0000-0000-0000-000000000002",
+        "--cached",
+    ]);
+    assert!(matches!(
+        get.command,
+        Command::Item(crate::ItemCommand::Get { cached: true, .. })
+    ));
+}
+
+#[test]
 fn rejects_vault_create_kind_option() {
     let result = Cli::try_parse_from([
         "umbra",
@@ -132,6 +183,13 @@ fn parses_profile_commands() {
         use_profile.command,
         Command::Profile(ProfileCommand::Use { .. })
     ));
+}
+
+#[test]
+fn parses_cache_status_command() {
+    let cli = Cli::parse_from(["umbra", "cache", "status"]);
+
+    assert!(matches!(cli.command, Command::Cache(CacheCommand::Status)));
 }
 
 #[test]
