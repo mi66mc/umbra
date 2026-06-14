@@ -382,10 +382,12 @@ async fn signed_login_can_create_org_and_rejects_nonce_replay() {
         app.clone(),
         Method::POST,
         "/api/v1/orgs",
-        finish.session_id,
-        register.device_id,
-        &signing_key,
-        &nonce,
+        SignedRequestAuth {
+            session_id: finish.session_id,
+            device_id: register.device_id,
+            signing_key: &signing_key,
+            nonce: &nonce,
+        },
         &CreateOrgRequest {
             protocol_version: PROTOCOL_VERSION,
             name: "Signed Org".to_owned(),
@@ -399,10 +401,12 @@ async fn signed_login_can_create_org_and_rejects_nonce_replay() {
         app,
         Method::POST,
         "/api/v1/orgs",
-        finish.session_id,
-        register.device_id,
-        &signing_key,
-        &nonce,
+        SignedRequestAuth {
+            session_id: finish.session_id,
+            device_id: register.device_id,
+            signing_key: &signing_key,
+            nonce: &nonce,
+        },
         &CreateOrgRequest {
             protocol_version: PROTOCOL_VERSION,
             name: "Replay Org".to_owned(),
@@ -560,6 +564,13 @@ async fn login_user_id(app: Router, email: &str, password: &[u8]) -> uuid::Uuid 
     finish.user_id
 }
 
+struct SignedRequestAuth<'a> {
+    session_id: Uuid,
+    device_id: Uuid,
+    signing_key: &'a ed25519_dalek::SigningKey,
+    nonce: &'a str,
+}
+
 async fn json_request<T, R>(
     app: Router,
     method: Method,
@@ -595,10 +606,7 @@ async fn signed_json_request<T, R>(
     app: Router,
     method: Method,
     uri: &str,
-    session_id: Uuid,
-    device_id: Uuid,
-    signing_key: &ed25519_dalek::SigningKey,
-    nonce: &str,
+    auth: SignedRequestAuth<'_>,
     body: &T,
 ) -> (StatusCode, R)
 where
@@ -613,21 +621,21 @@ where
         path_and_query: uri.to_owned(),
         body_sha256: body_hash.clone(),
         timestamp_unix,
-        nonce: nonce.to_owned(),
-        session_id,
-        device_id,
+        nonce: auth.nonce.to_owned(),
+        session_id: auth.session_id,
+        device_id: auth.device_id,
     };
-    let signature = sign_request(signing_key, &parts);
+    let signature = sign_request(auth.signing_key, &parts);
     let response = app
         .oneshot(
             Request::builder()
                 .method(method)
                 .uri(uri)
                 .header(header::CONTENT_TYPE, "application/json")
-                .header(HEADER_SESSION_ID, session_id.to_string())
-                .header(HEADER_DEVICE_ID, device_id.to_string())
+                .header(HEADER_SESSION_ID, auth.session_id.to_string())
+                .header(HEADER_DEVICE_ID, auth.device_id.to_string())
                 .header(HEADER_TIMESTAMP, timestamp_unix.to_string())
-                .header(HEADER_NONCE, nonce)
+                .header(HEADER_NONCE, auth.nonce)
                 .header(HEADER_BODY_SHA256, body_hash)
                 .header(HEADER_SIGNATURE, signature)
                 .body(Body::from(body_bytes))
