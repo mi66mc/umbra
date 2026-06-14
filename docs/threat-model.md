@@ -35,3 +35,18 @@
 - OPAQUE for password authentication.
 - Future WebAuthn/passkeys.
 - Future signed builds.
+
+## Plain HTTP With Signed Requests
+
+Signed requests avoid sending reusable bearer tokens over plain HTTP and prevent basic replay.
+
+They do not hide:
+
+- host/path;
+- IP addresses;
+- timing;
+- request and response sizes;
+- vault ids, item ids, and other metadata present outside encrypted envelopes;
+- ciphertexts.
+
+They also do not solve first-contact active MITM by themselves. Production deployments should still prefer HTTPS. Plain HTTP with signed requests is mainly useful for local networks, development, and self-hosted environments where the operator accepts metadata exposure but does not want bearer tokens to leak.

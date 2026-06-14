@@ -78,7 +78,9 @@ Login:
 1. client sends OPAQUE credential request to /login/start
 2. server stores pending login state bound to user_id
 3. client sends credential finalization to /login/finish
-4. server creates a bearer session token
+4. server creates either:
+   - a signed session when device_id is provided
+   - a legacy bearer session when device_id is omitted
 ```
 
 The OPAQUE server setup must be persistent outside PostgreSQL. Generate it with:
@@ -88,6 +90,36 @@ umbra-server opaque setup generate
 ```
 
 Then inject it as `UMBRA__AUTH__OPAQUE__SERVER_SETUP` or `auth.opaque.server_setup` in config. Development may opt into ephemeral setup with `UMBRA__AUTH__OPAQUE__ALLOW_EPHEMERAL_SETUP=true`, but production should fail closed when the persistent setup is missing.
+
+## Signed HTTP Sessions
+
+For CLI sessions, Umbra can authenticate protected requests without sending a reusable bearer token.
+
+Each protected request includes:
+
+```http
+Umbra-Session-Id: <uuid>
+Umbra-Device-Id: <uuid>
+Umbra-Timestamp: <unix timestamp>
+Umbra-Nonce: <random nonce>
+Umbra-Body-Sha256: <base64url sha256 body>
+Umbra-Signature: <base64url ed25519 signature>
+```
+
+The signature covers:
+
+```txt
+UMBRA-SIGNED-REQUEST-V1
+METHOD
+PATH_AND_QUERY
+BODY_SHA256
+TIMESTAMP_UNIX
+NONCE
+SESSION_ID
+DEVICE_ID
+```
+
+The server verifies the stored trusted device public key, rejects stale timestamps, and rejects repeated `(session_id, nonce)` pairs.
 
 ## Vault Grants
 

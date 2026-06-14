@@ -39,17 +39,22 @@ UMBRA__AUTH__OPAQUE__SERVER_SETUP=<generated-secret>
 
 ## Remote CLI MVP
 
-This stage supports a developer remote flow with a pre-existing session token:
+This stage supports a developer remote flow with OPAQUE login and signed HTTP sessions:
 
 ```bash
-umbra auth token set \
-  --server-url http://127.0.0.1:8080 \
-  --token "$UMBRA_SESSION_TOKEN"
+umbra register \
+  --server http://127.0.0.1:8080 \
+  --email miguel@example.com \
+  --profile personal
+
+umbra login --profile personal
+
+umbra profile list
+umbra profile use personal
 
 umbra vault list
 
-umbra vault create Personal \
-  --wrapping-json '{"version":1,"type":"vault_key_wrapping","ciphertext":"example"}'
+umbra vault create
 
 umbra item create \
   --vault-id "$VAULT_ID" \
@@ -57,8 +62,16 @@ umbra item create \
   --envelope-json '{"version":1,"suite":"UMBRA_XCHACHA20POLY1305_HKDFSHA256_V1","ciphertext":"example"}'
 
 umbra sync run \
-  --vault-id "$VAULT_ID" \
+  --vault "$VAULT_ID" \
   --since-vault-revision 0
 ```
 
-The server still stores only encrypted envelopes. Human-friendly `umbra auth login`, local unlock, vault key cache, and client-side item encryption are the next CLI layer.
+The CLI uses signed HTTP sessions by default after `umbra login`. Normal CLI requests do not send a reusable bearer token. The server still stores only encrypted envelopes. Local unlock, vault key cache, OS keychain storage, and polished client-side item encryption UX are the next CLI layers.
+
+Legacy bearer-token setup is still available for debugging:
+
+```bash
+umbra auth token set \
+  --server-url http://127.0.0.1:8080 \
+  --token "$UMBRA_SESSION_TOKEN"
+```
