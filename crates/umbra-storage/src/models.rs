@@ -256,6 +256,7 @@ pub struct CreateSession {
     pub user_id: UserId,
     pub device_id: Option<DeviceId>,
     pub token_hash: String,
+    pub auth_scheme: String,
     pub expires_at: DateTime<Utc>,
 }
 
@@ -265,6 +266,7 @@ pub struct SessionRecord {
     pub user_id: UserId,
     pub device_id: Option<DeviceId>,
     pub token_hash: String,
+    pub auth_scheme: String,
     pub created_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
     pub revoked_at: Option<DateTime<Utc>>,

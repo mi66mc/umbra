@@ -13,15 +13,16 @@ impl Storage {
         let id = input.id.unwrap_or_else(Uuid::new_v4);
         let row = sqlx::query(
             r#"
-            INSERT INTO sessions (id, user_id, device_id, token_hash, expires_at)
-            VALUES ($1, $2, $3, $4, $5)
-            RETURNING id, user_id, device_id, token_hash, created_at, expires_at, revoked_at
+            INSERT INTO sessions (id, user_id, device_id, token_hash, auth_scheme, expires_at)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            RETURNING id, user_id, device_id, token_hash, auth_scheme, created_at, expires_at, revoked_at
             "#,
         )
         .bind(id)
         .bind(input.user_id)
         .bind(input.device_id)
         .bind(input.token_hash)
+        .bind(input.auth_scheme)
         .bind(input.expires_at)
         .fetch_one(&self.pool)
         .await
@@ -36,7 +37,7 @@ impl Storage {
     ) -> Result<SessionRecord, StorageError> {
         let row = sqlx::query(
             r#"
-            SELECT id, user_id, device_id, token_hash, created_at, expires_at, revoked_at
+            SELECT id, user_id, device_id, token_hash, auth_scheme, created_at, expires_at, revoked_at
             FROM sessions
             WHERE token_hash = $1 AND revoked_at IS NULL AND expires_at > now()
             "#,
@@ -47,5 +48,44 @@ impl Storage {
         .ok_or(StorageError::NotFound)?;
 
         session_from_row(row)
+    }
+
+    pub async fn find_active_session_by_id(
+        &self,
+        session_id: Uuid,
+    ) -> Result<SessionRecord, StorageError> {
+        let row = sqlx::query(
+            r#"
+            SELECT id, user_id, device_id, token_hash, auth_scheme, created_at, expires_at, revoked_at
+            FROM sessions
+            WHERE id = $1 AND revoked_at IS NULL AND expires_at > now()
+            "#,
+        )
+        .bind(session_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+
+        session_from_row(row)
+    }
+
+    pub async fn remember_session_nonce(
+        &self,
+        session_id: Uuid,
+        nonce: &str,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            r#"
+            INSERT INTO session_nonces (session_id, nonce)
+            VALUES ($1, $2)
+            "#,
+        )
+        .bind(session_id)
+        .bind(nonce)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        Ok(())
     }
 }

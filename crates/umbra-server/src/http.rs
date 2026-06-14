@@ -231,6 +231,7 @@ async fn auth_login_finish(
             user_id: user.id,
             device_id: None,
             token_hash: token_hash(&token),
+            auth_scheme: "bearer".to_owned(),
             expires_at,
         })
         .await?;

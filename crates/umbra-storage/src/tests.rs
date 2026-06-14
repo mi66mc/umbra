@@ -35,14 +35,58 @@ async fn postgres_migrations_create_required_schema() {
         SELECT COUNT(*)
         FROM information_schema.tables
         WHERE table_schema = 'public'
-          AND table_name IN ('users', 'orgs', 'vaults', 'vault_members', 'vault_key_wrappings', 'item_revisions', 'sessions')
+          AND table_name IN ('users', 'orgs', 'vaults', 'vault_members', 'vault_key_wrappings', 'item_revisions', 'sessions', 'session_nonces')
         "#,
     )
     .fetch_one(storage.pool())
     .await
     .unwrap();
 
-    assert_eq!(tables, 7);
+    assert_eq!(tables, 8);
+}
+
+#[tokio::test]
+#[serial(postgres)]
+async fn postgres_signed_sessions_reject_nonce_replay() {
+    let Some(storage) = fresh_test_storage().await else {
+        return;
+    };
+    let user = create_test_user(&storage, "signed@example.com").await;
+    let device = storage
+        .create_device(CreateDevice {
+            id: None,
+            user_id: user.id,
+            name: "signed laptop".to_owned(),
+            public_key: Some("device-public-key".to_owned()),
+            fingerprint: "signed-device".to_owned(),
+            trusted: true,
+        })
+        .await
+        .unwrap();
+    let session = storage
+        .create_session(CreateSession {
+            id: None,
+            user_id: user.id,
+            device_id: Some(device.id),
+            token_hash: "server-only-session-marker".to_owned(),
+            auth_scheme: "signed".to_owned(),
+            expires_at: chrono::Utc::now() + chrono::Duration::minutes(30),
+        })
+        .await
+        .unwrap();
+
+    let loaded = storage.find_active_session_by_id(session.id).await.unwrap();
+    assert_eq!(loaded.auth_scheme, "signed");
+    assert_eq!(loaded.device_id, Some(device.id));
+
+    storage
+        .remember_session_nonce(session.id, "nonce-1")
+        .await
+        .unwrap();
+    assert!(matches!(
+        storage.remember_session_nonce(session.id, "nonce-1").await,
+        Err(StorageError::Conflict)
+    ));
 }
 
 #[tokio::test]

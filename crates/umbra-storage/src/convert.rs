@@ -156,6 +156,7 @@ pub(crate) fn session_from_row(row: sqlx::postgres::PgRow) -> Result<SessionReco
         user_id: row.try_get("user_id")?,
         device_id: row.try_get("device_id")?,
         token_hash: row.try_get("token_hash")?,
+        auth_scheme: row.try_get("auth_scheme")?,
         created_at: row.try_get("created_at")?,
         expires_at: row.try_get("expires_at")?,
         revoked_at: row.try_get("revoked_at")?,

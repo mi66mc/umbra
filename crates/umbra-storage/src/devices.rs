@@ -48,6 +48,25 @@ impl Storage {
         rows.into_iter().map(device_from_row).collect()
     }
 
+    pub async fn find_device_by_id(
+        &self,
+        device_id: DeviceId,
+    ) -> Result<DeviceRecord, StorageError> {
+        let row = sqlx::query(
+            r#"
+            SELECT id, user_id, name, public_key, fingerprint, trusted, created_at, last_seen_at, revoked_at
+            FROM devices
+            WHERE id = $1
+            "#,
+        )
+        .bind(device_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+
+        device_from_row(row)
+    }
+
     pub async fn revoke_device(&self, device_id: DeviceId) -> Result<(), StorageError> {
         let result = sqlx::query("UPDATE devices SET revoked_at = now() WHERE id = $1")
             .bind(device_id)
