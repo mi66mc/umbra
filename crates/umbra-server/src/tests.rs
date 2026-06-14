@@ -599,7 +599,12 @@ where
         .unwrap();
     let status = response.status();
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    (status, serde_json::from_slice(&body).unwrap())
+    let body = if body.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_slice(&body).unwrap()
+    };
+    (status, serde_json::from_value(body).unwrap())
 }
 
 async fn signed_json_request<T, R>(
