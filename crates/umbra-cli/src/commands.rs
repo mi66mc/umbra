@@ -10,13 +10,85 @@ use crate::config::{
     CliConfig, active_profile, active_profile_mut, save_config, set_active_profile,
 };
 use crate::error::CliError;
-use crate::http::UmbraHttpClient;
+use crate::http::{PublicHttpClient, UmbraHttpClient};
+use crate::keys::DeviceSigningKey;
+use crate::output::print_json;
 use crate::{
     AuthCommand, Command, ItemCommand, ProfileCommand, SyncCommand, TokenCommand, VaultCommand,
 };
 
 pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError> {
     match command {
+        Command::Register {
+            server,
+            email,
+            profile,
+            display_name,
+            device_name,
+        } => {
+            set_active_profile(&mut config, profile.clone());
+            let password = rpassword::prompt_password("Master password: ")?;
+            let confirm = rpassword::prompt_password("Confirm master password: ")?;
+            if password != confirm {
+                return Err(CliError::Input("passwords do not match"));
+            }
+            let device_name = match device_name {
+                Some(name) => name,
+                None => dialoguer::Input::<String>::new()
+                    .with_prompt("Device name")
+                    .default("CLI device".to_owned())
+                    .interact_text()?,
+            };
+            let device_key = DeviceSigningKey::generate();
+            let client = PublicHttpClient::new(&server)?;
+            let response = crate::opaque::register(
+                &client,
+                &email,
+                display_name,
+                password.as_bytes(),
+                &device_name,
+                &device_key,
+            )
+            .await?;
+            let profile_config = active_profile_mut(&mut config);
+            profile_config.server_url = server;
+            profile_config.email = Some(email);
+            profile_config.user_id = Some(response.user_id);
+            profile_config.device_id = Some(response.device_id);
+            profile_config.device_private_key = Some(device_key.to_base64url());
+            profile_config.session_id = None;
+            profile_config.legacy_session_token = None;
+            save_config(&config)?;
+            println!("registered profile: {profile}");
+            Ok(())
+        }
+        Command::Login { profile, email } => {
+            if let Some(profile) = profile {
+                set_active_profile(&mut config, profile);
+            }
+            let profile_snapshot = active_profile(&config)?.clone();
+            let email = match email.or(profile_snapshot.email.clone()) {
+                Some(email) => email,
+                None => dialoguer::Input::<String>::new()
+                    .with_prompt("Email")
+                    .interact_text()?,
+            };
+            let device_id = profile_snapshot.device_id.ok_or(CliError::Input(
+                "profile has no device id; run `umbra register` first",
+            ))?;
+            let password = rpassword::prompt_password("Master password: ")?;
+            let client = PublicHttpClient::new(&profile_snapshot.server_url)?;
+            let response =
+                crate::opaque::login(&client, &email, password.as_bytes(), device_id).await?;
+            let profile_config = active_profile_mut(&mut config);
+            profile_config.email = Some(email);
+            profile_config.user_id = Some(response.user_id);
+            profile_config.session_id = Some(response.session_id);
+            profile_config.legacy_session_token = response.session_token;
+            save_config(&config)?;
+            println!("logged in: {}", config.active_profile);
+            Ok(())
+        }
         Command::Auth(AuthCommand::Token(TokenCommand::Set { server_url, token })) => {
             let profile = active_profile_mut(&mut config);
             profile.server_url = server_url;
@@ -49,8 +121,7 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
             require_login(profile)?;
             let client = UmbraHttpClient::new(profile)?;
             let vaults: Vec<VaultResponse> = client.get("/api/v1/vaults").await?;
-            println!("{}", serde_json::to_string_pretty(&vaults)?);
-            Ok(())
+            print_json(&vaults)
         }
         Command::Vault(VaultCommand::Create {
             name,
@@ -59,6 +130,18 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
             let profile = active_profile(&config)?;
             require_login(profile)?;
             let client = UmbraHttpClient::new(profile)?;
+            let name = match name {
+                Some(name) => name,
+                None => dialoguer::Input::<String>::new()
+                    .with_prompt("Vault name")
+                    .interact_text()?,
+            };
+            let wrapping_json = match wrapping_json {
+                Some(value) => value,
+                None => dialoguer::Input::<String>::new()
+                    .with_prompt("Initial vault key wrapping JSON")
+                    .interact_text()?,
+            };
             let vault: VaultResponse = client
                 .post(
                     "/api/v1/vaults",
@@ -70,8 +153,7 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
                     },
                 )
                 .await?;
-            println!("{}", serde_json::to_string_pretty(&vault)?);
-            Ok(())
+            print_json(&vault)
         }
         Command::Item(ItemCommand::Create {
             vault_id,
@@ -92,8 +174,7 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
                     },
                 )
                 .await?;
-            println!("{}", serde_json::to_string_pretty(&response)?);
-            Ok(())
+            print_json(&response)
         }
         Command::Item(ItemCommand::Update {
             vault_id,
@@ -116,8 +197,7 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
                     },
                 )
                 .await?;
-            println!("{}", serde_json::to_string_pretty(&response)?);
-            Ok(())
+            print_json(&response)
         }
         Command::Sync(SyncCommand::Run {
             vault_id,
@@ -140,8 +220,7 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
                     },
                 )
                 .await?;
-            println!("{}", serde_json::to_string_pretty(&response)?);
-            Ok(())
+            print_json(&response)
         }
     }
 }

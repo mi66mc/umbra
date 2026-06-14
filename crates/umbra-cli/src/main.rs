@@ -3,11 +3,16 @@ mod config;
 mod error;
 mod http;
 mod keys;
+mod opaque;
+mod output;
 
 #[cfg(test)]
 mod tests;
 
 use clap::{Parser, Subcommand};
+use opaque_ke::argon2::Argon2;
+use opaque_ke::ciphersuite::CipherSuite;
+use sha2::Sha512;
 use umbra_core::{ItemId, ItemKind, RevisionId, VaultId};
 
 use crate::commands::parse_item_kind;
@@ -24,6 +29,24 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    Register {
+        #[arg(long)]
+        server: String,
+        #[arg(long)]
+        email: String,
+        #[arg(long)]
+        profile: String,
+        #[arg(long)]
+        display_name: Option<String>,
+        #[arg(long)]
+        device_name: Option<String>,
+    },
+    Login {
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(long)]
+        email: Option<String>,
+    },
     #[command(subcommand)]
     Auth(AuthCommand),
     #[command(subcommand)]
@@ -32,8 +55,16 @@ pub enum Command {
     Vault(VaultCommand),
     #[command(subcommand)]
     Item(ItemCommand),
-    #[command(subcommand)]
+    #[command(subcommand, alias = "s")]
     Sync(SyncCommand),
+}
+
+pub(crate) struct OpaqueCipherSuite;
+
+impl CipherSuite for OpaqueCipherSuite {
+    type OprfCs = opaque_ke::Ristretto255;
+    type KeyExchange = opaque_ke::TripleDh<opaque_ke::Ristretto255, Sha512>;
+    type Ksf = Argon2<'static>;
 }
 
 #[derive(Debug, Subcommand)]
@@ -62,9 +93,9 @@ pub enum TokenCommand {
 pub enum VaultCommand {
     List,
     Create {
-        name: String,
+        name: Option<String>,
         #[arg(long)]
-        wrapping_json: String,
+        wrapping_json: Option<String>,
     },
 }
 
@@ -93,7 +124,7 @@ pub enum ItemCommand {
 #[derive(Debug, Subcommand)]
 pub enum SyncCommand {
     Run {
-        #[arg(long)]
+        #[arg(long = "vault", alias = "vault-id")]
         vault_id: VaultId,
         #[arg(long, default_value_t = 0)]
         since_vault_revision: RevisionId,
@@ -113,7 +144,9 @@ fn load_config_for_command(command: &Command) -> Result<CliConfig, CliError> {
         Err(CliError::TomlDecode(_))
             if matches!(
                 command,
-                Command::Auth(AuthCommand::Token(TokenCommand::Set { .. }))
+                Command::Register { .. }
+                    | Command::Login { .. }
+                    | Command::Auth(AuthCommand::Token(TokenCommand::Set { .. }))
             ) =>
         {
             Ok(CliConfig::default())

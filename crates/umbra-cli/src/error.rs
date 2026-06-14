@@ -20,6 +20,12 @@ pub enum CliError {
     NotLoggedIn,
     #[error("invalid base64url encoding")]
     InvalidEncoding,
+    #[error("opaque error: {0}")]
+    Opaque(&'static str),
+    #[error("input error: {0}")]
+    Input(&'static str),
+    #[error("prompt error: {0}")]
+    Prompt(#[from] dialoguer::Error),
     #[error("server returned {status}: {body}")]
     ServerStatus {
         status: reqwest::StatusCode,

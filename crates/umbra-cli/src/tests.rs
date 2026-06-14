@@ -44,8 +44,44 @@ fn parses_vault_create_as_personal_without_kind() {
         panic!("expected vault create command");
     };
 
-    assert_eq!(name, "personal");
-    assert_eq!(wrapping_json, r#"{"alg":"test"}"#);
+    assert_eq!(name.as_deref(), Some("personal"));
+    assert_eq!(wrapping_json.as_deref(), Some(r#"{"alg":"test"}"#));
+}
+
+#[test]
+fn parses_register_and_login_commands() {
+    let register = Cli::parse_from([
+        "umbra",
+        "register",
+        "--server",
+        "http://127.0.0.1:8080",
+        "--email",
+        "miguel@example.com",
+        "--profile",
+        "personal",
+    ]);
+    assert!(matches!(register.command, Command::Register { .. }));
+
+    let login = Cli::parse_from(["umbra", "login", "--profile", "personal"]);
+    assert!(matches!(login.command, Command::Login { .. }));
+}
+
+#[test]
+fn parses_sugar_commands() {
+    let vault = Cli::parse_from(["umbra", "vault", "create"]);
+    assert!(matches!(
+        vault.command,
+        Command::Vault(VaultCommand::Create { name: None, .. })
+    ));
+
+    let sync = Cli::parse_from([
+        "umbra",
+        "sync",
+        "run",
+        "--vault",
+        "00000000-0000-0000-0000-000000000001",
+    ]);
+    assert!(matches!(sync.command, Command::Sync(_)));
 }
 
 #[test]
