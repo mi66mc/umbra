@@ -57,13 +57,17 @@ pub struct OpaqueLoginStartResponse {
 pub struct OpaqueLoginFinishRequest {
     pub protocol_version: u16,
     pub login_id: uuid::Uuid,
+    #[serde(default)]
+    pub device_id: Option<DeviceId>,
     pub credential_finalization: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpaqueLoginFinishResponse {
     pub user_id: UserId,
-    pub session_token: String,
+    pub session_id: uuid::Uuid,
+    pub session_token: Option<String>,
+    pub auth_scheme: String,
     pub encrypted_private_key: serde_json::Value,
 }
 

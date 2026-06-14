@@ -2,6 +2,7 @@ use axum::{
     Json, Router,
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
+    middleware,
     routing::{delete, get, post},
 };
 use chrono::{Duration, Utc};
@@ -34,17 +35,12 @@ use crate::authz::{
     ensure_vault_member, ensure_vault_writer,
 };
 use crate::error::ServerError;
+use crate::signed_auth::auth_middleware;
 use crate::state::{AppState, OpaqueCipherSuite, PendingLogin};
 use crate::util::{decode_b64, encode_b64, ensure_protocol, random_token, token_hash};
 
 pub(crate) fn router(state: AppState) -> Router {
-    Router::new()
-        .route("/health", get(health))
-        .route("/ready", get(ready))
-        .route("/api/v1/auth/register/start", post(auth_register_start))
-        .route("/api/v1/auth/register/finish", post(auth_register_finish))
-        .route("/api/v1/auth/login/start", post(auth_login_start))
-        .route("/api/v1/auth/login/finish", post(auth_login_finish))
+    let protected = Router::new()
         .route("/api/v1/orgs", post(create_org).get(list_orgs))
         .route("/api/v1/orgs/:org_id", get(get_org))
         .route(
@@ -72,6 +68,19 @@ pub(crate) fn router(state: AppState) -> Router {
             get(rotation_status),
         )
         .route("/api/v1/vaults/:vault_id/rotate-key", post(rotate_key))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ));
+
+    Router::new()
+        .route("/health", get(health))
+        .route("/ready", get(ready))
+        .route("/api/v1/auth/register/start", post(auth_register_start))
+        .route("/api/v1/auth/register/finish", post(auth_register_finish))
+        .route("/api/v1/auth/login/start", post(auth_login_start))
+        .route("/api/v1/auth/login/finish", post(auth_login_finish))
+        .merge(protected)
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
@@ -222,23 +231,49 @@ async fn auth_login_finish(
         .finish(finalization, ServerLoginParameters::default())
         .map_err(|_| ServerError::Unauthorized)?;
     let user = state.storage.find_user_by_id(pending.user_id).await?;
-    let token = random_token();
     let expires_at = Utc::now() + Duration::minutes(state.config.security.session_ttl_minutes);
-    state
-        .storage
-        .create_session(CreateSession {
-            id: None,
-            user_id: user.id,
-            device_id: None,
-            token_hash: token_hash(&token),
-            auth_scheme: "bearer".to_owned(),
-            expires_at,
-        })
-        .await?;
+    let (session, session_token, auth_scheme) = if let Some(device_id) = request.device_id {
+        let device = state.storage.find_device_by_id(device_id).await?;
+        if device.user_id != user.id
+            || !device.trusted
+            || device.revoked_at.is_some()
+            || device.public_key.is_none()
+        {
+            return Err(ServerError::Unauthorized);
+        }
+        let session = state
+            .storage
+            .create_session(CreateSession {
+                id: None,
+                user_id: user.id,
+                device_id: Some(device_id),
+                token_hash: token_hash(&random_token()),
+                auth_scheme: "signed".to_owned(),
+                expires_at,
+            })
+            .await?;
+        (session, None, "signed".to_owned())
+    } else {
+        let token = random_token();
+        let session = state
+            .storage
+            .create_session(CreateSession {
+                id: None,
+                user_id: user.id,
+                device_id: None,
+                token_hash: token_hash(&token),
+                auth_scheme: "bearer".to_owned(),
+                expires_at,
+            })
+            .await?;
+        (session, Some(token), "bearer".to_owned())
+    };
 
     Ok(Json(OpaqueLoginFinishResponse {
         user_id: user.id,
-        session_token: token,
+        session_id: session.id,
+        session_token,
+        auth_scheme,
         encrypted_private_key: user.encrypted_private_key,
     }))
 }

@@ -4,6 +4,7 @@ mod config;
 mod error;
 mod http;
 mod server;
+mod signed_auth;
 mod state;
 mod util;
 

@@ -15,6 +15,10 @@ use serial_test::serial;
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::Mutex;
 use tower::ServiceExt;
+use umbra_auth::{
+    HEADER_BODY_SHA256, HEADER_DEVICE_ID, HEADER_NONCE, HEADER_SESSION_ID, HEADER_SIGNATURE,
+    HEADER_TIMESTAMP, SignedRequestParts, body_sha256_b64, sign_request, verifying_key_to_b64,
+};
 use umbra_core::{VaultKind, VaultRole};
 use umbra_protocol::{
     AddVaultMemberRequest, CreateItemRequest, CreateOrgRequest, CreateVaultRequest,
@@ -25,6 +29,7 @@ use umbra_protocol::{
     VaultResponse, VaultSyncCursor,
 };
 use umbra_storage::Storage;
+use uuid::Uuid;
 
 use crate::config::AppConfig;
 use crate::error::ServerError;
@@ -264,6 +269,149 @@ async fn owner_can_create_update_and_sync_item_revisions() {
     assert_eq!(sync.vaults[0].key_wrappings.len(), 1);
 }
 
+#[tokio::test]
+#[serial(postgres)]
+async fn signed_login_can_create_org_and_rejects_nonce_replay() {
+    let Some(storage) = fresh_test_storage().await else {
+        return;
+    };
+    let app = router(test_state_with_storage(storage));
+    let signing_key = ed25519_dalek::SigningKey::generate(&mut rand_core::OsRng);
+    let email = "signed-login@example.com";
+    let password = b"signed login password";
+
+    let registration_start =
+        ClientRegistration::<OpaqueCipherSuite>::start(&mut OsRng, password).unwrap();
+    let (status, start_response): (StatusCode, OpaqueRegisterStartResponse) = json_request(
+        app.clone(),
+        Method::POST,
+        "/api/v1/auth/register/start",
+        None,
+        &OpaqueRegisterStartRequest {
+            protocol_version: PROTOCOL_VERSION,
+            email: email.to_owned(),
+            registration_request: encode_b64(registration_start.message.serialize().as_slice()),
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let registration_response = RegistrationResponse::<OpaqueCipherSuite>::deserialize(
+        &decode_b64(&start_response.registration_response).unwrap(),
+    )
+    .unwrap();
+    let registration_finish = registration_start
+        .state
+        .finish(
+            &mut OsRng,
+            password,
+            registration_response,
+            ClientRegistrationFinishParameters::default(),
+        )
+        .unwrap();
+    let (status, register): (StatusCode, RegisterResponse) = json_request(
+        app.clone(),
+        Method::POST,
+        "/api/v1/auth/register/finish",
+        None,
+        &OpaqueRegisterFinishRequest {
+            protocol_version: PROTOCOL_VERSION,
+            registration_id: start_response.registration_id,
+            email: email.to_owned(),
+            display_name: Some("Signed".to_owned()),
+            public_key: "user-public-key".to_owned(),
+            encrypted_private_key: json!({"ciphertext": "private"}),
+            initial_device: DeviceRegisterRequest {
+                name: "signed laptop".to_owned(),
+                public_key: verifying_key_to_b64(&signing_key.verifying_key()),
+                fingerprint: "signed-device-fingerprint".to_owned(),
+            },
+            registration_upload: encode_b64(registration_finish.message.serialize().as_slice()),
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let login_start = ClientLogin::<OpaqueCipherSuite>::start(&mut OsRng, password).unwrap();
+    let (status, login_response): (StatusCode, OpaqueLoginStartResponse) = json_request(
+        app.clone(),
+        Method::POST,
+        "/api/v1/auth/login/start",
+        None,
+        &OpaqueLoginStartRequest {
+            protocol_version: PROTOCOL_VERSION,
+            email: email.to_owned(),
+            credential_request: encode_b64(login_start.message.serialize().as_slice()),
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let credential_response = CredentialResponse::<OpaqueCipherSuite>::deserialize(
+        &decode_b64(&login_response.credential_response).unwrap(),
+    )
+    .unwrap();
+    let login_finish = login_start
+        .state
+        .finish(
+            &mut OsRng,
+            password,
+            credential_response,
+            ClientLoginFinishParameters::default(),
+        )
+        .unwrap();
+    let (status, finish): (StatusCode, OpaqueLoginFinishResponse) = json_request(
+        app.clone(),
+        Method::POST,
+        "/api/v1/auth/login/finish",
+        None,
+        &OpaqueLoginFinishRequest {
+            protocol_version: PROTOCOL_VERSION,
+            login_id: login_response.login_id,
+            device_id: Some(register.device_id),
+            credential_finalization: encode_b64(login_finish.message.serialize().as_slice()),
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(finish.auth_scheme, "signed");
+    assert_eq!(finish.session_token, None);
+
+    let nonce = Uuid::new_v4().to_string();
+    let (status, org): (StatusCode, OrgResponse) = signed_json_request(
+        app.clone(),
+        Method::POST,
+        "/api/v1/orgs",
+        finish.session_id,
+        register.device_id,
+        &signing_key,
+        &nonce,
+        &CreateOrgRequest {
+            protocol_version: PROTOCOL_VERSION,
+            name: "Signed Org".to_owned(),
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(org.name, "Signed Org");
+
+    let (status, _body): (StatusCode, serde_json::Value) = signed_json_request(
+        app,
+        Method::POST,
+        "/api/v1/orgs",
+        finish.session_id,
+        register.device_id,
+        &signing_key,
+        &nonce,
+        &CreateOrgRequest {
+            protocol_version: PROTOCOL_VERSION,
+            name: "Replay Org".to_owned(),
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
 async fn register_and_login(app: Router, email: &str, password: &[u8]) -> String {
     let registration_start =
         ClientRegistration::<OpaqueCipherSuite>::start(&mut OsRng, password).unwrap();
@@ -353,13 +501,16 @@ async fn register_and_login(app: Router, email: &str, password: &[u8]) -> String
         &OpaqueLoginFinishRequest {
             protocol_version: PROTOCOL_VERSION,
             login_id: login_response.login_id,
+            device_id: None,
             credential_finalization: encode_b64(login_finish.message.serialize().as_slice()),
         },
     )
     .await;
     assert_eq!(status, StatusCode::OK);
 
-    finish.session_token
+    finish
+        .session_token
+        .expect("legacy bearer login returns a session token")
 }
 
 async fn login_user_id(app: Router, email: &str, password: &[u8]) -> uuid::Uuid {
@@ -399,6 +550,7 @@ async fn login_user_id(app: Router, email: &str, password: &[u8]) -> uuid::Uuid 
         &OpaqueLoginFinishRequest {
             protocol_version: PROTOCOL_VERSION,
             login_id: login_response.login_id,
+            device_id: None,
             credential_finalization: encode_b64(login_finish.message.serialize().as_slice()),
         },
     )
@@ -430,6 +582,55 @@ where
         .oneshot(
             builder
                 .body(Body::from(serde_json::to_vec(body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    (status, serde_json::from_slice(&body).unwrap())
+}
+
+async fn signed_json_request<T, R>(
+    app: Router,
+    method: Method,
+    uri: &str,
+    session_id: Uuid,
+    device_id: Uuid,
+    signing_key: &ed25519_dalek::SigningKey,
+    nonce: &str,
+    body: &T,
+) -> (StatusCode, R)
+where
+    T: Serialize,
+    R: for<'de> Deserialize<'de>,
+{
+    let body_bytes = serde_json::to_vec(body).unwrap();
+    let timestamp_unix = chrono::Utc::now().timestamp();
+    let body_hash = body_sha256_b64(&body_bytes);
+    let parts = SignedRequestParts {
+        method: method.as_str().to_owned(),
+        path_and_query: uri.to_owned(),
+        body_sha256: body_hash.clone(),
+        timestamp_unix,
+        nonce: nonce.to_owned(),
+        session_id,
+        device_id,
+    };
+    let signature = sign_request(signing_key, &parts);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(HEADER_SESSION_ID, session_id.to_string())
+                .header(HEADER_DEVICE_ID, device_id.to_string())
+                .header(HEADER_TIMESTAMP, timestamp_unix.to_string())
+                .header(HEADER_NONCE, nonce)
+                .header(HEADER_BODY_SHA256, body_hash)
+                .header(HEADER_SIGNATURE, signature)
+                .body(Body::from(body_bytes))
                 .unwrap(),
         )
         .await

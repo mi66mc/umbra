@@ -3,6 +3,7 @@ use umbra_core::{MemberState, UserId, VaultRole};
 use uuid::Uuid;
 
 use crate::error::ServerError;
+use crate::signed_auth::authenticated_user_from_headers;
 use crate::state::AppState;
 use crate::util::token_hash;
 
@@ -10,6 +11,10 @@ pub(crate) async fn authenticate(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Result<UserId, ServerError> {
+    if let Some(authenticated) = authenticated_user_from_headers(headers) {
+        return Ok(authenticated.user_id);
+    }
+
     let token = headers
         .get("authorization")
         .and_then(|value| value.to_str().ok())
