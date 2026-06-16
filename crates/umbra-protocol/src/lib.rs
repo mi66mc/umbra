@@ -107,6 +107,8 @@ pub struct DeviceTrustRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateVaultRequest {
     pub protocol_version: u16,
+    #[serde(default)]
+    pub vault_id: Option<VaultId>,
     pub name: String,
     pub kind: VaultKind,
     pub initial_key_wrapping: serde_json::Value,
@@ -134,6 +136,8 @@ pub struct AddOrgMemberRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateOrgVaultRequest {
     pub protocol_version: u16,
+    #[serde(default)]
+    pub vault_id: Option<VaultId>,
     pub name: String,
     pub kind: VaultKind,
     pub initial_key_wrapping: serde_json::Value,

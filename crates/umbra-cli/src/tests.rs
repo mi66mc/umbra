@@ -49,6 +49,22 @@ fn parses_vault_create_as_personal_without_kind() {
 }
 
 #[test]
+fn parses_vault_create_without_wrapping_json() {
+    let cli = Cli::parse_from(["umbra", "vault", "create", "personal"]);
+
+    let Command::Vault(VaultCommand::Create {
+        name,
+        wrapping_json,
+    }) = cli.command
+    else {
+        panic!("expected vault create command");
+    };
+
+    assert_eq!(name.as_deref(), Some("personal"));
+    assert_eq!(wrapping_json, None);
+}
+
+#[test]
 fn parses_register_and_login_commands() {
     let register = Cli::parse_from([
         "umbra",

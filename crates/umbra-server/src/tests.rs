@@ -106,6 +106,7 @@ async fn opaque_login_token_can_create_org_and_personal_vault() {
         Some(&token),
         &CreateVaultRequest {
             protocol_version: PROTOCOL_VERSION,
+            vault_id: None,
             name: "Personal".to_owned(),
             kind: VaultKind::Personal,
             initial_key_wrapping: json!({"wrapped": true}),
@@ -115,6 +116,35 @@ async fn opaque_login_token_can_create_org_and_personal_vault() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(vault.org_id, None);
     assert_eq!(vault.current_key_generation, 1);
+}
+
+#[tokio::test]
+#[serial(postgres)]
+async fn create_vault_returns_client_supplied_id() {
+    let Some(storage) = fresh_test_storage().await else {
+        return;
+    };
+    let app = router(test_state_with_storage(storage));
+    let token = register_and_login(app.clone(), "vault-id@example.com", b"vault id password").await;
+    let requested_vault_id = Uuid::new_v4();
+
+    let (status, vault): (StatusCode, VaultResponse) = json_request(
+        app,
+        Method::POST,
+        "/api/v1/vaults",
+        Some(&token),
+        &CreateVaultRequest {
+            protocol_version: PROTOCOL_VERSION,
+            vault_id: Some(requested_vault_id),
+            name: "Bound Vault".to_owned(),
+            kind: VaultKind::Personal,
+            initial_key_wrapping: json!({"wrapped": true}),
+        },
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(vault.vault_id, requested_vault_id);
 }
 
 #[tokio::test]
@@ -136,6 +166,7 @@ async fn viewer_cannot_create_item() {
         Some(&owner_token),
         &CreateVaultRequest {
             protocol_version: PROTOCOL_VERSION,
+            vault_id: None,
             name: "Shared".to_owned(),
             kind: VaultKind::Shared,
             initial_key_wrapping: json!({"owner": true}),
@@ -192,6 +223,7 @@ async fn owner_can_create_update_and_sync_item_revisions() {
         Some(&token),
         &CreateVaultRequest {
             protocol_version: PROTOCOL_VERSION,
+            vault_id: None,
             name: "Personal".to_owned(),
             kind: VaultKind::Personal,
             initial_key_wrapping: json!({"wrapped": true}),

@@ -390,6 +390,7 @@ async fn create_personal_vault(
         state,
         headers,
         None,
+        request.vault_id,
         request.name,
         request.kind,
         request.initial_key_wrapping,
@@ -408,6 +409,7 @@ async fn create_org_vault(
         state,
         headers,
         Some(org_id),
+        request.vault_id,
         request.name,
         request.kind,
         request.initial_key_wrapping,
@@ -419,6 +421,7 @@ async fn create_vault_inner(
     state: AppState,
     headers: HeaderMap,
     org_id: Option<Uuid>,
+    requested_vault_id: Option<Uuid>,
     name: String,
     kind: VaultKind,
     initial_key_wrapping: Value,
@@ -430,7 +433,7 @@ async fn create_vault_inner(
     let vault = state
         .storage
         .create_vault(CreateVault {
-            id: None,
+            id: requested_vault_id,
             org_id,
             name,
             kind,

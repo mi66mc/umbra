@@ -1,5 +1,6 @@
 use serde_json::Value;
 use umbra_core::{ItemKind, VaultKind};
+use umbra_crypto::{AadV1, MasterPassword, generate_vault_key, wrap_vault_key_for_user};
 use umbra_protocol::{
     CreateItemRequest, CreateVaultRequest, PROTOCOL_VERSION, SyncRequest, SyncResponse,
     UpdateItemRequest, VaultResponse, VaultSyncCursor,
@@ -157,20 +158,30 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
                     .with_prompt("Vault name")
                     .interact_text()?,
             };
-            let wrapping_json = match wrapping_json {
-                Some(value) => value,
-                None => dialoguer::Input::<String>::new()
-                    .with_prompt("Initial vault key wrapping JSON")
-                    .interact_text()?,
+            let requested_vault_id = Uuid::new_v4();
+            let initial_key_wrapping = match wrapping_json {
+                Some(value) => serde_json::from_str(&value)?,
+                None => {
+                    let password = rpassword::prompt_password("Master password: ")?;
+                    let unlocked = crate::crypto_state::load_unlocked_profile(
+                        profile,
+                        &MasterPassword::new(password.into_bytes()),
+                    )?;
+                    let vault_key = generate_vault_key();
+                    let aad = AadV1::vault_key_wrapping(requested_vault_id.to_string());
+                    let wrapping = wrap_vault_key_for_user(&unlocked.public_key, &vault_key, aad)?;
+                    serde_json::to_value(wrapping)?
+                }
             };
             let vault: VaultResponse = client
                 .post(
                     "/api/v1/vaults",
                     &CreateVaultRequest {
                         protocol_version: PROTOCOL_VERSION,
+                        vault_id: Some(requested_vault_id),
                         name,
                         kind: VaultKind::Personal,
-                        initial_key_wrapping: serde_json::from_str(&wrapping_json)?,
+                        initial_key_wrapping,
                     },
                 )
                 .await?;
