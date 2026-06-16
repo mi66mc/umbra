@@ -60,6 +60,8 @@ pub enum Command {
     Vault(VaultCommand),
     #[command(subcommand)]
     Item(ItemCommand),
+    #[command(subcommand)]
+    Secret(SecretCommand),
     #[command(subcommand, alias = "s")]
     Sync(SyncCommand),
 }
@@ -131,7 +133,15 @@ pub enum ItemCommand {
         #[arg(long, value_parser = parse_item_kind)]
         kind: ItemKind,
         #[arg(long)]
-        envelope_json: String,
+        title: Option<String>,
+        #[arg(long = "field")]
+        fields: Vec<String>,
+        #[arg(long)]
+        notes: Option<String>,
+        #[arg(long = "tag")]
+        tags: Vec<String>,
+        #[arg(long)]
+        envelope_json: Option<String>,
     },
     Update {
         #[arg(long)]
@@ -142,6 +152,23 @@ pub enum ItemCommand {
         expected_revision: RevisionId,
         #[arg(long)]
         envelope_json: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SecretCommand {
+    Set {
+        project_env: String,
+        key: String,
+        value: Option<String>,
+        #[arg(long)]
+        vault_id: VaultId,
+    },
+    Get {
+        project_env: String,
+        key: String,
+        #[arg(long)]
+        vault_id: VaultId,
     },
 }
 

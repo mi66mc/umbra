@@ -1,6 +1,10 @@
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use umbra_core::{ItemKind, VaultKind};
-use umbra_crypto::{AadV1, MasterPassword, generate_vault_key, wrap_vault_key_for_user};
+use umbra_core::{ItemKind, ItemPlaintextV1, VaultId, VaultKind};
+use umbra_crypto::{
+    AadV1, CryptoEnvelopeV1, MasterPassword, VaultKey, VaultKeyWrappingEnvelopeV1, decrypt_item,
+    encrypt_item, generate_vault_key, unwrap_vault_key, wrap_vault_key_for_user,
+};
 use umbra_protocol::{
     CreateItemRequest, CreateVaultRequest, PROTOCOL_VERSION, SyncRequest, SyncResponse,
     UpdateItemRequest, VaultResponse, VaultSyncCursor,
@@ -15,9 +19,15 @@ use crate::http::{PublicHttpClient, UmbraHttpClient};
 use crate::keys::DeviceSigningKey;
 use crate::output::print_json;
 use crate::{
-    AuthCommand, CacheCommand, Command, ItemCommand, ProfileCommand, SyncCommand, TokenCommand,
-    VaultCommand,
+    AuthCommand, CacheCommand, Command, ItemCommand, ProfileCommand, SecretCommand, SyncCommand,
+    TokenCommand, VaultCommand,
 };
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ItemEnvelopeWrapper {
+    kind: String,
+    crypto: CryptoEnvelopeV1,
+}
 
 pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError> {
     match command {
@@ -210,24 +220,54 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
             let Some(revision) = cache.latest_item_revision(vault_id, item_id)? else {
                 return Err(CliError::Input("cached item not found"));
             };
-            print_json(&revision)
+            let profile = active_profile(&config)?;
+            let vault_key = unlock_vault_key_from_cache(profile, &cache, vault_id)?;
+            let item = decrypt_cached_item(&vault_key, &revision)?;
+            print_json(&item.plaintext)
         }
         Command::Item(ItemCommand::Create {
             vault_id,
             kind,
+            title,
+            fields,
+            notes,
+            tags,
             envelope_json,
         }) => {
             let profile = active_profile(&config)?;
             require_login(profile)?;
             let client = UmbraHttpClient::new(profile)?;
+            let (item_id, envelope) = match envelope_json {
+                Some(envelope_json) => (None, serde_json::from_str(&envelope_json)?),
+                None => {
+                    let cache = crate::cache::LocalCache::open(&config.active_profile)?;
+                    let vault_key = unlock_vault_key_from_cache(profile, &cache, vault_id)?;
+                    let item_id = Uuid::new_v4();
+                    let kind_name = item_kind_name(&kind);
+                    let title = title.unwrap_or_else(|| kind_name.clone());
+                    let plaintext = crate::item_plaintext::build_item(
+                        &title,
+                        parse_field_pairs(fields)?,
+                        notes,
+                        tags,
+                    );
+                    (
+                        Some(item_id),
+                        encrypt_item_plaintext(
+                            vault_id, item_id, 1, kind_name, &vault_key, &plaintext,
+                        )?,
+                    )
+                }
+            };
             let response: Value = client
                 .post(
                     &format!("/api/v1/vaults/{vault_id}/items"),
                     &CreateItemRequest {
                         protocol_version: PROTOCOL_VERSION,
                         vault_id,
+                        item_id,
                         kind,
-                        envelope: serde_json::from_str(&envelope_json)?,
+                        envelope,
                     },
                 )
                 .await?;
@@ -255,6 +295,69 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
                 )
                 .await?;
             print_json(&response)
+        }
+        Command::Secret(SecretCommand::Set {
+            project_env,
+            key,
+            value,
+            vault_id,
+        }) => {
+            let profile = active_profile(&config)?;
+            require_login(profile)?;
+            let client = UmbraHttpClient::new(profile)?;
+            let value = match value {
+                Some(value) => value,
+                None => rpassword::prompt_password("Value: ")?,
+            };
+            let cache = crate::cache::LocalCache::open(&config.active_profile)?;
+            let vault_key = unlock_vault_key_from_cache(profile, &cache, vault_id)?;
+            let item_id = Uuid::new_v4();
+            let kind = ItemKind::EnvBundle;
+            let kind_name = item_kind_name(&kind);
+            let plaintext = crate::item_plaintext::build_secret_bundle(&project_env, &key, &value);
+            let envelope =
+                encrypt_item_plaintext(vault_id, item_id, 1, kind_name, &vault_key, &plaintext)?;
+            let response: Value = client
+                .post(
+                    &format!("/api/v1/vaults/{vault_id}/items"),
+                    &CreateItemRequest {
+                        protocol_version: PROTOCOL_VERSION,
+                        vault_id,
+                        item_id: Some(item_id),
+                        kind,
+                        envelope,
+                    },
+                )
+                .await?;
+            print_json(&response)
+        }
+        Command::Secret(SecretCommand::Get {
+            project_env,
+            key,
+            vault_id,
+        }) => {
+            let profile = active_profile(&config)?;
+            let cache = crate::cache::LocalCache::open(&config.active_profile)?;
+            let vault_key = unlock_vault_key_from_cache(profile, &cache, vault_id)?;
+            for revision in cache.list_latest_item_revisions(vault_id)? {
+                let Ok(wrapper) =
+                    serde_json::from_value::<ItemEnvelopeWrapper>(revision.envelope.clone())
+                else {
+                    continue;
+                };
+                if wrapper.kind != "env_bundle" {
+                    continue;
+                }
+                let item = decrypt_cached_item_wrapper(&vault_key, &revision, wrapper)?;
+                if item.plaintext.title != project_env {
+                    continue;
+                }
+                if let Some(field) = item.plaintext.fields.iter().find(|field| field.name == key) {
+                    println!("{}", field.value);
+                    return Ok(());
+                }
+            }
+            Err(CliError::Input("secret not found"))
         }
         Command::Sync(SyncCommand::Run {
             vault_id,
@@ -303,6 +406,108 @@ fn require_login(profile: &crate::config::ProfileConfig) -> Result<(), CliError>
         Ok(())
     } else {
         Err(CliError::NotLoggedIn)
+    }
+}
+
+struct DecryptedCachedItem {
+    plaintext: ItemPlaintextV1,
+}
+
+fn unlock_vault_key_from_cache(
+    profile: &crate::config::ProfileConfig,
+    cache: &crate::cache::LocalCache,
+    vault_id: VaultId,
+) -> Result<VaultKey, CliError> {
+    let user_id = profile.user_id.ok_or(CliError::Input(
+        "profile has no user id; run `umbra login` first",
+    ))?;
+    let password = rpassword::prompt_password("Master password: ")?;
+    let unlocked = crate::crypto_state::load_unlocked_profile(
+        profile,
+        &MasterPassword::new(password.into_bytes()),
+    )?;
+    let wrapping = cache
+        .latest_key_wrapping(vault_id, user_id)?
+        .ok_or(CliError::MissingVaultKeyWrapping(vault_id))?;
+    let envelope: VaultKeyWrappingEnvelopeV1 = serde_json::from_value(wrapping.envelope)?;
+    let aad = AadV1::vault_key_wrapping(vault_id.to_string());
+
+    unwrap_vault_key(&unlocked.private_key, &aad, &envelope).map_err(CliError::from)
+}
+
+fn encrypt_item_plaintext(
+    vault_id: VaultId,
+    item_id: Uuid,
+    revision: i64,
+    kind_name: String,
+    vault_key: &VaultKey,
+    plaintext: &ItemPlaintextV1,
+) -> Result<Value, CliError> {
+    let aad = AadV1::item(
+        vault_id.to_string(),
+        item_id.to_string(),
+        revision,
+        kind_name.clone(),
+    );
+    let crypto = encrypt_item(vault_key, aad, &serde_json::to_vec(plaintext)?)?;
+    Ok(serde_json::to_value(ItemEnvelopeWrapper {
+        kind: kind_name,
+        crypto,
+    })?)
+}
+
+fn decrypt_cached_item(
+    vault_key: &VaultKey,
+    revision: &crate::cache::CachedItemRevision,
+) -> Result<DecryptedCachedItem, CliError> {
+    let wrapper: ItemEnvelopeWrapper = serde_json::from_value(revision.envelope.clone())?;
+    decrypt_cached_item_wrapper(vault_key, revision, wrapper)
+}
+
+fn decrypt_cached_item_wrapper(
+    vault_key: &VaultKey,
+    revision: &crate::cache::CachedItemRevision,
+    wrapper: ItemEnvelopeWrapper,
+) -> Result<DecryptedCachedItem, CliError> {
+    let aad = AadV1::item(
+        revision.vault_id.to_string(),
+        revision.item_id.to_string(),
+        revision.revision,
+        wrapper.kind,
+    );
+    let plaintext = decrypt_item(vault_key, &aad, &wrapper.crypto)?;
+
+    Ok(DecryptedCachedItem {
+        plaintext: serde_json::from_slice(&plaintext)?,
+    })
+}
+
+pub(crate) fn parse_field_pairs(values: Vec<String>) -> Result<Vec<(String, String)>, CliError> {
+    values
+        .into_iter()
+        .map(|value| {
+            let (name, field_value) = value
+                .split_once('=')
+                .ok_or(CliError::Input("field must use name=value"))?;
+            if name.is_empty() {
+                return Err(CliError::Input("field name cannot be empty"));
+            }
+            Ok((name.to_owned(), field_value.to_owned()))
+        })
+        .collect()
+}
+
+pub(crate) fn item_kind_name(kind: &ItemKind) -> String {
+    match kind {
+        ItemKind::Login => "login".to_owned(),
+        ItemKind::SecureNote => "secure_note".to_owned(),
+        ItemKind::SshKey => "ssh_key".to_owned(),
+        ItemKind::ApiKey => "api_key".to_owned(),
+        ItemKind::Token => "token".to_owned(),
+        ItemKind::EnvVar => "env_var".to_owned(),
+        ItemKind::EnvBundle => "env_bundle".to_owned(),
+        ItemKind::CreditCard => "credit_card".to_owned(),
+        ItemKind::Custom(name) => format!("custom:{name}"),
     }
 }
 

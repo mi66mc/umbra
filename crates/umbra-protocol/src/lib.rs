@@ -211,6 +211,8 @@ pub struct AcceptInviteRequest {
 pub struct CreateItemRequest {
     pub protocol_version: u16,
     pub vault_id: VaultId,
+    #[serde(default)]
+    pub item_id: Option<ItemId>,
     pub kind: ItemKind,
     pub envelope: serde_json::Value,
 }

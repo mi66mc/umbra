@@ -198,6 +198,7 @@ async fn viewer_cannot_create_item() {
         &CreateItemRequest {
             protocol_version: PROTOCOL_VERSION,
             vault_id: owner_vault.vault_id,
+            item_id: None,
             kind: umbra_core::ItemKind::ApiKey,
             envelope: json!({"ciphertext": "viewer-write"}),
         },
@@ -239,6 +240,7 @@ async fn owner_can_create_update_and_sync_item_revisions() {
         &CreateItemRequest {
             protocol_version: PROTOCOL_VERSION,
             vault_id: vault.vault_id,
+            item_id: None,
             kind: umbra_core::ItemKind::ApiKey,
             envelope: json!({"ciphertext": "v1"}),
         },
@@ -299,6 +301,50 @@ async fn owner_can_create_update_and_sync_item_revisions() {
         json!({"ciphertext": "v2"})
     );
     assert_eq!(sync.vaults[0].key_wrappings.len(), 1);
+}
+
+#[tokio::test]
+#[serial(postgres)]
+async fn create_item_returns_client_supplied_id() {
+    let Some(storage) = fresh_test_storage().await else {
+        return;
+    };
+    let app = router(test_state_with_storage(storage));
+    let token = register_and_login(app.clone(), "item-id@example.com", b"item id password").await;
+
+    let (_status, vault): (StatusCode, VaultResponse) = json_request(
+        app.clone(),
+        Method::POST,
+        "/api/v1/vaults",
+        Some(&token),
+        &CreateVaultRequest {
+            protocol_version: PROTOCOL_VERSION,
+            vault_id: None,
+            name: "Personal".to_owned(),
+            kind: VaultKind::Personal,
+            initial_key_wrapping: json!({"wrapped": true}),
+        },
+    )
+    .await;
+    let requested_item_id = Uuid::new_v4();
+
+    let (status, created): (StatusCode, ItemRevisionResponse) = json_request(
+        app,
+        Method::POST,
+        &format!("/api/v1/vaults/{}/items", vault.vault_id),
+        Some(&token),
+        &CreateItemRequest {
+            protocol_version: PROTOCOL_VERSION,
+            vault_id: vault.vault_id,
+            item_id: Some(requested_item_id),
+            kind: umbra_core::ItemKind::ApiKey,
+            envelope: json!({"ciphertext": "v1"}),
+        },
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(created.item_id, requested_item_id);
 }
 
 #[tokio::test]

@@ -1,7 +1,10 @@
 use clap::Parser;
 
 use crate::config::{CliConfig, ProfileConfig};
-use crate::{AuthCommand, CacheCommand, Cli, Command, ProfileCommand, TokenCommand, VaultCommand};
+use crate::{
+    AuthCommand, CacheCommand, Cli, Command, ItemCommand, ProfileCommand, SecretCommand,
+    TokenCommand, VaultCommand,
+};
 
 #[test]
 fn parses_token_set_command() {
@@ -148,6 +151,95 @@ fn parses_cached_item_commands() {
     assert!(matches!(
         get.command,
         Command::Item(crate::ItemCommand::Get { cached: true, .. })
+    ));
+}
+
+#[test]
+fn parses_item_create_plaintext() {
+    let cli = Cli::parse_from([
+        "umbra",
+        "item",
+        "create",
+        "--vault-id",
+        "00000000-0000-0000-0000-000000000001",
+        "--kind",
+        "login",
+        "--title",
+        "Example",
+        "--field",
+        "username=miguel",
+        "--field",
+        "password=secret",
+        "--notes",
+        "private note",
+        "--tag",
+        "work",
+        "--tag",
+        "prod",
+    ]);
+
+    let Command::Item(ItemCommand::Create {
+        kind,
+        title,
+        fields,
+        notes,
+        tags,
+        envelope_json,
+        ..
+    }) = cli.command
+    else {
+        panic!("expected item create command");
+    };
+
+    assert_eq!(kind, umbra_core::ItemKind::Login);
+    assert_eq!(title.as_deref(), Some("Example"));
+    assert_eq!(
+        fields,
+        vec!["username=miguel".to_owned(), "password=secret".to_owned()]
+    );
+    assert_eq!(notes.as_deref(), Some("private note"));
+    assert_eq!(tags, vec!["work".to_owned(), "prod".to_owned()]);
+    assert_eq!(envelope_json, None);
+}
+
+#[test]
+fn parses_secret_commands() {
+    let set = Cli::parse_from([
+        "umbra",
+        "secret",
+        "set",
+        "umbra/prod",
+        "OPENAI_API_KEY",
+        "secret-value",
+        "--vault-id",
+        "00000000-0000-0000-0000-000000000001",
+    ]);
+    assert!(matches!(
+        set.command,
+        Command::Secret(SecretCommand::Set {
+            project_env,
+            key,
+            value: Some(_),
+            ..
+        }) if project_env == "umbra/prod" && key == "OPENAI_API_KEY"
+    ));
+
+    let get = Cli::parse_from([
+        "umbra",
+        "secret",
+        "get",
+        "umbra/prod",
+        "OPENAI_API_KEY",
+        "--vault-id",
+        "00000000-0000-0000-0000-000000000001",
+    ]);
+    assert!(matches!(
+        get.command,
+        Command::Secret(SecretCommand::Get {
+            project_env,
+            key,
+            ..
+        }) if project_env == "umbra/prod" && key == "OPENAI_API_KEY"
     ));
 }
 

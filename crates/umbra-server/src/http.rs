@@ -541,7 +541,7 @@ async fn create_item(
     let revision = state
         .storage
         .create_encrypted_item(CreateEncryptedItem {
-            item_id: None,
+            item_id: request.item_id,
             revision_id: None,
             vault_id,
             kind: request.kind,
