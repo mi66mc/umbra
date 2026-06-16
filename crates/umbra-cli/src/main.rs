@@ -4,6 +4,7 @@ mod config;
 mod crypto_state;
 mod error;
 mod http;
+mod item_plaintext;
 mod keys;
 mod opaque;
 mod output;

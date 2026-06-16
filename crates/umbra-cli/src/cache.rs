@@ -20,8 +20,8 @@ pub struct CachedItemRevision {
     pub envelope: serde_json::Value,
 }
 
-#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[allow(dead_code)]
 pub struct CachedKeyWrapping {
     pub id: uuid::Uuid,
     pub vault_id: uuid::Uuid,
@@ -192,7 +192,7 @@ impl LocalCache {
         rows.collect::<Result<Vec<_>, _>>().map_err(CliError::from)
     }
 
-    #[cfg(test)]
+    #[allow(dead_code)]
     pub fn list_key_wrappings(
         &self,
         vault_id: uuid::Uuid,
@@ -208,6 +208,32 @@ impl LocalCache {
         let rows =
             statement.query_map(params![vault_id.to_string()], cached_key_wrapping_from_row)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(CliError::from)
+    }
+
+    #[allow(dead_code)]
+    pub fn latest_key_wrapping(
+        &self,
+        vault_id: uuid::Uuid,
+        user_id: uuid::Uuid,
+    ) -> Result<Option<CachedKeyWrapping>, CliError> {
+        let mut statement = self.connection.prepare(
+            r#"
+            SELECT id, vault_id, user_id, device_id, wrapping_type, envelope_json, key_generation
+            FROM vault_key_wrappings
+            WHERE vault_id = ?1 AND user_id = ?2
+            ORDER BY key_generation DESC
+            LIMIT 1
+            "#,
+        )?;
+        let result = statement.query_row(
+            params![vault_id.to_string(), user_id.to_string()],
+            cached_key_wrapping_from_row,
+        );
+        match result {
+            Ok(value) => Ok(Some(value)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(CliError::from(error)),
+        }
     }
 
     pub fn list_latest_item_revisions(
@@ -399,7 +425,7 @@ fn cached_item_revision_from_row(
     })
 }
 
-#[cfg(test)]
+#[allow(dead_code)]
 fn cached_key_wrapping_from_row(
     row: &rusqlite::Row<'_>,
 ) -> Result<CachedKeyWrapping, rusqlite::Error> {
@@ -460,6 +486,8 @@ mod tests {
         let item_id = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
         let wrapping_id = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000003").unwrap();
         let user_id = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000004").unwrap();
+        let latest_wrapping_id =
+            uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000005").unwrap();
         let changes = umbra_protocol::VaultSyncChanges {
             vault_id,
             latest_vault_revision: 7,
@@ -473,21 +501,44 @@ mod tests {
                 envelope: serde_json::json!({"ciphertext": "encrypted"}),
             }],
             deleted_items: vec![],
-            key_wrappings: vec![umbra_protocol::VaultKeyWrappingResponse {
-                id: wrapping_id,
-                vault_id,
-                user_id,
-                device_id: None,
-                wrapping_type: "user_public_key".to_owned(),
-                envelope: serde_json::json!({"wrapped": true}),
-                key_generation: 1,
-            }],
+            key_wrappings: vec![
+                umbra_protocol::VaultKeyWrappingResponse {
+                    id: wrapping_id,
+                    vault_id,
+                    user_id,
+                    device_id: None,
+                    wrapping_type: "user_public_key".to_owned(),
+                    envelope: serde_json::json!({"wrapped": true}),
+                    key_generation: 1,
+                },
+                umbra_protocol::VaultKeyWrappingResponse {
+                    id: latest_wrapping_id,
+                    vault_id,
+                    user_id,
+                    device_id: None,
+                    wrapping_type: "user_public_key".to_owned(),
+                    envelope: serde_json::json!({"wrapped": "latest"}),
+                    key_generation: 2,
+                },
+            ],
         };
 
         cache.apply_sync_changes(&changes).unwrap();
 
         assert_eq!(cache.latest_vault_revision(vault_id).unwrap(), Some(7));
         assert_eq!(cache.list_item_revisions(vault_id).unwrap().len(), 1);
-        assert_eq!(cache.list_key_wrappings(vault_id).unwrap().len(), 1);
+        assert_eq!(cache.list_key_wrappings(vault_id).unwrap().len(), 2);
+        assert_eq!(
+            cache.latest_key_wrapping(vault_id, user_id).unwrap(),
+            Some(CachedKeyWrapping {
+                id: latest_wrapping_id,
+                vault_id,
+                user_id,
+                device_id: None,
+                wrapping_type: "user_public_key".to_owned(),
+                envelope: serde_json::json!({"wrapped": "latest"}),
+                key_generation: 2,
+            })
+        );
     }
 }
