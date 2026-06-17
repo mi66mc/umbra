@@ -149,6 +149,8 @@ pub struct VaultResponse {
     pub org_id: Option<OrgId>,
     pub name: String,
     pub kind: VaultKind,
+    pub vault_revision: RevisionId,
+    pub access_revision: RevisionId,
     pub current_key_generation: i64,
     pub needs_key_rotation: bool,
 }
@@ -257,6 +259,36 @@ pub struct VaultKeyWrappingResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncStatusRequest {
+    pub protocol_version: u16,
+    pub vaults: Vec<VaultStatusCursor>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VaultStatusCursor {
+    pub vault_id: VaultId,
+    pub known_vault_revision: RevisionId,
+    pub known_access_revision: RevisionId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncStatusResponse {
+    pub protocol_version: u16,
+    pub vaults: Vec<VaultStatus>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VaultStatus {
+    pub vault_id: VaultId,
+    pub latest_vault_revision: RevisionId,
+    pub latest_access_revision: RevisionId,
+    pub current_key_generation: RevisionId,
+    pub needs_key_rotation: bool,
+    pub items_changed: bool,
+    pub access_changed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SyncRequest {
     pub protocol_version: u16,
     pub device_id: DeviceId,
@@ -279,6 +311,7 @@ pub struct SyncResponse {
 pub struct VaultSyncChanges {
     pub vault_id: VaultId,
     pub latest_vault_revision: RevisionId,
+    pub latest_access_revision: RevisionId,
     pub items: Vec<ItemRevisionResponse>,
     pub deleted_items: Vec<ItemId>,
     pub key_wrappings: Vec<VaultKeyWrappingResponse>,
@@ -318,6 +351,7 @@ mod tests {
             vaults: vec![VaultSyncChanges {
                 vault_id,
                 latest_vault_revision: 10,
+                latest_access_revision: 4,
                 items: vec![ItemRevisionResponse {
                     item_id,
                     vault_id,
@@ -343,10 +377,33 @@ mod tests {
         let encoded = serde_json::to_value(&response).unwrap();
 
         assert_eq!(encoded["protocol_version"], json!(1));
+        assert_eq!(encoded["vaults"][0]["latest_access_revision"], json!(4));
         assert_eq!(encoded["vaults"][0]["items"][0]["revision"], json!(1));
         assert_eq!(
             encoded["vaults"][0]["key_wrappings"][0]["wrapping_type"],
             json!("user_public_key")
         );
+    }
+
+    #[test]
+    fn sync_status_roundtrips() {
+        let vault_id = Uuid::new_v4();
+        let response = SyncStatusResponse {
+            protocol_version: PROTOCOL_VERSION,
+            vaults: vec![VaultStatus {
+                vault_id,
+                latest_vault_revision: 7,
+                latest_access_revision: 3,
+                current_key_generation: 2,
+                needs_key_rotation: false,
+                items_changed: true,
+                access_changed: false,
+            }],
+        };
+
+        let encoded = serde_json::to_string(&response).unwrap();
+        let decoded: SyncStatusResponse = serde_json::from_str(&encoded).unwrap();
+
+        assert_eq!(decoded, response);
     }
 }
