@@ -153,6 +153,44 @@ The client should reconstruct expected AAD deterministically from trusted contex
 }
 ```
 
+## CLI Crypto MVP
+
+The CLI registration flow currently generates:
+
+- a random `UserSecretKey`;
+- an X25519 user keypair;
+- Argon2id KDF params per profile;
+- an encrypted user private key envelope.
+
+The profile stores the public key, encrypted private key envelope, KDF params, and user secret key. This is acceptable for the current developer MVP, but before a production release the `UserSecretKey` should be shown as an emergency kit and protected by OS keychain or equivalent local secret storage instead of plain TOML.
+
+Vault creation generates a random `VaultKey` and wraps it for the user's public key. Item creation serializes `ItemPlaintextV1`, encrypts it with a key derived from the vault key and item AAD, and uploads only the envelope.
+
+The CLI item envelope stored by the server has unencrypted routing metadata plus encrypted item contents:
+
+```json
+{
+  "kind": "env_bundle",
+  "crypto": {
+    "version": 1,
+    "suite": "UMBRA_XCHACHA20POLY1305_HKDFSHA256_V1",
+    "nonce": "base64url...",
+    "aad": {
+      "app": "umbra",
+      "purpose": "item",
+      "schema": 1,
+      "vault_id": "...",
+      "item_id": "...",
+      "revision": 1,
+      "kind": "env_bundle"
+    },
+    "ciphertext": "base64url..."
+  }
+}
+```
+
+The `kind` wrapper field is not secret. Plaintext item fields, notes, tags, and secret values are inside the encrypted `crypto` envelope.
+
 ## Required Tests
 
 - Decryption fails when AAD changes.

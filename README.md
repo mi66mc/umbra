@@ -37,9 +37,9 @@ Set it as:
 UMBRA__AUTH__OPAQUE__SERVER_SETUP=<generated-secret>
 ```
 
-## Remote CLI MVP
+## Current CLI Happy Path
 
-This stage supports a developer remote flow with OPAQUE login and signed HTTP sessions:
+This stage supports a developer remote flow with OPAQUE login, signed HTTP sessions, client-side vault key wrapping, encrypted item upload, sync, and cached decrypt:
 
 ```bash
 umbra register \
@@ -54,19 +54,32 @@ umbra profile use personal
 
 umbra vault list
 
-umbra vault create
+umbra vault create Personal
+
+umbra sync run --vault "$VAULT_ID" --force-full
+
+umbra secret set pulzar/dev DATABASE_URL "postgres://user:pass@localhost:5432/app" --vault-id "$VAULT_ID"
+
+umbra sync run --vault "$VAULT_ID"
+
+umbra secret get pulzar/dev DATABASE_URL --vault-id "$VAULT_ID"
 
 umbra item create \
   --vault-id "$VAULT_ID" \
-  --kind api_key \
-  --envelope-json '{"version":1,"suite":"UMBRA_XCHACHA20POLY1305_HKDFSHA256_V1","ciphertext":"example"}'
+  --kind login \
+  --title GitHub \
+  --field username=miguel \
+  --field password=secret
 
-umbra sync run \
-  --vault "$VAULT_ID" \
-  --since-vault-revision 0
+umbra sync run --vault "$VAULT_ID"
+
+umbra item list --vault-id "$VAULT_ID" --cached
+umbra item get --vault-id "$VAULT_ID" --item-id "$ITEM_ID" --cached
 ```
 
-The CLI uses signed HTTP sessions by default after `umbra login`. Normal CLI requests do not send a reusable bearer token. The server still stores only encrypted envelopes. Local unlock, vault key cache, OS keychain storage, and polished client-side item encryption UX are the next CLI layers.
+The CLI encrypts item plaintext locally before upload. The server receives only JSON envelopes and key wrappings. The local SQLite cache stores encrypted envelopes and wrapped vault keys, not plaintext fields.
+
+The CLI uses signed HTTP sessions by default after `umbra login`. Normal CLI requests do not send a reusable bearer token. The server still stores only encrypted envelopes. The `--envelope-json` item escape hatch remains available for low-level protocol testing.
 
 Legacy bearer-token setup is still available for debugging:
 
