@@ -82,6 +82,7 @@ pub struct VaultRecord {
     pub name: String,
     pub kind: VaultKind,
     pub vault_revision: RevisionId,
+    pub access_revision: RevisionId,
     pub current_key_generation: RevisionId,
     pub needs_key_rotation: bool,
     pub created_by: Option<UserId>,
@@ -89,6 +90,15 @@ pub struct VaultRecord {
     pub updated_at: DateTime<Utc>,
     pub deleted_at: Option<DateTime<Utc>>,
     pub crypto_policy: Value,
+}
+
+#[derive(Debug, Clone)]
+pub struct VaultSyncStatusRecord {
+    pub vault_id: VaultId,
+    pub latest_vault_revision: RevisionId,
+    pub latest_access_revision: RevisionId,
+    pub current_key_generation: RevisionId,
+    pub needs_key_rotation: bool,
 }
 
 #[derive(Debug, Clone)]

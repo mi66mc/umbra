@@ -14,7 +14,7 @@ impl Storage {
             r#"
             INSERT INTO vaults (id, org_id, name, kind, created_by, crypto_policy)
             VALUES ($1, $2, $3, $4, $5, $6)
-            RETURNING id, org_id, name, kind, vault_revision, current_key_generation, needs_key_rotation, created_by, created_at, updated_at, deleted_at, crypto_policy
+            RETURNING id, org_id, name, kind, vault_revision, access_revision, current_key_generation, needs_key_rotation, created_by, created_at, updated_at, deleted_at, crypto_policy
             "#,
         )
         .bind(id)
@@ -33,7 +33,7 @@ impl Storage {
     pub async fn find_vault_by_id(&self, vault_id: VaultId) -> Result<VaultRecord, StorageError> {
         let row = sqlx::query(
             r#"
-            SELECT id, org_id, name, kind, vault_revision, current_key_generation, needs_key_rotation, created_by, created_at, updated_at, deleted_at, crypto_policy
+            SELECT id, org_id, name, kind, vault_revision, access_revision, current_key_generation, needs_key_rotation, created_by, created_at, updated_at, deleted_at, crypto_policy
             FROM vaults
             WHERE id = $1
             "#,
@@ -52,7 +52,7 @@ impl Storage {
     ) -> Result<Vec<VaultRecord>, StorageError> {
         let rows = sqlx::query(
             r#"
-            SELECT v.id, v.org_id, v.name, v.kind, v.vault_revision, v.current_key_generation, v.needs_key_rotation, v.created_by, v.created_at, v.updated_at, v.deleted_at, v.crypto_policy
+            SELECT v.id, v.org_id, v.name, v.kind, v.vault_revision, v.access_revision, v.current_key_generation, v.needs_key_rotation, v.created_by, v.created_at, v.updated_at, v.deleted_at, v.crypto_policy
             FROM vaults v
             JOIN vault_members vm ON vm.vault_id = v.id
             WHERE vm.user_id = $1 AND vm.state = 'active' AND v.deleted_at IS NULL
@@ -70,6 +70,7 @@ impl Storage {
         &self,
         input: UpsertVaultMember,
     ) -> Result<VaultMemberRecord, StorageError> {
+        let mut tx = self.pool.begin().await?;
         let row = sqlx::query(
             r#"
             INSERT INTO vault_members (vault_id, user_id, role, state)
@@ -83,10 +84,23 @@ impl Storage {
         .bind(input.user_id)
         .bind(vault_role_to_str(input.role))
         .bind(member_state_to_str(input.state))
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;
 
+        let result = sqlx::query(
+            r#"
+            UPDATE vaults
+            SET access_revision = access_revision + 1, updated_at = now()
+            WHERE id = $1
+            "#,
+        )
+        .bind(input.vault_id)
+        .execute(&mut *tx)
+        .await?;
+        ensure_rows_affected(result.rows_affected())?;
+
+        tx.commit().await?;
         vault_member_from_row(row)
     }
 
@@ -136,6 +150,20 @@ impl Storage {
         input: CreateVaultKeyWrapping,
     ) -> Result<VaultKeyWrappingRecord, StorageError> {
         let id = input.id.unwrap_or_else(Uuid::new_v4);
+        let mut tx = self.pool.begin().await?;
+
+        let result = sqlx::query(
+            r#"
+            UPDATE vaults
+            SET access_revision = access_revision + 1, updated_at = now()
+            WHERE id = $1
+            "#,
+        )
+        .bind(input.vault_id)
+        .execute(&mut *tx)
+        .await?;
+        ensure_rows_affected(result.rows_affected())?;
+
         let row = sqlx::query(
             r#"
             INSERT INTO vault_key_wrappings (id, vault_id, user_id, device_id, wrapping_type, envelope, key_generation)
@@ -150,10 +178,11 @@ impl Storage {
         .bind(input.wrapping_type)
         .bind(input.envelope)
         .bind(input.key_generation)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;
 
+        tx.commit().await?;
         vault_key_wrapping_from_row(row)
     }
 
@@ -214,7 +243,7 @@ impl Storage {
         .await?;
 
         sqlx::query(
-            "UPDATE vaults SET needs_key_rotation = true, updated_at = now() WHERE id = $1",
+            "UPDATE vaults SET access_revision = access_revision + 1, needs_key_rotation = true, updated_at = now() WHERE id = $1",
         )
         .bind(vault_id)
         .execute(&mut *tx)
@@ -225,12 +254,29 @@ impl Storage {
     }
 
     pub async fn revoke_key_wrapping(&self, wrapping_id: Uuid) -> Result<(), StorageError> {
-        let result = sqlx::query("UPDATE vault_key_wrappings SET revoked_at = now() WHERE id = $1")
-            .bind(wrapping_id)
-            .execute(&self.pool)
-            .await?;
+        let mut tx = self.pool.begin().await?;
+        let vault_id: VaultId = sqlx::query_scalar(
+            "UPDATE vault_key_wrappings SET revoked_at = now() WHERE id = $1 RETURNING vault_id",
+        )
+        .bind(wrapping_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(StorageError::NotFound)?;
 
-        ensure_rows_affected(result.rows_affected())
+        let result = sqlx::query(
+            r#"
+            UPDATE vaults
+            SET access_revision = access_revision + 1, updated_at = now()
+            WHERE id = $1
+            "#,
+        )
+        .bind(vault_id)
+        .execute(&mut *tx)
+        .await?;
+        ensure_rows_affected(result.rows_affected())?;
+
+        tx.commit().await?;
+        Ok(())
     }
 
     pub async fn rotation_status(
@@ -251,6 +297,42 @@ impl Storage {
 
         Ok(RotationStatusRecord {
             vault_id: row.try_get("id")?,
+            current_key_generation: row.try_get("current_key_generation")?,
+            needs_key_rotation: row.try_get("needs_key_rotation")?,
+        })
+    }
+
+    pub async fn vault_sync_status(
+        &self,
+        vault_id: VaultId,
+        user_id: UserId,
+    ) -> Result<VaultSyncStatusRecord, StorageError> {
+        let row = sqlx::query(
+            r#"
+            SELECT
+                v.id AS vault_id,
+                v.vault_revision AS latest_vault_revision,
+                v.access_revision AS latest_access_revision,
+                v.current_key_generation,
+                v.needs_key_rotation
+            FROM vaults v
+            JOIN vault_members vm ON vm.vault_id = v.id
+            WHERE v.id = $1
+              AND vm.user_id = $2
+              AND vm.state = 'active'
+              AND v.deleted_at IS NULL
+            "#,
+        )
+        .bind(vault_id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+
+        Ok(VaultSyncStatusRecord {
+            vault_id: row.try_get("vault_id")?,
+            latest_vault_revision: row.try_get("latest_vault_revision")?,
+            latest_access_revision: row.try_get("latest_access_revision")?,
             current_key_generation: row.try_get("current_key_generation")?,
             needs_key_rotation: row.try_get("needs_key_rotation")?,
         })
@@ -361,7 +443,7 @@ impl Storage {
         let row = sqlx::query(
             r#"
             UPDATE vaults
-            SET current_key_generation = $2, needs_key_rotation = false, updated_at = now()
+            SET current_key_generation = $2, access_revision = access_revision + 1, needs_key_rotation = false, updated_at = now()
             WHERE id = $1
             RETURNING id, current_key_generation, needs_key_rotation
             "#,

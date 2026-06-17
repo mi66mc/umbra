@@ -136,15 +136,8 @@ async fn postgres_vault_access_and_rotation_flow() {
         })
         .await
         .unwrap();
-    storage
-        .upsert_vault_member(UpsertVaultMember {
-            vault_id: vault.id,
-            user_id: owner.id,
-            role: VaultRole::Owner,
-            state: MemberState::Active,
-        })
-        .await
-        .unwrap();
+    assert_eq!(vault.access_revision, 0);
+
     storage
         .create_vault_key_wrapping(CreateVaultKeyWrapping {
             id: None,
@@ -154,6 +147,18 @@ async fn postgres_vault_access_and_rotation_flow() {
             wrapping_type: "user_public_key".to_owned(),
             envelope: serde_json::json!({"owner": true}),
             key_generation: 1,
+        })
+        .await
+        .unwrap();
+    let after_initial_owner_wrapping = storage.find_vault_by_id(vault.id).await.unwrap();
+    assert_eq!(after_initial_owner_wrapping.access_revision, 1);
+
+    storage
+        .upsert_vault_member(UpsertVaultMember {
+            vault_id: vault.id,
+            user_id: owner.id,
+            role: VaultRole::Owner,
+            state: MemberState::Active,
         })
         .await
         .unwrap();
@@ -174,6 +179,11 @@ async fn postgres_vault_access_and_rotation_flow() {
         })
         .await
         .unwrap();
+    let after_member_access_change = storage.find_vault_by_id(vault.id).await.unwrap();
+    assert!(
+        after_member_access_change.access_revision > after_initial_owner_wrapping.access_revision
+    );
+
     let member_wrapping = storage
         .create_vault_key_wrapping(CreateVaultKeyWrapping {
             id: None,
@@ -254,6 +264,20 @@ async fn postgres_vault_access_and_rotation_flow() {
 
     assert_eq!(rotated.current_key_generation, 2);
     assert!(!rotated.needs_key_rotation);
+    let sync_status = storage.vault_sync_status(vault.id, owner.id).await.unwrap();
+    let latest_vault = storage.find_vault_by_id(vault.id).await.unwrap();
+    assert_eq!(sync_status.vault_id, vault.id);
+    assert_eq!(
+        sync_status.latest_vault_revision,
+        latest_vault.vault_revision
+    );
+    assert_eq!(
+        sync_status.latest_access_revision,
+        latest_vault.access_revision
+    );
+    assert_eq!(sync_status.current_key_generation, 2);
+    assert!(!sync_status.needs_key_rotation);
+
     let owner_wrappings = storage
         .list_key_wrappings_for_user_vault(owner.id, vault.id)
         .await
