@@ -50,6 +50,11 @@ mod tests {
 
     #[test]
     fn embeds_migrations() {
-        assert_eq!(MIGRATOR.iter().count(), 3);
+        let migrations = MIGRATOR.iter().collect::<Vec<_>>();
+
+        assert_eq!(migrations.len(), 4);
+        assert!(migrations.iter().any(|migration| {
+            migration.version == 4 && migration.description == "vault access revision"
+        }));
     }
 }
