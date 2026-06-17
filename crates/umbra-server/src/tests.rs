@@ -25,8 +25,8 @@ use umbra_protocol::{
     DeviceRegisterRequest, ItemRevisionResponse, OpaqueLoginFinishRequest,
     OpaqueLoginFinishResponse, OpaqueLoginStartRequest, OpaqueLoginStartResponse,
     OpaqueRegisterFinishRequest, OpaqueRegisterStartRequest, OpaqueRegisterStartResponse,
-    OrgResponse, PROTOCOL_VERSION, RegisterResponse, SyncRequest, SyncResponse, UpdateItemRequest,
-    VaultResponse, VaultSyncCursor,
+    OrgResponse, PROTOCOL_VERSION, RegisterResponse, SyncRequest, SyncResponse, SyncStatusRequest,
+    SyncStatusResponse, UpdateItemRequest, VaultResponse, VaultStatusCursor, VaultSyncCursor,
 };
 use umbra_storage::Storage;
 use uuid::Uuid;
@@ -115,6 +115,8 @@ async fn opaque_login_token_can_create_org_and_personal_vault() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(vault.org_id, None);
+    assert_eq!(vault.vault_revision, 0);
+    assert_eq!(vault.access_revision, 0);
     assert_eq!(vault.current_key_generation, 1);
 }
 
@@ -145,6 +147,8 @@ async fn create_vault_returns_client_supplied_id() {
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(vault.vault_id, requested_vault_id);
+    assert_eq!(vault.vault_revision, 0);
+    assert_eq!(vault.access_revision, 0);
 }
 
 #[tokio::test]
@@ -291,6 +295,7 @@ async fn owner_can_create_update_and_sync_item_revisions() {
     assert_eq!(sync.protocol_version, PROTOCOL_VERSION);
     assert_eq!(sync.vaults.len(), 1);
     assert_eq!(sync.vaults[0].latest_vault_revision, 2);
+    assert_eq!(sync.vaults[0].latest_access_revision, 2);
     assert_eq!(sync.vaults[0].items.len(), 2);
     assert_eq!(
         sync.vaults[0].items[0].envelope,
@@ -301,6 +306,111 @@ async fn owner_can_create_update_and_sync_item_revisions() {
         json!({"ciphertext": "v2"})
     );
     assert_eq!(sync.vaults[0].key_wrappings.len(), 1);
+}
+
+#[tokio::test]
+#[serial(postgres)]
+async fn sync_status_reports_item_changes() {
+    let Some(storage) = fresh_test_storage().await else {
+        return;
+    };
+    let app = router(test_state_with_storage(storage));
+    let token = register_and_login(app.clone(), "sync-status@example.com", b"sync status").await;
+    let non_member_token = register_and_login(
+        app.clone(),
+        "sync-status-other@example.com",
+        b"sync status other",
+    )
+    .await;
+
+    let (_status, vault): (StatusCode, VaultResponse) = json_request(
+        app.clone(),
+        Method::POST,
+        "/api/v1/vaults",
+        Some(&token),
+        &CreateVaultRequest {
+            protocol_version: PROTOCOL_VERSION,
+            vault_id: None,
+            name: "Status".to_owned(),
+            kind: VaultKind::Personal,
+            initial_key_wrapping: json!({"wrapped": true}),
+        },
+    )
+    .await;
+
+    let (status, created): (StatusCode, ItemRevisionResponse) = json_request(
+        app.clone(),
+        Method::POST,
+        &format!("/api/v1/vaults/{}/items", vault.vault_id),
+        Some(&token),
+        &CreateItemRequest {
+            protocol_version: PROTOCOL_VERSION,
+            vault_id: vault.vault_id,
+            item_id: None,
+            kind: umbra_core::ItemKind::ApiKey,
+            envelope: json!({"ciphertext": "v1"}),
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(created.vault_revision, 1);
+
+    let status_request = SyncStatusRequest {
+        protocol_version: PROTOCOL_VERSION,
+        vaults: vec![VaultStatusCursor {
+            vault_id: vault.vault_id,
+            known_vault_revision: 0,
+            known_access_revision: 0,
+        }],
+    };
+    let (status, sync_status): (StatusCode, SyncStatusResponse) = json_request(
+        app.clone(),
+        Method::POST,
+        "/api/v1/sync/status",
+        Some(&token),
+        &status_request,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(sync_status.protocol_version, PROTOCOL_VERSION);
+    assert_eq!(sync_status.vaults.len(), 1);
+    assert_eq!(sync_status.vaults[0].vault_id, vault.vault_id);
+    assert_eq!(sync_status.vaults[0].latest_vault_revision, 1);
+    assert_eq!(sync_status.vaults[0].latest_access_revision, 2);
+    assert_eq!(sync_status.vaults[0].current_key_generation, 1);
+    assert!(!sync_status.vaults[0].needs_key_rotation);
+    assert!(sync_status.vaults[0].items_changed);
+    assert!(sync_status.vaults[0].access_changed);
+
+    let (status, unchanged): (StatusCode, SyncStatusResponse) = json_request(
+        app.clone(),
+        Method::POST,
+        "/api/v1/sync/status",
+        Some(&token),
+        &SyncStatusRequest {
+            protocol_version: PROTOCOL_VERSION,
+            vaults: vec![VaultStatusCursor {
+                vault_id: vault.vault_id,
+                known_vault_revision: sync_status.vaults[0].latest_vault_revision,
+                known_access_revision: sync_status.vaults[0].latest_access_revision,
+            }],
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!unchanged.vaults[0].items_changed);
+    assert!(!unchanged.vaults[0].access_changed);
+
+    let (status, _body): (StatusCode, serde_json::Value) = json_request(
+        app,
+        Method::POST,
+        "/api/v1/sync/status",
+        Some(&non_member_token),
+        &status_request,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]

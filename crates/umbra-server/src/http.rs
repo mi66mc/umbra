@@ -21,7 +21,8 @@ use umbra_protocol::{
     OpaqueLoginFinishResponse, OpaqueLoginStartRequest, OpaqueLoginStartResponse,
     OpaqueRegisterFinishRequest, OpaqueRegisterStartRequest, OpaqueRegisterStartResponse,
     OrgResponse, PROTOCOL_VERSION, RotateVaultKeyRequest, RotationStatusResponse, SyncRequest,
-    SyncResponse, UpdateItemRequest, VaultKeyWrappingResponse, VaultResponse, VaultSyncChanges,
+    SyncResponse, SyncStatusRequest, SyncStatusResponse, UpdateItemRequest,
+    VaultKeyWrappingResponse, VaultResponse, VaultStatus, VaultSyncChanges,
 };
 use umbra_storage::{
     CreateDevice, CreateEncryptedItem, CreateItemRevision, CreateOrg, CreateSession, CreateUser,
@@ -53,6 +54,7 @@ pub(crate) fn router(state: AppState) -> Router {
             post(create_personal_vault).get(list_vaults),
         )
         .route("/api/v1/sync", post(sync))
+        .route("/api/v1/sync/status", post(sync_status))
         .route("/api/v1/vaults/:vault_id/items", post(create_item))
         .route(
             "/api/v1/vaults/:vault_id/items/:item_id",
@@ -613,6 +615,7 @@ async fn sync(
         vaults.push(VaultSyncChanges {
             vault_id: cursor.vault_id,
             latest_vault_revision: vault.vault_revision,
+            latest_access_revision: vault.access_revision,
             items,
             deleted_items: vec![],
             key_wrappings,
@@ -620,6 +623,39 @@ async fn sync(
     }
 
     Ok(Json(SyncResponse {
+        protocol_version: PROTOCOL_VERSION,
+        vaults,
+    }))
+}
+
+async fn sync_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<SyncStatusRequest>,
+) -> Result<Json<SyncStatusResponse>, ServerError> {
+    ensure_protocol(request.protocol_version)?;
+    let user_id = authenticate(&state, &headers).await?;
+    let mut vaults = Vec::with_capacity(request.vaults.len());
+
+    for cursor in request.vaults {
+        ensure_vault_member(&state, cursor.vault_id, user_id).await?;
+        let status = state
+            .storage
+            .vault_sync_status(cursor.vault_id, user_id)
+            .await?;
+
+        vaults.push(VaultStatus {
+            vault_id: status.vault_id,
+            latest_vault_revision: status.latest_vault_revision,
+            latest_access_revision: status.latest_access_revision,
+            current_key_generation: status.current_key_generation,
+            needs_key_rotation: status.needs_key_rotation,
+            items_changed: status.latest_vault_revision > cursor.known_vault_revision,
+            access_changed: status.latest_access_revision > cursor.known_access_revision,
+        });
+    }
+
+    Ok(Json(SyncStatusResponse {
         protocol_version: PROTOCOL_VERSION,
         vaults,
     }))
@@ -695,6 +731,8 @@ fn vault_response(vault: umbra_storage::VaultRecord) -> VaultResponse {
         org_id: vault.org_id,
         name: vault.name,
         kind: vault.kind,
+        vault_revision: vault.vault_revision,
+        access_revision: vault.access_revision,
         current_key_generation: vault.current_key_generation,
         needs_key_rotation: vault.needs_key_rotation,
     }
