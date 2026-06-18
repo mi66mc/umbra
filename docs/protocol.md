@@ -55,6 +55,7 @@ PUT    /api/v1/vaults/:vault_id/items/:item_id
 DELETE /api/v1/vaults/:vault_id/items/:item_id
 
 POST /api/v1/sync
+POST /api/v1/sync/status
 ```
 
 The server currently implements the OPAQUE register/login flow, organization creation/listing/member management, personal vault creation, organization vault creation, direct vault member grants, member removal, rotation status, rotation completion, encrypted item creation/update, and revision sync.
@@ -179,6 +180,7 @@ The response includes typed encrypted item revisions and vault key wrappings:
     {
       "vault_id": "00000000-0000-0000-0000-000000000000",
       "latest_vault_revision": 2,
+      "latest_access_revision": 1,
       "items": [
         {
           "item_id": "00000000-0000-0000-0000-000000000000",
@@ -200,6 +202,40 @@ The response includes typed encrypted item revisions and vault key wrappings:
 }
 ```
 
+`POST /api/v1/sync/status` lets a client check whether a full sync is needed without downloading encrypted item envelopes:
+
+```json
+{
+  "protocol_version": 1,
+  "vaults": [
+    {
+      "vault_id": "00000000-0000-0000-0000-000000000000",
+      "known_vault_revision": 2,
+      "known_access_revision": 1
+    }
+  ]
+}
+```
+
+The response reports only revision movement:
+
+```json
+{
+  "protocol_version": 1,
+  "vaults": [
+    {
+      "vault_id": "00000000-0000-0000-0000-000000000000",
+      "latest_vault_revision": 2,
+      "latest_access_revision": 3,
+      "items_changed": false,
+      "access_changed": true
+    }
+  ]
+}
+```
+
+The endpoint is authenticated and uses the same vault membership checks as full sync. It does not expose plaintext, ciphertext, item counts, or member counts.
+
 ## Cacheable Sync Data
 
 `SyncResponse` is safe for the CLI to cache because item data and vault keys are still encrypted envelopes.
@@ -207,8 +243,9 @@ The response includes typed encrypted item revisions and vault key wrappings:
 The client may persist:
 
 - `latest_vault_revision`;
+- `latest_access_revision`;
 - item revision envelopes;
 - vault key wrapping envelopes;
 - item ids, vault ids, revision numbers, and key generation metadata.
 
-The server remains the source of truth. The cache is a local acceleration and offline inspection layer, not an authority for membership or writes.
+The server remains the source of truth. The cache is a local acceleration and offline inspection layer, not an authority for membership or writes. Online CLI reads compare cached revisions with sync status and full-sync only when item data or access metadata changed.

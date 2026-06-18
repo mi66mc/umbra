@@ -56,28 +56,24 @@ umbra vault list
 
 umbra vault create Personal
 
-umbra sync run --vault "$VAULT_ID" --force-full
+umbra secret set pulzar/dev DATABASE_URL "postgres://user:pass@localhost:5432/app" --vault Personal
 
-umbra secret set pulzar/dev DATABASE_URL "postgres://user:pass@localhost:5432/app" --vault-id "$VAULT_ID"
-
-umbra sync run --vault "$VAULT_ID"
-
-umbra secret get pulzar/dev DATABASE_URL --vault-id "$VAULT_ID"
+umbra secret get pulzar/dev DATABASE_URL --vault Personal
 
 umbra item create \
-  --vault-id "$VAULT_ID" \
+  --vault Personal \
   --kind login \
   --title GitHub \
   --field username=miguel \
   --field password=secret
 
-umbra sync run --vault "$VAULT_ID"
-
-umbra item list --vault-id "$VAULT_ID" --cached
-umbra item get --vault-id "$VAULT_ID" --item-id "$ITEM_ID" --cached
+umbra item list --vault Personal
+umbra item get --vault Personal --item-id "$ITEM_ID"
 ```
 
 The CLI encrypts item plaintext locally before upload. The server receives only JSON envelopes and key wrappings. The local SQLite cache stores encrypted envelopes and wrapped vault keys, not plaintext fields.
+
+`vault create` stores the first created vault as the profile default. `--vault Personal` resolves a vault name from the local cache populated by `umbra vault list` or `umbra vault create`. If a name is ambiguous, pass `--vault-id`.
 
 The CLI uses signed HTTP sessions by default after `umbra login`. Normal CLI requests do not send a reusable bearer token. The server still stores only encrypted envelopes. The `--envelope-json` item escape hatch remains available for low-level protocol testing.
 
@@ -100,8 +96,12 @@ Useful commands:
 ```bash
 umbra sync run --vault "$VAULT_ID"
 umbra cache status
-umbra item list --vault-id "$VAULT_ID" --cached
-umbra item get --vault-id "$VAULT_ID" --item-id "$ITEM_ID" --cached
+umbra item list --vault Personal
+umbra item get --vault Personal --item-id "$ITEM_ID"
+umbra item list --vault Personal --offline
+umbra item get --vault Personal --item-id "$ITEM_ID" --offline
 ```
+
+Online read commands call sync status first and only run full sync when item or access revisions changed. `--offline` reads only from the local encrypted-envelope cache and may be stale. `--cached` remains an alias for `--offline` on item reads for compatibility.
 
 `sync run` uses the cached vault revision cursor by default. Use `--force-full` to request from revision `0`.
