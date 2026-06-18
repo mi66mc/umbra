@@ -6,8 +6,8 @@ use umbra_crypto::{
     encrypt_item, generate_vault_key, unwrap_vault_key, wrap_vault_key_for_user,
 };
 use umbra_protocol::{
-    CreateItemRequest, CreateVaultRequest, PROTOCOL_VERSION, SyncRequest, SyncResponse,
-    UpdateItemRequest, VaultResponse, VaultSyncCursor,
+    CreateItemRequest, CreateVaultRequest, ItemRevisionResponse, PROTOCOL_VERSION, SyncRequest,
+    SyncResponse, UpdateItemRequest, VaultResponse, VaultSyncCursor,
 };
 use uuid::Uuid;
 
@@ -195,6 +195,15 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
                     },
                 )
                 .await?;
+            let mut cache = crate::cache::LocalCache::open(&config.active_profile)?;
+            cache.upsert_vault(&vault)?;
+            crate::sync::ensure_vault_synced(
+                profile,
+                &mut cache,
+                vault.vault_id,
+                crate::sync::SyncMode::Always,
+            )
+            .await?;
             print_json(&vault)
         }
         Command::Item(ItemCommand::List { vault_id, offline }) => {
@@ -276,7 +285,7 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
                     )
                 }
             };
-            let response: Value = client
+            let response: ItemRevisionResponse = client
                 .post(
                     &format!("/api/v1/vaults/{vault_id}/items"),
                     &CreateItemRequest {
@@ -288,6 +297,15 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
                     },
                 )
                 .await?;
+            let mut cache = crate::cache::LocalCache::open(&config.active_profile)?;
+            cache.upsert_item_revision(&response)?;
+            crate::sync::ensure_vault_synced(
+                profile,
+                &mut cache,
+                vault_id,
+                crate::sync::SyncMode::Always,
+            )
+            .await?;
             print_json(&response)
         }
         Command::Item(ItemCommand::Update {
@@ -299,7 +317,7 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
             let profile = active_profile(&config)?;
             require_login(profile)?;
             let client = UmbraHttpClient::new(profile)?;
-            let response: Value = client
+            let response: ItemRevisionResponse = client
                 .put(
                     &format!("/api/v1/vaults/{vault_id}/items/{item_id}"),
                     &UpdateItemRequest {
@@ -311,6 +329,15 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
                     },
                 )
                 .await?;
+            let mut cache = crate::cache::LocalCache::open(&config.active_profile)?;
+            cache.upsert_item_revision(&response)?;
+            crate::sync::ensure_vault_synced(
+                profile,
+                &mut cache,
+                vault_id,
+                crate::sync::SyncMode::Always,
+            )
+            .await?;
             print_json(&response)
         }
         Command::Secret(SecretCommand::Set {
@@ -326,7 +353,7 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
                 Some(value) => value,
                 None => rpassword::prompt_password("Value: ")?,
             };
-            let cache = crate::cache::LocalCache::open(&config.active_profile)?;
+            let mut cache = crate::cache::LocalCache::open(&config.active_profile)?;
             let vault_key = unlock_vault_key_from_cache(profile, &cache, vault_id)?;
             let item_id = Uuid::new_v4();
             let kind = ItemKind::EnvBundle;
@@ -334,7 +361,7 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
             let plaintext = crate::item_plaintext::build_secret_bundle(&project_env, &key, &value);
             let envelope =
                 encrypt_item_plaintext(vault_id, item_id, 1, kind_name, &vault_key, &plaintext)?;
-            let response: Value = client
+            let response: ItemRevisionResponse = client
                 .post(
                     &format!("/api/v1/vaults/{vault_id}/items"),
                     &CreateItemRequest {
@@ -346,6 +373,14 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
                     },
                 )
                 .await?;
+            cache.upsert_item_revision(&response)?;
+            crate::sync::ensure_vault_synced(
+                profile,
+                &mut cache,
+                vault_id,
+                crate::sync::SyncMode::Always,
+            )
+            .await?;
             print_json(&response)
         }
         Command::Secret(SecretCommand::Get {

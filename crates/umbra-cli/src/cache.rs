@@ -185,7 +185,39 @@ impl LocalCache {
         Ok(())
     }
 
-    #[allow(dead_code)]
+    pub fn upsert_item_revision(
+        &self,
+        item: &umbra_protocol::ItemRevisionResponse,
+    ) -> Result<(), CliError> {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.connection.execute(
+            r#"
+            INSERT INTO item_revisions (
+                vault_id, item_id, revision, vault_revision, key_generation,
+                author_user_id, envelope_json, updated_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            ON CONFLICT(vault_id, item_id, revision) DO UPDATE SET
+                vault_revision = excluded.vault_revision,
+                key_generation = excluded.key_generation,
+                author_user_id = excluded.author_user_id,
+                envelope_json = excluded.envelope_json,
+                updated_at = excluded.updated_at
+            "#,
+            params![
+                item.vault_id.to_string(),
+                item.item_id.to_string(),
+                item.revision,
+                item.vault_revision,
+                item.key_generation,
+                item.author_user_id.map(|id| id.to_string()),
+                serde_json::to_string(&item.envelope)?,
+                now
+            ],
+        )?;
+        Ok(())
+    }
+
     pub fn upsert_vault(&self, vault: &umbra_protocol::VaultResponse) -> Result<(), CliError> {
         let now = chrono::Utc::now().to_rfc3339();
         self.connection.execute(

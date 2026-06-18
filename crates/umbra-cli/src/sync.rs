@@ -12,7 +12,6 @@ use umbra_protocol::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SyncMode {
     IfChanged,
-    #[allow(dead_code)]
     Always,
     Offline,
 }
