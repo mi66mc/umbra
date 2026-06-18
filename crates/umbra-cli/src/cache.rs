@@ -1,12 +1,32 @@
 use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, params};
+use umbra_core::VaultKind;
 
 use crate::error::CliError;
 
 pub struct LocalCache {
     connection: Connection,
     profile: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CachedVault {
+    pub vault_id: uuid::Uuid,
+    pub name: String,
+    pub kind: String,
+    pub latest_vault_revision: i64,
+    pub latest_access_revision: i64,
+    pub current_key_generation: i64,
+    pub needs_key_rotation: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CachedSyncState {
+    pub vault_id: uuid::Uuid,
+    pub latest_vault_revision: i64,
+    pub latest_access_revision: i64,
+    pub synced_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -86,15 +106,19 @@ impl LocalCache {
         let tx = self.connection.transaction()?;
         tx.execute(
             r#"
-            INSERT INTO sync_state (vault_id, latest_vault_revision, synced_at)
-            VALUES (?1, ?2, ?3)
+            INSERT INTO sync_state (
+                vault_id, latest_vault_revision, latest_access_revision, synced_at
+            )
+            VALUES (?1, ?2, ?3, ?4)
             ON CONFLICT(vault_id) DO UPDATE SET
                 latest_vault_revision = excluded.latest_vault_revision,
+                latest_access_revision = excluded.latest_access_revision,
                 synced_at = excluded.synced_at
             "#,
             params![
                 changes.vault_id.to_string(),
                 changes.latest_vault_revision,
+                changes.latest_access_revision,
                 now
             ],
         )?;
@@ -158,6 +182,121 @@ impl LocalCache {
         }
 
         tx.commit()?;
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub fn upsert_vault(&self, vault: &umbra_protocol::VaultResponse) -> Result<(), CliError> {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.connection.execute(
+            r#"
+            INSERT INTO vaults (
+                vault_id, org_id, name, kind, latest_vault_revision, latest_access_revision,
+                current_key_generation, needs_key_rotation, updated_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            ON CONFLICT(vault_id) DO UPDATE SET
+                org_id = excluded.org_id,
+                name = excluded.name,
+                kind = excluded.kind,
+                latest_vault_revision = excluded.latest_vault_revision,
+                latest_access_revision = excluded.latest_access_revision,
+                current_key_generation = excluded.current_key_generation,
+                needs_key_rotation = excluded.needs_key_rotation,
+                updated_at = excluded.updated_at
+            "#,
+            params![
+                vault.vault_id.to_string(),
+                vault.org_id.map(|id| id.to_string()),
+                vault.name,
+                vault_kind_to_str(vault.kind),
+                vault.vault_revision,
+                vault.access_revision,
+                vault.current_key_generation,
+                vault.needs_key_rotation,
+                now
+            ],
+        )?;
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub fn list_vaults(&self) -> Result<Vec<CachedVault>, CliError> {
+        let mut statement = self.connection.prepare(
+            r#"
+            SELECT vault_id, name, kind, latest_vault_revision, latest_access_revision,
+                   current_key_generation, needs_key_rotation
+            FROM vaults
+            ORDER BY name ASC, vault_id ASC
+            "#,
+        )?;
+        let rows = statement.query_map([], cached_vault_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(CliError::from)
+    }
+
+    #[allow(dead_code)]
+    pub fn find_vault_by_name(&self, name: &str) -> Result<Option<CachedVault>, CliError> {
+        let mut statement = self.connection.prepare(
+            r#"
+            SELECT vault_id, name, kind, latest_vault_revision, latest_access_revision,
+                   current_key_generation, needs_key_rotation
+            FROM vaults
+            WHERE name = ?1
+            ORDER BY vault_id ASC
+            LIMIT 1
+            "#,
+        )?;
+        let result = statement.query_row(params![name], cached_vault_from_row);
+        match result {
+            Ok(value) => Ok(Some(value)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(CliError::from(error)),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn sync_state(&self, vault_id: uuid::Uuid) -> Result<Option<CachedSyncState>, CliError> {
+        let mut statement = self.connection.prepare(
+            r#"
+            SELECT vault_id, latest_vault_revision, latest_access_revision, synced_at
+            FROM sync_state
+            WHERE vault_id = ?1
+            "#,
+        )?;
+        let result = statement.query_row(params![vault_id.to_string()], cached_sync_state_from_row);
+        match result {
+            Ok(value) => Ok(Some(value)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(CliError::from(error)),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn upsert_sync_state(
+        &self,
+        vault_id: uuid::Uuid,
+        latest_vault_revision: i64,
+        latest_access_revision: i64,
+    ) -> Result<(), CliError> {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.connection.execute(
+            r#"
+            INSERT INTO sync_state (
+                vault_id, latest_vault_revision, latest_access_revision, synced_at
+            )
+            VALUES (?1, ?2, ?3, ?4)
+            ON CONFLICT(vault_id) DO UPDATE SET
+                latest_vault_revision = excluded.latest_vault_revision,
+                latest_access_revision = excluded.latest_access_revision,
+                synced_at = excluded.synced_at
+            "#,
+            params![
+                vault_id.to_string(),
+                latest_vault_revision,
+                latest_access_revision,
+                now
+            ],
+        )?;
         Ok(())
     }
 
@@ -325,6 +464,7 @@ impl LocalCache {
                 name TEXT NOT NULL,
                 kind TEXT NOT NULL,
                 latest_vault_revision INTEGER NOT NULL DEFAULT 0,
+                latest_access_revision INTEGER NOT NULL DEFAULT 0,
                 current_key_generation INTEGER NOT NULL DEFAULT 1,
                 needs_key_rotation INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT NOT NULL
@@ -333,6 +473,7 @@ impl LocalCache {
             CREATE TABLE IF NOT EXISTS sync_state (
                 vault_id TEXT PRIMARY KEY,
                 latest_vault_revision INTEGER NOT NULL DEFAULT 0,
+                latest_access_revision INTEGER NOT NULL DEFAULT 0,
                 synced_at TEXT NOT NULL
             );
 
@@ -360,10 +501,44 @@ impl LocalCache {
             );
             "#,
         )?;
+        self.add_column_if_missing(
+            "vaults",
+            "latest_access_revision",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        self.add_column_if_missing(
+            "sync_state",
+            "latest_access_revision",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
         self.connection.execute(
             "INSERT OR REPLACE INTO cache_meta (key, value) VALUES ('schema_version', '1')",
             params![],
         )?;
+        Ok(())
+    }
+
+    fn add_column_if_missing(
+        &self,
+        table: &str,
+        column: &str,
+        definition: &str,
+    ) -> Result<(), CliError> {
+        match (table, column, definition) {
+            ("vaults", "latest_access_revision", "INTEGER NOT NULL DEFAULT 0")
+            | ("sync_state", "latest_access_revision", "INTEGER NOT NULL DEFAULT 0") => {}
+            _ => return Err(CliError::Input("unknown cache migration column")),
+        }
+
+        let pragma = format!("PRAGMA table_info({table})");
+        let mut statement = self.connection.prepare(&pragma)?;
+        let columns = statement
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<Vec<_>, _>>()?;
+        if !columns.iter().any(|existing| existing == column) {
+            let sql = format!("ALTER TABLE {table} ADD COLUMN {column} {definition}");
+            self.connection.execute(&sql, [])?;
+        }
         Ok(())
     }
 }
@@ -407,6 +582,27 @@ fn sanitize_profile_name(profile: &str) -> String {
             }
         })
         .collect()
+}
+
+fn cached_vault_from_row(row: &rusqlite::Row<'_>) -> Result<CachedVault, rusqlite::Error> {
+    Ok(CachedVault {
+        vault_id: parse_uuid(row.get::<_, String>(0)?)?,
+        name: row.get(1)?,
+        kind: row.get(2)?,
+        latest_vault_revision: row.get(3)?,
+        latest_access_revision: row.get(4)?,
+        current_key_generation: row.get(5)?,
+        needs_key_rotation: row.get(6)?,
+    })
+}
+
+fn cached_sync_state_from_row(row: &rusqlite::Row<'_>) -> Result<CachedSyncState, rusqlite::Error> {
+    Ok(CachedSyncState {
+        vault_id: parse_uuid(row.get::<_, String>(0)?)?,
+        latest_vault_revision: row.get(1)?,
+        latest_access_revision: row.get(2)?,
+        synced_at: row.get(3)?,
+    })
 }
 
 fn cached_item_revision_from_row(
@@ -454,6 +650,15 @@ fn parse_json(value: String) -> Result<serde_json::Value, rusqlite::Error> {
     })
 }
 
+fn vault_kind_to_str(kind: VaultKind) -> &'static str {
+    match kind {
+        VaultKind::Personal => "personal",
+        VaultKind::Shared => "shared",
+        VaultKind::Project => "project",
+        VaultKind::Org => "org",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -480,6 +685,35 @@ mod tests {
     }
 
     #[test]
+    fn upserts_vault_metadata_and_finds_by_name() {
+        let cache = LocalCache::open_in_memory("personal").unwrap();
+        let vault_id = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000010").unwrap();
+
+        cache
+            .upsert_vault(&umbra_protocol::VaultResponse {
+                vault_id,
+                org_id: None,
+                name: "Personal".to_owned(),
+                kind: umbra_core::VaultKind::Personal,
+                vault_revision: 4,
+                access_revision: 2,
+                current_key_generation: 1,
+                needs_key_rotation: false,
+            })
+            .unwrap();
+
+        let vault = cache.find_vault_by_name("Personal").unwrap().unwrap();
+        assert_eq!(vault.vault_id, vault_id);
+        assert_eq!(vault.name, "Personal");
+        assert_eq!(vault.kind, "personal");
+        assert_eq!(vault.latest_vault_revision, 4);
+        assert_eq!(vault.latest_access_revision, 2);
+        assert_eq!(vault.current_key_generation, 1);
+        assert!(!vault.needs_key_rotation);
+        assert_eq!(cache.list_vaults().unwrap(), vec![vault]);
+    }
+
+    #[test]
     fn upserts_sync_changes_and_tracks_cursor() {
         let mut cache = LocalCache::open_in_memory("personal").unwrap();
         let vault_id = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
@@ -491,6 +725,7 @@ mod tests {
         let changes = umbra_protocol::VaultSyncChanges {
             vault_id,
             latest_vault_revision: 7,
+            latest_access_revision: 3,
             items: vec![umbra_protocol::ItemRevisionResponse {
                 item_id,
                 vault_id,
@@ -526,6 +761,14 @@ mod tests {
         cache.apply_sync_changes(&changes).unwrap();
 
         assert_eq!(cache.latest_vault_revision(vault_id).unwrap(), Some(7));
+        assert_eq!(
+            cache
+                .sync_state(vault_id)
+                .unwrap()
+                .unwrap()
+                .latest_access_revision,
+            changes.latest_access_revision
+        );
         assert_eq!(cache.list_item_revisions(vault_id).unwrap().len(), 1);
         assert_eq!(cache.list_key_wrappings(vault_id).unwrap().len(), 2);
         assert_eq!(
