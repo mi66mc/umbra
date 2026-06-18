@@ -8,6 +8,7 @@ mod item_plaintext;
 mod keys;
 mod opaque;
 mod output;
+mod sync;
 
 #[cfg(test)]
 mod tests;
