@@ -116,13 +116,17 @@ pub enum VaultCommand {
 pub enum ItemCommand {
     List {
         #[arg(long)]
-        vault_id: VaultId,
+        vault_id: Option<VaultId>,
+        #[arg(long)]
+        vault: Option<String>,
         #[arg(long, alias = "cached")]
         offline: bool,
     },
     Get {
         #[arg(long)]
-        vault_id: VaultId,
+        vault_id: Option<VaultId>,
+        #[arg(long)]
+        vault: Option<String>,
         #[arg(long)]
         item_id: ItemId,
         #[arg(long, alias = "cached")]
@@ -130,7 +134,9 @@ pub enum ItemCommand {
     },
     Create {
         #[arg(long)]
-        vault_id: VaultId,
+        vault_id: Option<VaultId>,
+        #[arg(long)]
+        vault: Option<String>,
         #[arg(long, value_parser = parse_item_kind)]
         kind: ItemKind,
         #[arg(long)]
@@ -163,13 +169,17 @@ pub enum SecretCommand {
         key: String,
         value: Option<String>,
         #[arg(long)]
-        vault_id: VaultId,
+        vault_id: Option<VaultId>,
+        #[arg(long)]
+        vault: Option<String>,
     },
     Get {
         project_env: String,
         key: String,
         #[arg(long)]
-        vault_id: VaultId,
+        vault_id: Option<VaultId>,
+        #[arg(long)]
+        vault: Option<String>,
         #[arg(long)]
         offline: bool,
     },

@@ -252,7 +252,7 @@ impl LocalCache {
         Ok(())
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn list_vaults(&self) -> Result<Vec<CachedVault>, CliError> {
         let mut statement = self.connection.prepare(
             r#"
@@ -266,8 +266,7 @@ impl LocalCache {
         rows.collect::<Result<Vec<_>, _>>().map_err(CliError::from)
     }
 
-    #[allow(dead_code)]
-    pub fn find_vault_by_name(&self, name: &str) -> Result<Option<CachedVault>, CliError> {
+    pub fn find_vaults_by_name(&self, name: &str) -> Result<Vec<CachedVault>, CliError> {
         let mut statement = self.connection.prepare(
             r#"
             SELECT vault_id, name, kind, latest_vault_revision, latest_access_revision,
@@ -275,15 +274,10 @@ impl LocalCache {
             FROM vaults
             WHERE name = ?1
             ORDER BY vault_id ASC
-            LIMIT 1
             "#,
         )?;
-        let result = statement.query_row(params![name], cached_vault_from_row);
-        match result {
-            Ok(value) => Ok(Some(value)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(error) => Err(CliError::from(error)),
-        }
+        let rows = statement.query_map(params![name], cached_vault_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(CliError::from)
     }
 
     #[allow(dead_code)]
@@ -722,7 +716,9 @@ mod tests {
             })
             .unwrap();
 
-        let vault = cache.find_vault_by_name("Personal").unwrap().unwrap();
+        let vaults = cache.find_vaults_by_name("Personal").unwrap();
+        assert_eq!(vaults.len(), 1);
+        let vault = vaults[0].clone();
         assert_eq!(vault.vault_id, vault_id);
         assert_eq!(vault.name, "Personal");
         assert_eq!(vault.kind, "personal");
@@ -731,6 +727,30 @@ mod tests {
         assert_eq!(vault.current_key_generation, 1);
         assert!(!vault.needs_key_rotation);
         assert_eq!(cache.list_vaults().unwrap(), vec![vault]);
+    }
+
+    #[test]
+    fn finds_all_vaults_with_same_name() {
+        let cache = LocalCache::open_in_memory("personal").unwrap();
+        for vault_id in [
+            uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000010").unwrap(),
+            uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000011").unwrap(),
+        ] {
+            cache
+                .upsert_vault(&umbra_protocol::VaultResponse {
+                    vault_id,
+                    org_id: None,
+                    name: "Personal".to_owned(),
+                    kind: umbra_core::VaultKind::Personal,
+                    vault_revision: 1,
+                    access_revision: 1,
+                    current_key_generation: 1,
+                    needs_key_rotation: false,
+                })
+                .unwrap();
+        }
+
+        assert_eq!(cache.find_vaults_by_name("Personal").unwrap().len(), 2);
     }
 
     #[test]

@@ -275,6 +275,37 @@ fn parses_secret_commands() {
 }
 
 #[test]
+fn parses_vault_name_sugar_for_items_and_secrets() {
+    let item = Cli::parse_from(["umbra", "item", "list", "--vault", "Personal", "--offline"]);
+    assert!(matches!(
+        item.command,
+        Command::Item(ItemCommand::List {
+            vault: Some(name),
+            offline: true,
+            ..
+        }) if name == "Personal"
+    ));
+
+    let secret = Cli::parse_from([
+        "umbra",
+        "secret",
+        "set",
+        "pulzar/dev",
+        "DATABASE_URL",
+        "postgres://localhost",
+        "--vault",
+        "Team",
+    ]);
+    assert!(matches!(
+        secret.command,
+        Command::Secret(SecretCommand::Set {
+            vault: Some(name),
+            ..
+        }) if name == "Team"
+    ));
+}
+
+#[test]
 fn rejects_vault_create_kind_option() {
     let result = Cli::try_parse_from([
         "umbra",
@@ -295,6 +326,9 @@ fn config_roundtrips_toml() {
     let mut config = CliConfig::default();
     let profile = ProfileConfig {
         server_url: "http://localhost:8080".to_owned(),
+        default_vault_id: Some(
+            uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap(),
+        ),
         legacy_session_token: Some("abc".to_owned()),
         client_public_key: Some("client-public-key".to_owned()),
         encrypted_user_private_key: Some(serde_json::json!({
@@ -318,6 +352,10 @@ fn config_roundtrips_toml() {
 
     let profile = decoded.profiles.get("personal").unwrap();
     assert_eq!(profile.server_url, "http://localhost:8080");
+    assert_eq!(
+        profile.default_vault_id,
+        Some(uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap())
+    );
     assert_eq!(profile.legacy_session_token.as_deref(), Some("abc"));
     assert_eq!(
         profile.client_public_key.as_deref(),

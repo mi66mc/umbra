@@ -153,6 +153,10 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
             require_login(profile)?;
             let client = UmbraHttpClient::new(profile)?;
             let vaults: Vec<VaultResponse> = client.get("/api/v1/vaults").await?;
+            let cache = crate::cache::LocalCache::open(&config.active_profile)?;
+            for vault in &vaults {
+                cache.upsert_vault(vault)?;
+            }
             print_json(&vaults)
         }
         Command::Vault(VaultCommand::Create {
@@ -197,6 +201,12 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
                 .await?;
             let mut cache = crate::cache::LocalCache::open(&config.active_profile)?;
             cache.upsert_vault(&vault)?;
+            let profile_config = active_profile_mut(&mut config);
+            if profile_config.default_vault_id.is_none() {
+                profile_config.default_vault_id = Some(vault.vault_id);
+                save_config(&config)?;
+            }
+            let profile = active_profile(&config)?;
             crate::sync::ensure_vault_synced(
                 profile,
                 &mut cache,
@@ -206,9 +216,14 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
             .await?;
             print_json(&vault)
         }
-        Command::Item(ItemCommand::List { vault_id, offline }) => {
+        Command::Item(ItemCommand::List {
+            vault_id,
+            vault,
+            offline,
+        }) => {
             let profile = active_profile(&config)?;
             let mut cache = crate::cache::LocalCache::open(&config.active_profile)?;
+            let vault_id = resolve_vault_id(profile, &cache, vault_id, vault.as_deref())?;
             let mode = if offline {
                 crate::sync::SyncMode::Offline
             } else {
@@ -226,11 +241,13 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
         }
         Command::Item(ItemCommand::Get {
             vault_id,
+            vault,
             item_id,
             offline,
         }) => {
             let profile = active_profile(&config)?;
             let mut cache = crate::cache::LocalCache::open(&config.active_profile)?;
+            let vault_id = resolve_vault_id(profile, &cache, vault_id, vault.as_deref())?;
             let mode = if offline {
                 crate::sync::SyncMode::Offline
             } else {
@@ -253,6 +270,7 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
         }
         Command::Item(ItemCommand::Create {
             vault_id,
+            vault,
             kind,
             title,
             fields,
@@ -263,10 +281,11 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
             let profile = active_profile(&config)?;
             require_login(profile)?;
             let client = UmbraHttpClient::new(profile)?;
+            let mut cache = crate::cache::LocalCache::open(&config.active_profile)?;
+            let vault_id = resolve_vault_id(profile, &cache, vault_id, vault.as_deref())?;
             let (item_id, envelope) = match envelope_json {
                 Some(envelope_json) => (None, serde_json::from_str(&envelope_json)?),
                 None => {
-                    let cache = crate::cache::LocalCache::open(&config.active_profile)?;
                     let vault_key = unlock_vault_key_from_cache(profile, &cache, vault_id)?;
                     let item_id = Uuid::new_v4();
                     let kind_name = item_kind_name(&kind);
@@ -297,7 +316,6 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
                     },
                 )
                 .await?;
-            let mut cache = crate::cache::LocalCache::open(&config.active_profile)?;
             cache.upsert_item_revision(&response)?;
             crate::sync::ensure_vault_synced(
                 profile,
@@ -345,6 +363,7 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
             key,
             value,
             vault_id,
+            vault,
         }) => {
             let profile = active_profile(&config)?;
             require_login(profile)?;
@@ -354,6 +373,7 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
                 None => rpassword::prompt_password("Value: ")?,
             };
             let mut cache = crate::cache::LocalCache::open(&config.active_profile)?;
+            let vault_id = resolve_vault_id(profile, &cache, vault_id, vault.as_deref())?;
             crate::sync::ensure_vault_synced(
                 profile,
                 &mut cache,
@@ -439,10 +459,12 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
             project_env,
             key,
             vault_id,
+            vault,
             offline,
         }) => {
             let profile = active_profile(&config)?;
             let mut cache = crate::cache::LocalCache::open(&config.active_profile)?;
+            let vault_id = resolve_vault_id(profile, &cache, vault_id, vault.as_deref())?;
             let mode = if offline {
                 crate::sync::SyncMode::Offline
             } else {
@@ -530,6 +552,40 @@ fn require_login(profile: &crate::config::ProfileConfig) -> Result<(), CliError>
     } else {
         Err(CliError::NotLoggedIn)
     }
+}
+
+fn resolve_vault_id(
+    profile: &crate::config::ProfileConfig,
+    cache: &crate::cache::LocalCache,
+    vault_id: Option<VaultId>,
+    vault_name: Option<&str>,
+) -> Result<VaultId, CliError> {
+    if vault_id.is_some() && vault_name.is_some() {
+        return Err(CliError::Input(
+            "use either --vault-id or --vault, not both",
+        ));
+    }
+
+    if let Some(vault_id) = vault_id {
+        return Ok(vault_id);
+    }
+
+    if let Some(vault_name) = vault_name {
+        let matches = cache.find_vaults_by_name(vault_name)?;
+        return match matches.as_slice() {
+            [vault] => Ok(vault.vault_id),
+            [] => Err(CliError::Input(
+                "vault not found in local cache; run `umbra vault list` first",
+            )),
+            _ => Err(CliError::Input(
+                "vault name is ambiguous; pass --vault-id instead",
+            )),
+        };
+    }
+
+    profile.default_vault_id.ok_or(CliError::Input(
+        "no default vault configured; pass --vault-id/--vault or create a vault first",
+    ))
 }
 
 struct DecryptedCachedItem {
