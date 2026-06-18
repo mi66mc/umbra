@@ -354,25 +354,77 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
                 None => rpassword::prompt_password("Value: ")?,
             };
             let mut cache = crate::cache::LocalCache::open(&config.active_profile)?;
+            crate::sync::ensure_vault_synced(
+                profile,
+                &mut cache,
+                vault_id,
+                crate::sync::SyncMode::IfChanged,
+            )
+            .await?;
             let vault_key = unlock_vault_key_from_cache(profile, &cache, vault_id)?;
-            let item_id = Uuid::new_v4();
             let kind = ItemKind::EnvBundle;
             let kind_name = item_kind_name(&kind);
-            let plaintext = crate::item_plaintext::build_secret_bundle(&project_env, &key, &value);
-            let envelope =
-                encrypt_item_plaintext(vault_id, item_id, 1, kind_name, &vault_key, &plaintext)?;
-            let response: ItemRevisionResponse = client
-                .post(
-                    &format!("/api/v1/vaults/{vault_id}/items"),
-                    &CreateItemRequest {
-                        protocol_version: PROTOCOL_VERSION,
+            let mut existing_bundle = None;
+            for revision in cache.list_latest_item_revisions(vault_id)? {
+                let Ok(wrapper) =
+                    serde_json::from_value::<ItemEnvelopeWrapper>(revision.envelope.clone())
+                else {
+                    continue;
+                };
+                if wrapper.kind != kind_name {
+                    continue;
+                }
+                let item = decrypt_cached_item_wrapper(&vault_key, &revision, wrapper)?;
+                if item.plaintext.title == project_env {
+                    existing_bundle = Some((revision, item.plaintext));
+                    break;
+                }
+            }
+
+            let response: ItemRevisionResponse =
+                if let Some((revision, mut plaintext)) = existing_bundle {
+                    crate::item_plaintext::set_plaintext_field(&mut plaintext, &key, value);
+                    let next_revision = revision.revision + 1;
+                    let envelope = encrypt_item_plaintext(
                         vault_id,
-                        item_id: Some(item_id),
-                        kind,
-                        envelope,
-                    },
-                )
-                .await?;
+                        revision.item_id,
+                        next_revision,
+                        kind_name,
+                        &vault_key,
+                        &plaintext,
+                    )?;
+                    client
+                        .put(
+                            &format!("/api/v1/vaults/{vault_id}/items/{}", revision.item_id),
+                            &UpdateItemRequest {
+                                protocol_version: PROTOCOL_VERSION,
+                                vault_id,
+                                item_id: revision.item_id,
+                                expected_revision: revision.revision,
+                                envelope,
+                            },
+                        )
+                        .await?
+                } else {
+                    let item_id = Uuid::new_v4();
+                    let plaintext =
+                        crate::item_plaintext::build_secret_bundle(&project_env, &key, &value);
+                    let envelope = encrypt_item_plaintext(
+                        vault_id, item_id, 1, kind_name, &vault_key, &plaintext,
+                    )?;
+                    client
+                        .post(
+                            &format!("/api/v1/vaults/{vault_id}/items"),
+                            &CreateItemRequest {
+                                protocol_version: PROTOCOL_VERSION,
+                                vault_id,
+                                item_id: Some(item_id),
+                                kind,
+                                envelope,
+                            },
+                        )
+                        .await?
+                };
             cache.upsert_item_revision(&response)?;
             crate::sync::ensure_vault_synced(
                 profile,

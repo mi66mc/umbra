@@ -89,6 +89,19 @@ pub fn build_secret_bundle(project_env: &str, key: &str, value: &str) -> ItemPla
     )
 }
 
+pub fn set_plaintext_field(item: &mut ItemPlaintextV1, name: &str, value: String) {
+    let kind = field_kind_for_name(name);
+    let sensitive = is_sensitive_field(name, &kind);
+    if let Some(field) = item.fields.iter_mut().find(|field| field.name == name) {
+        field.kind = kind;
+        field.value = value;
+        field.sensitive = sensitive;
+    } else {
+        item.fields
+            .push(ItemField::new(name.to_owned(), kind, value, sensitive));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -131,5 +144,18 @@ mod tests {
             default_fields_for_kind(&ItemKind::Login),
             vec!["username", "password", "url"]
         );
+    }
+
+    #[test]
+    fn set_plaintext_field_updates_or_inserts() {
+        let mut item = build_secret_bundle("umbra/prod", "DATABASE_URL", "old");
+
+        set_plaintext_field(&mut item, "DATABASE_URL", "new".to_owned());
+        set_plaintext_field(&mut item, "OPENAI_API_KEY", "secret".to_owned());
+
+        assert_eq!(item.fields.len(), 2);
+        assert_eq!(item.fields[0].value, "new");
+        assert_eq!(item.fields[1].name, "OPENAI_API_KEY");
+        assert!(item.fields[1].sensitive);
     }
 }
