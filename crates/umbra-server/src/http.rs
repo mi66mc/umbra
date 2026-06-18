@@ -464,6 +464,7 @@ async fn create_vault_inner(
             key_generation: vault.current_key_generation,
         })
         .await?;
+    let vault = state.storage.find_vault_by_id(vault.id).await?;
     Ok(Json(vault_response(vault)))
 }
 

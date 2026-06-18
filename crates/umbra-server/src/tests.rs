@@ -116,7 +116,7 @@ async fn opaque_login_token_can_create_org_and_personal_vault() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(vault.org_id, None);
     assert_eq!(vault.vault_revision, 0);
-    assert_eq!(vault.access_revision, 0);
+    assert!(vault.access_revision > 0);
     assert_eq!(vault.current_key_generation, 1);
 }
 
@@ -148,7 +148,7 @@ async fn create_vault_returns_client_supplied_id() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(vault.vault_id, requested_vault_id);
     assert_eq!(vault.vault_revision, 0);
-    assert_eq!(vault.access_revision, 0);
+    assert!(vault.access_revision > 0);
 }
 
 #[tokio::test]
