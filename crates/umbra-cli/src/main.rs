@@ -117,16 +117,16 @@ pub enum ItemCommand {
     List {
         #[arg(long)]
         vault_id: VaultId,
-        #[arg(long)]
-        cached: bool,
+        #[arg(long, alias = "cached")]
+        offline: bool,
     },
     Get {
         #[arg(long)]
         vault_id: VaultId,
         #[arg(long)]
         item_id: ItemId,
-        #[arg(long)]
-        cached: bool,
+        #[arg(long, alias = "cached")]
+        offline: bool,
     },
     Create {
         #[arg(long)]
@@ -170,6 +170,8 @@ pub enum SecretCommand {
         key: String,
         #[arg(long)]
         vault_id: VaultId,
+        #[arg(long)]
+        offline: bool,
     },
 }
 

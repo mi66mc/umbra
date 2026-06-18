@@ -135,7 +135,7 @@ fn parses_cached_item_commands() {
     ]);
     assert!(matches!(
         list.command,
-        Command::Item(crate::ItemCommand::List { cached: true, .. })
+        Command::Item(crate::ItemCommand::List { offline: true, .. })
     ));
 
     let get = Cli::parse_from([
@@ -150,7 +150,38 @@ fn parses_cached_item_commands() {
     ]);
     assert!(matches!(
         get.command,
-        Command::Item(crate::ItemCommand::Get { cached: true, .. })
+        Command::Item(crate::ItemCommand::Get { offline: true, .. })
+    ));
+}
+
+#[test]
+fn parses_offline_read_commands() {
+    let list = Cli::parse_from([
+        "umbra",
+        "item",
+        "list",
+        "--vault-id",
+        "00000000-0000-0000-0000-000000000001",
+        "--offline",
+    ]);
+    assert!(matches!(
+        list.command,
+        Command::Item(crate::ItemCommand::List { offline: true, .. })
+    ));
+
+    let secret = Cli::parse_from([
+        "umbra",
+        "secret",
+        "get",
+        "umbra/prod",
+        "OPENAI_API_KEY",
+        "--vault-id",
+        "00000000-0000-0000-0000-000000000001",
+        "--offline",
+    ]);
+    assert!(matches!(
+        secret.command,
+        Command::Secret(SecretCommand::Get { offline: true, .. })
     ));
 }
 

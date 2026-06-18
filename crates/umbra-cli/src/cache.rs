@@ -300,18 +300,6 @@ impl LocalCache {
         Ok(())
     }
 
-    pub fn latest_vault_revision(&self, vault_id: uuid::Uuid) -> Result<Option<i64>, CliError> {
-        let mut statement = self
-            .connection
-            .prepare("SELECT latest_vault_revision FROM sync_state WHERE vault_id = ?1")?;
-        let result = statement.query_row(params![vault_id.to_string()], |row| row.get(0));
-        match result {
-            Ok(value) => Ok(Some(value)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(error) => Err(CliError::from(error)),
-        }
-    }
-
     #[cfg(test)]
     pub fn list_item_revisions(
         &self,
@@ -760,13 +748,13 @@ mod tests {
 
         cache.apply_sync_changes(&changes).unwrap();
 
-        assert_eq!(cache.latest_vault_revision(vault_id).unwrap(), Some(7));
+        let sync_state = cache.sync_state(vault_id).unwrap().unwrap();
         assert_eq!(
-            cache
-                .sync_state(vault_id)
-                .unwrap()
-                .unwrap()
-                .latest_access_revision,
+            sync_state.latest_vault_revision,
+            changes.latest_vault_revision
+        );
+        assert_eq!(
+            sync_state.latest_access_revision,
             changes.latest_access_revision
         );
         assert_eq!(cache.list_item_revisions(vault_id).unwrap().len(), 1);

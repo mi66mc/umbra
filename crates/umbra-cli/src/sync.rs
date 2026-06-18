@@ -1,9 +1,8 @@
-#![allow(dead_code)]
-
 use crate::cache::LocalCache;
 use crate::config::ProfileConfig;
 use crate::error::CliError;
 use crate::http::UmbraHttpClient;
+use serde::Serialize;
 use umbra_core::{RevisionId, VaultId};
 use umbra_protocol::{
     PROTOCOL_VERSION, SyncRequest, SyncResponse, SyncStatusRequest, SyncStatusResponse,
@@ -13,11 +12,12 @@ use umbra_protocol::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SyncMode {
     IfChanged,
+    #[allow(dead_code)]
     Always,
     Offline,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SyncOutcome {
     pub synced: bool,
     pub latest_vault_revision: RevisionId,

@@ -197,30 +197,47 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
                 .await?;
             print_json(&vault)
         }
-        Command::Item(ItemCommand::List { vault_id, cached }) => {
-            if !cached {
-                return Err(CliError::Input(
-                    "remote item list is not implemented yet; use --cached after sync",
-                ));
-            }
-            let cache = crate::cache::LocalCache::open(&config.active_profile)?;
+        Command::Item(ItemCommand::List { vault_id, offline }) => {
+            let profile = active_profile(&config)?;
+            let mut cache = crate::cache::LocalCache::open(&config.active_profile)?;
+            let mode = if offline {
+                crate::sync::SyncMode::Offline
+            } else {
+                require_login(profile)?;
+                crate::sync::SyncMode::IfChanged
+            };
+            let sync_outcome =
+                crate::sync::ensure_vault_synced(profile, &mut cache, vault_id, mode).await?;
+            let _ = (
+                sync_outcome.synced,
+                sync_outcome.latest_vault_revision,
+                sync_outcome.latest_access_revision,
+            );
             print_json(&cache.list_latest_item_revisions(vault_id)?)
         }
         Command::Item(ItemCommand::Get {
             vault_id,
             item_id,
-            cached,
+            offline,
         }) => {
-            if !cached {
-                return Err(CliError::Input(
-                    "remote item get is not implemented yet; use --cached after sync",
-                ));
-            }
-            let cache = crate::cache::LocalCache::open(&config.active_profile)?;
+            let profile = active_profile(&config)?;
+            let mut cache = crate::cache::LocalCache::open(&config.active_profile)?;
+            let mode = if offline {
+                crate::sync::SyncMode::Offline
+            } else {
+                require_login(profile)?;
+                crate::sync::SyncMode::IfChanged
+            };
+            let sync_outcome =
+                crate::sync::ensure_vault_synced(profile, &mut cache, vault_id, mode).await?;
+            let _ = (
+                sync_outcome.synced,
+                sync_outcome.latest_vault_revision,
+                sync_outcome.latest_access_revision,
+            );
             let Some(revision) = cache.latest_item_revision(vault_id, item_id)? else {
                 return Err(CliError::Input("cached item not found"));
             };
-            let profile = active_profile(&config)?;
             let vault_key = unlock_vault_key_from_cache(profile, &cache, vault_id)?;
             let item = decrypt_cached_item(&vault_key, &revision)?;
             print_json(&item.plaintext)
@@ -335,9 +352,23 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
             project_env,
             key,
             vault_id,
+            offline,
         }) => {
             let profile = active_profile(&config)?;
-            let cache = crate::cache::LocalCache::open(&config.active_profile)?;
+            let mut cache = crate::cache::LocalCache::open(&config.active_profile)?;
+            let mode = if offline {
+                crate::sync::SyncMode::Offline
+            } else {
+                require_login(profile)?;
+                crate::sync::SyncMode::IfChanged
+            };
+            let sync_outcome =
+                crate::sync::ensure_vault_synced(profile, &mut cache, vault_id, mode).await?;
+            let _ = (
+                sync_outcome.synced,
+                sync_outcome.latest_vault_revision,
+                sync_outcome.latest_access_revision,
+            );
             let vault_key = unlock_vault_key_from_cache(profile, &cache, vault_id)?;
             for revision in cache.list_latest_item_revisions(vault_id)? {
                 let Ok(wrapper) =
@@ -367,14 +398,19 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
             let profile = active_profile(&config)?;
             require_login(profile)?;
             let client = UmbraHttpClient::new(profile)?;
-            let device_id = profile.device_id.unwrap_or_else(Uuid::new_v4);
+            let device_id = profile.device_id.ok_or(CliError::Input(
+                "profile has no device id; run `umbra login` first",
+            ))?;
             let mut cache = crate::cache::LocalCache::open(&config.active_profile)?;
             let since_vault_revision = if force_full {
                 0
             } else if let Some(value) = since_vault_revision {
                 value
             } else {
-                cache.latest_vault_revision(vault_id)?.unwrap_or(0)
+                cache
+                    .sync_state(vault_id)?
+                    .map(|state| state.latest_vault_revision)
+                    .unwrap_or(0)
             };
             let response: SyncResponse = client
                 .post(
