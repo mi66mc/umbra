@@ -86,6 +86,39 @@ impl std::fmt::Debug for AccountKek {
 }
 
 #[derive(Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
+pub struct LocalUnlockKey([u8; KEY_LEN]);
+
+impl LocalUnlockKey {
+    pub fn generate() -> Self {
+        let mut bytes = [0u8; KEY_LEN];
+        OsRng.fill_bytes(&mut bytes);
+        Self(bytes)
+    }
+
+    pub fn from_bytes(bytes: [u8; KEY_LEN]) -> Self {
+        Self(bytes)
+    }
+
+    fn as_key(&self) -> &Key {
+        Key::from_slice(&self.0)
+    }
+
+    pub fn to_base64url(&self) -> String {
+        encode_b64(&self.0)
+    }
+
+    pub fn from_base64url(encoded: &str) -> Result<Self, CryptoError> {
+        Ok(Self(decode_array(encoded)?))
+    }
+}
+
+impl std::fmt::Debug for LocalUnlockKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("LocalUnlockKey([redacted])")
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
 pub struct UserPrivateKey([u8; KEY_LEN]);
 
 impl UserPrivateKey {
@@ -159,6 +192,10 @@ impl VaultKey {
 
     pub fn to_base64url(&self) -> String {
         encode_b64(&self.0)
+    }
+
+    pub fn from_base64url(encoded: &str) -> Result<Self, CryptoError> {
+        Ok(Self(decode_array(encoded)?))
     }
 }
 
@@ -353,6 +390,18 @@ impl AadV1 {
             kind: None,
         }
     }
+
+    pub fn local_unlock_state(profile: impl Into<String>, device_id: impl Into<String>) -> Self {
+        Self {
+            app: "umbra".to_owned(),
+            purpose: "local_unlock_state".to_owned(),
+            schema: 1,
+            vault_id: profile.into(),
+            item_id: Some(device_id.into()),
+            revision: None,
+            kind: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -475,6 +524,22 @@ pub fn decrypt_user_private_key(
 ) -> Result<UserPrivateKey, CryptoError> {
     let plaintext = decrypt_with_key(account_kek.as_key(), expected_aad, envelope)?;
     Ok(UserPrivateKey(bytes_to_array(&plaintext)?))
+}
+
+pub fn encrypt_local_unlock_state(
+    key: &LocalUnlockKey,
+    aad: AadV1,
+    plaintext: &[u8],
+) -> Result<CryptoEnvelopeV1, CryptoError> {
+    encrypt_with_key(key.as_key(), aad, plaintext)
+}
+
+pub fn decrypt_local_unlock_state(
+    key: &LocalUnlockKey,
+    expected_aad: &AadV1,
+    envelope: &CryptoEnvelopeV1,
+) -> Result<Vec<u8>, CryptoError> {
+    decrypt_with_key(key.as_key(), expected_aad, envelope)
 }
 
 pub fn generate_vault_key() -> VaultKey {
@@ -839,5 +904,29 @@ mod tests {
 
         assert_eq!(format!("{secret:?}"), "UserSecretKey([redacted])");
         assert!(!format!("{secret:?}").contains('9'));
+    }
+
+    #[test]
+    fn local_unlock_state_encrypt_decrypt_roundtrip() {
+        let key = LocalUnlockKey::generate();
+        let aad = AadV1::local_unlock_state("personal", "device-1");
+        let plaintext = br#"{"version":1,"vault_keys":{}}"#;
+
+        let envelope = encrypt_local_unlock_state(&key, aad.clone(), plaintext).unwrap();
+        let decrypted = decrypt_local_unlock_state(&key, &aad, &envelope).unwrap();
+
+        assert_eq!(decrypted, plaintext);
+        assert_eq!(LocalUnlockKey::from_base64url(&key.to_base64url()).unwrap(), key);
+    }
+
+    #[test]
+    fn local_unlock_state_decrypt_fails_with_wrong_aad() {
+        let key = LocalUnlockKey::generate();
+        let aad = AadV1::local_unlock_state("personal", "device-1");
+        let wrong_aad = AadV1::local_unlock_state("personal", "device-2");
+
+        let envelope = encrypt_local_unlock_state(&key, aad, b"secret").unwrap();
+
+        assert!(decrypt_local_unlock_state(&key, &wrong_aad, &envelope).is_err());
     }
 }
