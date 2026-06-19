@@ -9,6 +9,7 @@ mod keys;
 mod opaque;
 mod output;
 mod sync;
+mod unlock_store;
 
 #[cfg(test)]
 mod tests;

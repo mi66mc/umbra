@@ -41,6 +41,13 @@ pub enum CliError {
     Prompt(#[from] dialoguer::Error),
     #[error("cache error: {0}")]
     Cache(#[from] rusqlite::Error),
+    #[error("keychain error: {0}")]
+    Keyring(#[from] keyring::Error),
+    #[error("profile is locked; run `umbra unlock` or enter the master password when prompted")]
+    Locked,
+    #[error("local unlock state is expired; run `umbra unlock` again")]
+    #[allow(dead_code)]
+    UnlockExpired,
     #[error("server returned {status}: {body}")]
     ServerStatus {
         status: reqwest::StatusCode,

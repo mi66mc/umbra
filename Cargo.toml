@@ -27,6 +27,7 @@ clap = { version = "4", features = ["derive", "env"] }
 config = "0.14"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 hkdf = "0.12"
+keyring = "3"
 opaque-ke = { version = "4.1.0-pre.1", default-features = true, features = ["argon2", "std"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 serde = { version = "1", features = ["derive"] }
