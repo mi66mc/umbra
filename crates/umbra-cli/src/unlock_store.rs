@@ -9,8 +9,8 @@ use base64ct::{Base64UrlUnpadded, Encoding};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use umbra_crypto::{
-    decrypt_local_unlock_state, encrypt_local_unlock_state, AadV1, CryptoEnvelopeV1,
-    LocalUnlockKey, UserPrivateKey, VaultKey,
+    AadV1, CryptoEnvelopeV1, LocalUnlockKey, UserPrivateKey, VaultKey, decrypt_local_unlock_state,
+    encrypt_local_unlock_state,
 };
 
 use crate::cache::profile_cache_dir;
@@ -536,6 +536,19 @@ mod tests {
     }
 
     #[test]
+    fn loaded_state_returns_vault_key_by_id() {
+        let device_id = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+        let vault_id = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
+        let other_vault_id = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000003").unwrap();
+        let mut state = unlocked_state("personal", device_id, 9);
+        let vault_key = VaultKey::from_bytes([42; 32]);
+        state.vault_keys.insert(vault_id, vault_key.clone());
+
+        assert_eq!(state.vault_key(vault_id), Some(vault_key));
+        assert_eq!(state.vault_key(other_vault_id), None);
+    }
+
+    #[test]
     fn expired_state_is_cleared_and_not_loaded() {
         let (store, _temp) = test_store("personal");
         store
@@ -570,11 +583,13 @@ mod tests {
         store.clear().unwrap();
 
         assert!(!store.state_path().exists());
-        assert!(store
-            .key_store()
-            .get_unlock_key("personal")
-            .unwrap()
-            .is_none());
+        assert!(
+            store
+                .key_store()
+                .get_unlock_key("personal")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -606,9 +621,11 @@ mod tests {
         let device_id = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
 
         store.key_store().fail_set();
-        assert!(store
-            .save(&unlocked_state("personal", device_id, 9))
-            .is_err());
+        assert!(
+            store
+                .save(&unlocked_state("personal", device_id, 9))
+                .is_err()
+        );
 
         assert!(!store.state_path().exists());
     }
@@ -624,9 +641,11 @@ mod tests {
         let before = fs::read(store.state_path()).unwrap();
 
         let failing_store = store.clone().with_promote_failure();
-        assert!(failing_store
-            .save(&unlocked_state("personal", device_id, 8))
-            .is_err());
+        assert!(
+            failing_store
+                .save(&unlocked_state("personal", device_id, 8))
+                .is_err()
+        );
 
         assert_eq!(fs::read(store.state_path()).unwrap(), before);
         let loaded = store.load().unwrap().unwrap();
@@ -643,11 +662,13 @@ mod tests {
         store.key_store().set_unlock_key("personal", &key).unwrap();
 
         assert!(store.load().unwrap().is_none());
-        assert!(store
-            .key_store()
-            .get_unlock_key("personal")
-            .unwrap()
-            .is_none());
+        assert!(
+            store
+                .key_store()
+                .get_unlock_key("personal")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -661,11 +682,13 @@ mod tests {
 
         assert!(store.load().unwrap().is_none());
         assert!(!store.state_path().exists());
-        assert!(store
-            .key_store()
-            .get_unlock_key("personal")
-            .unwrap()
-            .is_none());
+        assert!(
+            store
+                .key_store()
+                .get_unlock_key("personal")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -721,11 +744,13 @@ mod tests {
 
         assert!(store.load().unwrap().is_none());
         assert!(!store.state_path().exists());
-        assert!(store
-            .key_store()
-            .get_unlock_key("personal")
-            .unwrap()
-            .is_none());
+        assert!(
+            store
+                .key_store()
+                .get_unlock_key("personal")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

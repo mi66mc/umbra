@@ -916,7 +916,10 @@ mod tests {
         let decrypted = decrypt_local_unlock_state(&key, &aad, &envelope).unwrap();
 
         assert_eq!(decrypted, plaintext);
-        assert_eq!(LocalUnlockKey::from_base64url(&key.to_base64url()).unwrap(), key);
+        assert_eq!(
+            LocalUnlockKey::from_base64url(&key.to_base64url()).unwrap(),
+            key
+        );
     }
 
     #[test]

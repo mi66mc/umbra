@@ -345,7 +345,7 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
             let Some(revision) = cache.latest_item_revision(vault_id, item_id)? else {
                 return Err(CliError::Input("cached item not found"));
             };
-            let vault_key = unlock_vault_key_from_cache(profile, &cache, vault_id)?;
+            let vault_key = unlock_vault_key(&config.active_profile, profile, &cache, vault_id)?;
             let item = decrypt_cached_item(&vault_key, &revision)?;
             print_json(&item.plaintext)
         }
@@ -367,7 +367,8 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
             let (item_id, envelope) = match envelope_json {
                 Some(envelope_json) => (None, serde_json::from_str(&envelope_json)?),
                 None => {
-                    let vault_key = unlock_vault_key_from_cache(profile, &cache, vault_id)?;
+                    let vault_key =
+                        unlock_vault_key(&config.active_profile, profile, &cache, vault_id)?;
                     let item_id = Uuid::new_v4();
                     let kind_name = item_kind_name(&kind);
                     let title = title.unwrap_or_else(|| kind_name.clone());
@@ -462,7 +463,7 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
                 crate::sync::SyncMode::IfChanged,
             )
             .await?;
-            let vault_key = unlock_vault_key_from_cache(profile, &cache, vault_id)?;
+            let vault_key = unlock_vault_key(&config.active_profile, profile, &cache, vault_id)?;
             let kind = ItemKind::EnvBundle;
             let kind_name = item_kind_name(&kind);
             let mut existing_bundle = None;
@@ -559,7 +560,7 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
                 sync_outcome.latest_vault_revision,
                 sync_outcome.latest_access_revision,
             );
-            let vault_key = unlock_vault_key_from_cache(profile, &cache, vault_id)?;
+            let vault_key = unlock_vault_key(&config.active_profile, profile, &cache, vault_id)?;
             for revision in cache.list_latest_item_revisions(vault_id)? {
                 let Ok(wrapper) =
                     serde_json::from_value::<ItemEnvelopeWrapper>(revision.envelope.clone())
@@ -701,11 +702,19 @@ struct DecryptedCachedItem {
     plaintext: ItemPlaintextV1,
 }
 
-fn unlock_vault_key_from_cache(
+fn unlock_vault_key(
+    profile_name: &str,
     profile: &crate::config::ProfileConfig,
     cache: &crate::cache::LocalCache,
     vault_id: VaultId,
 ) -> Result<VaultKey, CliError> {
+    let cached_vault_key = crate::unlock_store::UnlockStore::open(profile_name, profile.device_id)
+        .load()?
+        .and_then(|state| state.vault_key(vault_id));
+    if let Some(vault_key) = cached_vault_key {
+        return Ok(vault_key);
+    }
+
     let user_id = profile.user_id.ok_or(CliError::Input(
         "profile has no user id; run `umbra login` first",
     ))?;

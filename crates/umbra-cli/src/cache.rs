@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, params, params_from_iter};
 use umbra_core::VaultKind;
 
 use crate::error::CliError;
@@ -149,6 +149,30 @@ impl LocalCache {
                     now
                 ],
             )?;
+        }
+
+        let active_wrapping_ids = changes
+            .key_wrappings
+            .iter()
+            .map(|wrapping| wrapping.id.to_string())
+            .collect::<Vec<_>>();
+        if active_wrapping_ids.is_empty() {
+            tx.execute(
+                "DELETE FROM vault_key_wrappings WHERE vault_id = ?1",
+                params![changes.vault_id.to_string()],
+            )?;
+        } else {
+            let placeholders = (0..active_wrapping_ids.len())
+                .map(|_| "?")
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "DELETE FROM vault_key_wrappings WHERE vault_id = ? AND id NOT IN ({placeholders})"
+            );
+            let mut values = Vec::with_capacity(active_wrapping_ids.len() + 1);
+            values.push(changes.vault_id.to_string());
+            values.extend(active_wrapping_ids);
+            tx.execute(&sql, params_from_iter(values))?;
         }
 
         for wrapping in &changes.key_wrappings {
@@ -836,5 +860,52 @@ mod tests {
                 key_generation: 2,
             })
         );
+
+        cache
+            .apply_sync_changes(&umbra_protocol::VaultSyncChanges {
+                vault_id,
+                latest_vault_revision: 8,
+                latest_access_revision: 4,
+                items: vec![],
+                deleted_items: vec![],
+                key_wrappings: vec![umbra_protocol::VaultKeyWrappingResponse {
+                    id: latest_wrapping_id,
+                    vault_id,
+                    user_id,
+                    device_id: None,
+                    wrapping_type: "user_public_key".to_owned(),
+                    envelope: serde_json::json!({"wrapped": "latest"}),
+                    key_generation: 2,
+                }],
+            })
+            .unwrap();
+
+        assert_eq!(cache.list_key_wrappings(vault_id).unwrap().len(), 1);
+        assert_eq!(
+            cache.latest_key_wrapping(vault_id, user_id).unwrap(),
+            Some(CachedKeyWrapping {
+                id: latest_wrapping_id,
+                vault_id,
+                user_id,
+                device_id: None,
+                wrapping_type: "user_public_key".to_owned(),
+                envelope: serde_json::json!({"wrapped": "latest"}),
+                key_generation: 2,
+            })
+        );
+
+        cache
+            .apply_sync_changes(&umbra_protocol::VaultSyncChanges {
+                vault_id,
+                latest_vault_revision: 9,
+                latest_access_revision: 5,
+                items: vec![],
+                deleted_items: vec![],
+                key_wrappings: vec![],
+            })
+            .unwrap();
+
+        assert_eq!(cache.list_key_wrappings(vault_id).unwrap(), vec![]);
+        assert_eq!(cache.latest_key_wrapping(vault_id, user_id).unwrap(), None);
     }
 }
