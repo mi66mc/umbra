@@ -158,6 +158,8 @@ pub(crate) struct UnlockStore<K: UnlockKeyStore = KeyringUnlockKeyStore> {
     device_id: Option<uuid::Uuid>,
     state_path: PathBuf,
     key_store: K,
+    #[cfg(test)]
+    fail_promote: bool,
 }
 
 impl UnlockStore<KeyringUnlockKeyStore> {
@@ -183,6 +185,8 @@ impl<K: UnlockKeyStore> UnlockStore<K> {
             device_id,
             state_path,
             key_store,
+            #[cfg(test)]
+            fail_promote: false,
         }
     }
 
@@ -199,26 +203,34 @@ impl<K: UnlockKeyStore> UnlockStore<K> {
         let envelope = encrypt_local_unlock_state(&key, aad, &plaintext)?;
         let temp_path = self.temp_state_path();
         fs::write(&temp_path, serde_json::to_vec_pretty(&envelope)?)?;
+        let previous_key = self.key_store.get_unlock_key(&self.profile)?;
 
         if let Err(error) = self.key_store.set_unlock_key(&self.profile, &key) {
             let _ = fs::remove_file(&temp_path);
             return Err(error);
         }
 
-        promote_temp_file(&temp_path, &self.state_path)?;
+        if let Err(error) = self.promote_temp_file(&temp_path) {
+            let _ = fs::remove_file(&temp_path);
+            self.restore_unlock_key(previous_key)?;
+            return Err(error);
+        }
         Ok(())
     }
 
     pub(crate) fn load(&self) -> Result<Option<UnlockedLocalState>, CliError> {
+        let bytes = match fs::read(&self.state_path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                self.key_store.clear_unlock_key(&self.profile)?;
+                return Ok(None);
+            }
+            Err(error) => return Err(CliError::from(error)),
+        };
+
         let Some(key) = self.key_store.get_unlock_key(&self.profile)? else {
             self.remove_state_file()?;
             return Ok(None);
-        };
-
-        let bytes = match fs::read(&self.state_path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(CliError::from(error)),
         };
 
         let envelope: CryptoEnvelopeV1 = match serde_json::from_slice(&bytes) {
@@ -289,6 +301,12 @@ impl<K: UnlockKeyStore> UnlockStore<K> {
         &self.key_store
     }
 
+    #[cfg(test)]
+    fn with_promote_failure(mut self) -> Self {
+        self.fail_promote = true;
+        self
+    }
+
     fn aad(&self, device_id: uuid::Uuid) -> AadV1 {
         AadV1::local_unlock_state(&self.profile, device_id.to_string())
     }
@@ -314,6 +332,25 @@ impl<K: UnlockKeyStore> UnlockStore<K> {
             .unwrap_or("unlock-state.json");
         self.state_path
             .with_file_name(format!(".{file_name}.{}.tmp", uuid::Uuid::new_v4()))
+    }
+
+    fn restore_unlock_key(&self, previous_key: Option<LocalUnlockKey>) -> Result<(), CliError> {
+        if let Some(previous_key) = previous_key {
+            self.key_store.set_unlock_key(&self.profile, &previous_key)
+        } else {
+            self.key_store.clear_unlock_key(&self.profile)
+        }
+    }
+
+    fn promote_temp_file(&self, temp_path: &std::path::Path) -> Result<(), CliError> {
+        #[cfg(test)]
+        if self.fail_promote {
+            return Err(CliError::from(std::io::Error::other(
+                "simulated unlock state promotion failure",
+            )));
+        }
+
+        promote_temp_file(temp_path, &self.state_path)
     }
 
     fn clear_invalid_state(&self) -> Result<Option<UnlockedLocalState>, CliError> {
@@ -572,6 +609,47 @@ mod tests {
         assert_eq!(
             loaded.vault_keys.get(&vault_id).unwrap().to_base64url(),
             VaultKey::from_bytes([9u8; 32]).to_base64url()
+        );
+    }
+
+    #[test]
+    fn promotion_failure_restores_previous_key_and_keeps_existing_state() {
+        let (store, _temp) = test_store("personal");
+        let device_id = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+        let vault_id = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000010").unwrap();
+        store
+            .save(&unlocked_state("personal", device_id, 9))
+            .unwrap();
+        let before = fs::read(store.state_path()).unwrap();
+
+        let failing_store = store.clone().with_promote_failure();
+        assert!(
+            failing_store
+                .save(&unlocked_state("personal", device_id, 8))
+                .is_err()
+        );
+
+        assert_eq!(fs::read(store.state_path()).unwrap(), before);
+        let loaded = store.load().unwrap().unwrap();
+        assert_eq!(
+            loaded.vault_keys.get(&vault_id).unwrap().to_base64url(),
+            VaultKey::from_bytes([9u8; 32]).to_base64url()
+        );
+    }
+
+    #[test]
+    fn missing_state_file_clears_stale_key() {
+        let (store, _temp) = test_store("personal");
+        let key = LocalUnlockKey::generate();
+        store.key_store().set_unlock_key("personal", &key).unwrap();
+
+        assert!(store.load().unwrap().is_none());
+        assert!(
+            store
+                .key_store()
+                .get_unlock_key("personal")
+                .unwrap()
+                .is_none()
         );
     }
 
