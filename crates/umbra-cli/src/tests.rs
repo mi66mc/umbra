@@ -245,6 +245,29 @@ fn parses_cached_item_commands() {
 }
 
 #[test]
+fn parses_item_get_by_title() {
+    let cli = Cli::parse_from([
+        "umbra", "item", "get", "--vault", "Personal", "--title", "GitHub",
+    ]);
+
+    let Command::Item(ItemCommand::Get {
+        vault,
+        item_id,
+        title,
+        offline,
+        ..
+    }) = cli.command
+    else {
+        panic!("expected item get");
+    };
+
+    assert_eq!(vault.as_deref(), Some("Personal"));
+    assert_eq!(item_id, None);
+    assert_eq!(title.as_deref(), Some("GitHub"));
+    assert!(!offline);
+}
+
+#[test]
 fn parses_offline_read_commands() {
     let list = Cli::parse_from([
         "umbra",

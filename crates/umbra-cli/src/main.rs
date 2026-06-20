@@ -143,7 +143,9 @@ pub enum ItemCommand {
         #[arg(long)]
         vault: Option<String>,
         #[arg(long)]
-        item_id: ItemId,
+        item_id: Option<ItemId>,
+        #[arg(long)]
+        title: Option<String>,
         #[arg(long, alias = "cached")]
         offline: bool,
     },

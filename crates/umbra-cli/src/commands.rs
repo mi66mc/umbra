@@ -329,12 +329,36 @@ pub async fn run(
                 sync_outcome.latest_vault_revision,
                 sync_outcome.latest_access_revision,
             );
-            print_json(&cache.list_latest_item_revisions(vault_id)?)
+            if output.is_json() {
+                print_json(&cache.list_latest_item_revisions(vault_id)?)
+            } else {
+                let vault_key =
+                    unlock_vault_key(&config.active_profile, profile, &cache, vault_id)?;
+                let mut items = Vec::new();
+                for revision in cache.list_latest_item_revisions(vault_id)? {
+                    let Ok(wrapper) =
+                        serde_json::from_value::<ItemEnvelopeWrapper>(revision.envelope.clone())
+                    else {
+                        continue;
+                    };
+                    let kind = wrapper.kind.clone();
+                    let item = decrypt_cached_item_wrapper(&vault_key, &revision, wrapper)?;
+                    items.push(DecryptedListedItem {
+                        item_id: revision.item_id,
+                        title: item.plaintext.title,
+                        kind,
+                        revision: revision.revision,
+                        field_count: item.plaintext.fields.len(),
+                    });
+                }
+                render_item_list(output, &items)
+            }
         }
         Command::Item(ItemCommand::Get {
             vault_id,
             vault,
             item_id,
+            title,
             offline,
         }) => {
             let profile = active_profile(&config)?;
@@ -353,12 +377,16 @@ pub async fn run(
                 sync_outcome.latest_vault_revision,
                 sync_outcome.latest_access_revision,
             );
-            let Some(revision) = cache.latest_item_revision(vault_id, item_id)? else {
-                return Err(CliError::Input("cached item not found"));
-            };
             let vault_key = unlock_vault_key(&config.active_profile, profile, &cache, vault_id)?;
+            let revision = select_cached_item_revision(
+                &cache,
+                &vault_key,
+                vault_id,
+                item_id,
+                title.as_deref(),
+            )?;
             let item = decrypt_cached_item(&vault_key, &revision)?;
-            print_json(&item.plaintext)
+            render_item_plaintext(output, revision.item_id, &item.plaintext)
         }
         Command::Item(ItemCommand::Create {
             vault_id,
@@ -826,6 +854,80 @@ fn render_sync_response(output: OutputMode, response: &SyncResponse) -> Result<(
     Ok(())
 }
 
+fn render_item_plaintext(
+    output: OutputMode,
+    item_id: Uuid,
+    plaintext: &ItemPlaintextV1,
+) -> Result<(), CliError> {
+    if output.is_json() {
+        return print_json(plaintext);
+    }
+
+    crate::output::print_kv(&[
+        ("item_id", item_id.to_string()),
+        ("title", plaintext.title.clone()),
+        (
+            "tags",
+            if plaintext.tags.is_empty() {
+                "-".to_owned()
+            } else {
+                plaintext.tags.join(",")
+            },
+        ),
+    ]);
+
+    if !plaintext.fields.is_empty() {
+        println!();
+        let rows = plaintext
+            .fields
+            .iter()
+            .map(|field| {
+                vec![
+                    field.name.clone(),
+                    format!("{:?}", field.kind),
+                    if field.sensitive {
+                        "[secret]".to_owned()
+                    } else {
+                        field.value.clone()
+                    },
+                ]
+            })
+            .collect::<Vec<_>>();
+        crate::output::print_table(&["field", "kind", "value"], &rows);
+    }
+    Ok(())
+}
+
+fn render_item_list(output: OutputMode, items: &[DecryptedListedItem]) -> Result<(), CliError> {
+    if output.is_json() {
+        return print_json(&items);
+    }
+
+    let rows = items
+        .iter()
+        .map(|item| {
+            vec![
+                item.title.clone(),
+                item.kind.clone(),
+                item.item_id.to_string(),
+                item.revision.to_string(),
+                item.field_count.to_string(),
+            ]
+        })
+        .collect::<Vec<_>>();
+    crate::output::print_table(&["title", "kind", "item_id", "rev", "fields"], &rows);
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DecryptedListedItem {
+    item_id: Uuid,
+    title: String,
+    kind: String,
+    revision: i64,
+    field_count: usize,
+}
+
 struct DecryptedCachedItem {
     plaintext: ItemPlaintextV1,
 }
@@ -887,6 +989,42 @@ fn decrypt_cached_item(
 ) -> Result<DecryptedCachedItem, CliError> {
     let wrapper: ItemEnvelopeWrapper = serde_json::from_value(revision.envelope.clone())?;
     decrypt_cached_item_wrapper(vault_key, revision, wrapper)
+}
+
+fn select_cached_item_revision(
+    cache: &crate::cache::LocalCache,
+    vault_key: &VaultKey,
+    vault_id: VaultId,
+    item_id: Option<Uuid>,
+    title: Option<&str>,
+) -> Result<crate::cache::CachedItemRevision, CliError> {
+    if item_id.is_some() && title.is_some() {
+        return Err(CliError::Input("use either --item-id or --title, not both"));
+    }
+
+    if let Some(item_id) = item_id {
+        return cache
+            .latest_item_revision(vault_id, item_id)?
+            .ok_or(CliError::Input("cached item not found"));
+    }
+
+    let Some(title) = title else {
+        return Err(CliError::Input("pass --item-id or --title"));
+    };
+
+    let mut matches = Vec::new();
+    for revision in cache.list_latest_item_revisions(vault_id)? {
+        let item = decrypt_cached_item(vault_key, &revision)?;
+        if item.plaintext.title == title {
+            matches.push(revision);
+        }
+    }
+
+    match matches.as_slice() {
+        [revision] => Ok(revision.clone()),
+        [] => Err(CliError::Input("cached item title not found")),
+        _ => Err(CliError::Input("item title is ambiguous; pass --item-id")),
+    }
 }
 
 fn decrypt_cached_item_wrapper(
