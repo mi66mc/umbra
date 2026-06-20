@@ -86,6 +86,43 @@ fn parses_register_and_login_commands() {
 }
 
 #[test]
+fn parses_unlock_lock_and_status_commands() {
+    let unlock = Cli::parse_from([
+        "umbra",
+        "unlock",
+        "--vault",
+        "Personal",
+        "--ttl-minutes",
+        "30",
+    ]);
+    assert!(matches!(
+        unlock.command,
+        Command::Unlock {
+            vault: Some(name),
+            ttl_minutes: 30,
+            all: false,
+            ..
+        } if name == "Personal"
+    ));
+
+    let unlock_all = Cli::parse_from(["umbra", "unlock", "--all"]);
+    assert!(matches!(
+        unlock_all.command,
+        Command::Unlock {
+            all: true,
+            ttl_minutes: 15,
+            ..
+        }
+    ));
+
+    let lock = Cli::parse_from(["umbra", "lock"]);
+    assert!(matches!(lock.command, Command::Lock));
+
+    let status = Cli::parse_from(["umbra", "status"]);
+    assert!(matches!(status.command, Command::Status));
+}
+
+#[test]
 fn parses_sugar_commands() {
     let vault = Cli::parse_from(["umbra", "vault", "create"]);
     assert!(matches!(

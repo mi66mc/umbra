@@ -52,6 +52,18 @@ pub enum Command {
         #[arg(long)]
         email: Option<String>,
     },
+    Unlock {
+        #[arg(long)]
+        vault_id: Option<VaultId>,
+        #[arg(long)]
+        vault: Option<String>,
+        #[arg(long)]
+        all: bool,
+        #[arg(long, default_value_t = 15)]
+        ttl_minutes: i64,
+    },
+    Lock,
+    Status,
     #[command(subcommand)]
     Auth(AuthCommand),
     #[command(subcommand)]

@@ -117,6 +117,9 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
             println!("logged in: {}", config.active_profile);
             Ok(())
         }
+        Command::Unlock { .. } => Err(CliError::Input("unlock is not implemented yet")),
+        Command::Lock => Err(CliError::Input("lock is not implemented yet")),
+        Command::Status => Err(CliError::Input("status is not implemented yet")),
         Command::Auth(AuthCommand::Token(TokenCommand::Set { server_url, token })) => {
             let profile = active_profile_mut(&mut config);
             profile.server_url = server_url;
