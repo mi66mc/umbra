@@ -7,6 +7,14 @@ use crate::{
 };
 
 #[test]
+fn parses_global_json_flag() {
+    let cli = Cli::parse_from(["umbra", "--json", "vault", "list"]);
+
+    assert!(cli.json);
+    assert!(matches!(cli.command, Command::Vault(VaultCommand::List)));
+}
+
+#[test]
 fn parses_token_set_command() {
     let cli = Cli::parse_from([
         "umbra",

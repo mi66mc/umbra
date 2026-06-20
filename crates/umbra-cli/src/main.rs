@@ -28,6 +28,8 @@ use crate::error::CliError;
 #[command(name = "umbra")]
 #[command(about = "Umbra command line client")]
 pub struct Cli {
+    #[arg(long, global = true, help = "Print machine-readable JSON output")]
+    pub json: bool,
     #[command(subcommand)]
     pub command: Command,
 }
@@ -213,8 +215,9 @@ pub enum SyncCommand {
 #[tokio::main]
 async fn main() -> Result<(), CliError> {
     let cli = Cli::parse();
+    let output = crate::output::OutputMode::from_json_flag(cli.json);
     let config = load_config_for_command(&cli.command)?;
-    commands::run(cli.command, config).await
+    commands::run(cli.command, config, output).await
 }
 
 fn load_config_for_command(command: &Command) -> Result<CliConfig, CliError> {

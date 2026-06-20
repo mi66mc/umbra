@@ -19,7 +19,7 @@ use crate::config::{
 use crate::error::CliError;
 use crate::http::{PublicHttpClient, UmbraHttpClient};
 use crate::keys::DeviceSigningKey;
-use crate::output::print_json;
+use crate::output::{OutputMode, print_json};
 use crate::{
     AuthCommand, CacheCommand, Command, ItemCommand, ProfileCommand, SecretCommand, SyncCommand,
     TokenCommand, VaultCommand,
@@ -31,7 +31,16 @@ struct ItemEnvelopeWrapper {
     crypto: CryptoEnvelopeV1,
 }
 
-pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError> {
+pub async fn run(
+    command: Command,
+    mut config: CliConfig,
+    output: OutputMode,
+) -> Result<(), CliError> {
+    let _ = (
+        crate::output::print_table as fn(&[&str], &[Vec<String>]),
+        crate::output::print_kv as fn(&[(&str, String)]),
+    );
+
     match command {
         Command::Register {
             server,
@@ -196,7 +205,11 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
             let profile = active_profile(&config)?;
             let status = crate::unlock_store::UnlockStore::open(&profile_name, profile.device_id)
                 .status()?;
-            print_json(&status)
+            if output.is_json() {
+                print_json(&status)
+            } else {
+                print_json(&status)
+            }
         }
         Command::Auth(AuthCommand::Token(TokenCommand::Set { server_url, token })) => {
             let profile = active_profile_mut(&mut config);
@@ -238,7 +251,11 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
             for vault in &vaults {
                 cache.upsert_vault(vault)?;
             }
-            print_json(&vaults)
+            if output.is_json() {
+                print_json(&vaults)
+            } else {
+                print_json(&vaults)
+            }
         }
         Command::Vault(VaultCommand::Create {
             name,
@@ -291,7 +308,11 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
                 crate::sync::SyncMode::Always,
             )
             .await?;
-            print_json(&vault)
+            if output.is_json() {
+                print_json(&vault)
+            } else {
+                print_json(&vault)
+            }
         }
         Command::Item(ItemCommand::List {
             vault_id,
@@ -402,7 +423,11 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
                 crate::sync::SyncMode::Always,
             )
             .await?;
-            print_json(&response)
+            if output.is_json() {
+                print_json(&response)
+            } else {
+                print_json(&response)
+            }
         }
         Command::Item(ItemCommand::Update {
             vault_id,
@@ -434,7 +459,11 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
                 crate::sync::SyncMode::Always,
             )
             .await?;
-            print_json(&response)
+            if output.is_json() {
+                print_json(&response)
+            } else {
+                print_json(&response)
+            }
         }
         Command::Secret(SecretCommand::Set {
             project_env,
@@ -531,7 +560,11 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
                 crate::sync::SyncMode::Always,
             )
             .await?;
-            print_json(&response)
+            if output.is_json() {
+                print_json(&response)
+            } else {
+                print_json(&response)
+            }
         }
         Command::Secret(SecretCommand::Get {
             project_env,
@@ -615,7 +648,11 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
             for vault in &response.vaults {
                 cache.apply_sync_changes(vault)?;
             }
-            print_json(&response)
+            if output.is_json() {
+                print_json(&response)
+            } else {
+                print_json(&response)
+            }
         }
     }
 }
