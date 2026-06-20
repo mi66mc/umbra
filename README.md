@@ -56,6 +56,8 @@ umbra vault list
 
 umbra vault create Personal
 
+umbra unlock --vault Personal --ttl-minutes 30
+
 umbra secret set pulzar/dev DATABASE_URL "postgres://user:pass@localhost:5432/app" --vault Personal
 
 umbra secret get pulzar/dev DATABASE_URL --vault Personal
@@ -69,11 +71,16 @@ umbra item create \
 
 umbra item list --vault Personal
 umbra item get --vault Personal --item-id "$ITEM_ID"
+
+umbra status
+umbra lock
 ```
 
 The CLI encrypts item plaintext locally before upload. The server receives only JSON envelopes and key wrappings. The local SQLite cache stores encrypted envelopes and wrapped vault keys, not plaintext fields.
 
 `vault create` stores the first created vault as the profile default. `--vault Personal` resolves a vault name from the local cache populated by `umbra vault list` or `umbra vault create`. If a name is ambiguous, pass `--vault-id`.
+
+`umbra unlock` decrypts the account private key once, unwraps selected vault keys from the local encrypted-envelope cache, and writes an encrypted local unlock state. The random key for that unlock state is stored in the OS keychain. `umbra lock` removes both the keychain entry and the encrypted unlock state file.
 
 The CLI uses signed HTTP sessions by default after `umbra login`. Normal CLI requests do not send a reusable bearer token. The server still stores only encrypted envelopes. The `--envelope-json` item escape hatch remains available for low-level protocol testing.
 
@@ -90,6 +97,8 @@ umbra auth token set \
 The CLI stores a per-profile SQLite cache under the local Umbra data directory.
 
 The cache contains encrypted envelopes, key wrappings, sync cursors, and metadata. It does not contain plaintext secrets or plaintext vault keys.
+
+Normal online read/write commands first try the local unlock state. If the selected vault key is not unlocked, the CLI falls back to the master-password prompt and unwraps the vault key from the cached wrapping.
 
 Useful commands:
 
