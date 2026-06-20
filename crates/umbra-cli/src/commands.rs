@@ -25,6 +25,16 @@ use crate::{
     TokenCommand, VaultCommand,
 };
 
+trait OutputModeExt {
+    fn is_json(&self) -> bool;
+}
+
+impl OutputModeExt for OutputMode {
+    fn is_json(&self) -> bool {
+        matches!(self, &Self::Json)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct ItemEnvelopeWrapper {
     kind: String,
@@ -34,7 +44,7 @@ struct ItemEnvelopeWrapper {
 pub async fn run(
     command: Command,
     mut config: CliConfig,
-    _output: OutputMode,
+    output: OutputMode,
 ) -> Result<(), CliError> {
     match command {
         Command::Register {
@@ -200,7 +210,7 @@ pub async fn run(
             let profile = active_profile(&config)?;
             let status = crate::unlock_store::UnlockStore::open(&profile_name, profile.device_id)
                 .status()?;
-            print_json(&status)
+            render_unlock_status(output, &status)
         }
         Command::Auth(AuthCommand::Token(TokenCommand::Set { server_url, token })) => {
             let profile = active_profile_mut(&mut config);
@@ -213,7 +223,8 @@ pub async fn run(
         }
         Command::Cache(CacheCommand::Status) => {
             let cache = crate::cache::LocalCache::open(&config.active_profile)?;
-            print_json(&cache.status()?)
+            let status = cache.status()?;
+            render_cache_status(output, &status)
         }
         Command::Profile(ProfileCommand::List) => {
             for (name, profile) in &config.profiles {
@@ -242,7 +253,7 @@ pub async fn run(
             for vault in &vaults {
                 cache.upsert_vault(vault)?;
             }
-            print_json(&vaults)
+            render_vaults(output, &vaults)
         }
         Command::Vault(VaultCommand::Create {
             name,
@@ -619,7 +630,7 @@ pub async fn run(
             for vault in &response.vaults {
                 cache.apply_sync_changes(vault)?;
             }
-            print_json(&response)
+            render_sync_response(output, &response)
         }
     }
 }
@@ -703,6 +714,101 @@ fn profile_public_key(profile: &crate::config::ProfileConfig) -> Result<UserPubl
         "profile has no account public key; run `umbra register` for this profile",
     ))?;
     Ok(UserPublicKey::from_base64url(public_key)?)
+}
+
+fn render_vaults(output: OutputMode, vaults: &[VaultResponse]) -> Result<(), CliError> {
+    if output.is_json() {
+        return print_json(&vaults);
+    }
+
+    let rows = vaults
+        .iter()
+        .map(|vault| {
+            vec![
+                vault.name.clone(),
+                format!("{:?}", vault.kind),
+                vault.vault_id.to_string(),
+                vault.vault_revision.to_string(),
+                vault.access_revision.to_string(),
+                if vault.needs_key_rotation {
+                    "yes".to_owned()
+                } else {
+                    "no".to_owned()
+                },
+            ]
+        })
+        .collect::<Vec<_>>();
+    crate::output::print_table(
+        &["name", "kind", "id", "vault_rev", "access_rev", "rotate"],
+        &rows,
+    );
+    Ok(())
+}
+
+fn render_cache_status(
+    output: OutputMode,
+    status: &crate::cache::CacheStatus,
+) -> Result<(), CliError> {
+    if output.is_json() {
+        return print_json(status);
+    }
+
+    crate::output::print_kv(&[
+        ("profile", status.profile.clone()),
+        ("synced vaults", status.synced_vault_count.to_string()),
+        ("item revisions", status.item_revision_count.to_string()),
+        ("key wrappings", status.key_wrapping_count.to_string()),
+        ("sync states", status.sync_state_count.to_string()),
+    ]);
+    Ok(())
+}
+
+fn render_unlock_status(
+    output: OutputMode,
+    status: &crate::unlock_store::UnlockStatus,
+) -> Result<(), CliError> {
+    if output.is_json() {
+        return print_json(status);
+    }
+
+    crate::output::print_kv(&[
+        ("profile", status.profile.clone()),
+        ("unlocked", status.unlocked.to_string()),
+        (
+            "expires",
+            status
+                .expires_at
+                .map(|value| value.to_rfc3339())
+                .unwrap_or_else(|| "-".to_owned()),
+        ),
+        ("vaults", status.vault_count.to_string()),
+    ]);
+    Ok(())
+}
+
+fn render_sync_response(output: OutputMode, response: &SyncResponse) -> Result<(), CliError> {
+    if output.is_json() {
+        return print_json(response);
+    }
+
+    let rows = response
+        .vaults
+        .iter()
+        .map(|vault| {
+            vec![
+                vault.vault_id.to_string(),
+                vault.latest_vault_revision.to_string(),
+                vault.latest_access_revision.to_string(),
+                vault.items.len().to_string(),
+                vault.key_wrappings.len().to_string(),
+            ]
+        })
+        .collect::<Vec<_>>();
+    crate::output::print_table(
+        &["vault_id", "vault_rev", "access_rev", "items", "wrappings"],
+        &rows,
+    );
+    Ok(())
 }
 
 struct DecryptedCachedItem {

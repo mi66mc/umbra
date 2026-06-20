@@ -276,7 +276,7 @@ impl LocalCache {
         Ok(())
     }
 
-    #[cfg(test)]
+    #[allow(dead_code)]
     pub fn list_vaults(&self) -> Result<Vec<CachedVault>, CliError> {
         let mut statement = self.connection.prepare(
             r#"

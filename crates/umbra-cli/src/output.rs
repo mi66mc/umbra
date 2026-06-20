@@ -19,7 +19,6 @@ pub fn print_json<T: Serialize>(value: &T) -> Result<(), CliError> {
     Ok(())
 }
 
-#[expect(dead_code, reason = "reserved for follow-up human output rendering")]
 pub fn print_table(headers: &[&str], rows: &[Vec<String>]) {
     let mut widths = headers
         .iter()
@@ -47,7 +46,6 @@ pub fn print_table(headers: &[&str], rows: &[Vec<String>]) {
     }
 }
 
-#[expect(dead_code, reason = "reserved for follow-up human output rendering")]
 pub fn print_kv(rows: &[(&str, String)]) {
     let width = rows
         .iter()
