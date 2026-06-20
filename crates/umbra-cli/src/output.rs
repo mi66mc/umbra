@@ -12,10 +12,6 @@ impl OutputMode {
     pub fn from_json_flag(json: bool) -> Self {
         if json { Self::Json } else { Self::Human }
     }
-
-    pub fn is_json(self) -> bool {
-        matches!(self, Self::Json)
-    }
 }
 
 pub fn print_json<T: Serialize>(value: &T) -> Result<(), CliError> {
@@ -23,6 +19,7 @@ pub fn print_json<T: Serialize>(value: &T) -> Result<(), CliError> {
     Ok(())
 }
 
+#[expect(dead_code, reason = "reserved for follow-up human output rendering")]
 pub fn print_table(headers: &[&str], rows: &[Vec<String>]) {
     let mut widths = headers
         .iter()
@@ -50,6 +47,7 @@ pub fn print_table(headers: &[&str], rows: &[Vec<String>]) {
     }
 }
 
+#[expect(dead_code, reason = "reserved for follow-up human output rendering")]
 pub fn print_kv(rows: &[(&str, String)]) {
     let width = rows
         .iter()

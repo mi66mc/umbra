@@ -34,13 +34,8 @@ struct ItemEnvelopeWrapper {
 pub async fn run(
     command: Command,
     mut config: CliConfig,
-    output: OutputMode,
+    _output: OutputMode,
 ) -> Result<(), CliError> {
-    let _ = (
-        crate::output::print_table as fn(&[&str], &[Vec<String>]),
-        crate::output::print_kv as fn(&[(&str, String)]),
-    );
-
     match command {
         Command::Register {
             server,
@@ -205,11 +200,7 @@ pub async fn run(
             let profile = active_profile(&config)?;
             let status = crate::unlock_store::UnlockStore::open(&profile_name, profile.device_id)
                 .status()?;
-            if output.is_json() {
-                print_json(&status)
-            } else {
-                print_json(&status)
-            }
+            print_json(&status)
         }
         Command::Auth(AuthCommand::Token(TokenCommand::Set { server_url, token })) => {
             let profile = active_profile_mut(&mut config);
@@ -251,11 +242,7 @@ pub async fn run(
             for vault in &vaults {
                 cache.upsert_vault(vault)?;
             }
-            if output.is_json() {
-                print_json(&vaults)
-            } else {
-                print_json(&vaults)
-            }
+            print_json(&vaults)
         }
         Command::Vault(VaultCommand::Create {
             name,
@@ -308,11 +295,7 @@ pub async fn run(
                 crate::sync::SyncMode::Always,
             )
             .await?;
-            if output.is_json() {
-                print_json(&vault)
-            } else {
-                print_json(&vault)
-            }
+            print_json(&vault)
         }
         Command::Item(ItemCommand::List {
             vault_id,
@@ -423,11 +406,7 @@ pub async fn run(
                 crate::sync::SyncMode::Always,
             )
             .await?;
-            if output.is_json() {
-                print_json(&response)
-            } else {
-                print_json(&response)
-            }
+            print_json(&response)
         }
         Command::Item(ItemCommand::Update {
             vault_id,
@@ -459,11 +438,7 @@ pub async fn run(
                 crate::sync::SyncMode::Always,
             )
             .await?;
-            if output.is_json() {
-                print_json(&response)
-            } else {
-                print_json(&response)
-            }
+            print_json(&response)
         }
         Command::Secret(SecretCommand::Set {
             project_env,
@@ -560,11 +535,7 @@ pub async fn run(
                 crate::sync::SyncMode::Always,
             )
             .await?;
-            if output.is_json() {
-                print_json(&response)
-            } else {
-                print_json(&response)
-            }
+            print_json(&response)
         }
         Command::Secret(SecretCommand::Get {
             project_env,
@@ -648,11 +619,7 @@ pub async fn run(
             for vault in &response.vaults {
                 cache.apply_sync_changes(vault)?;
             }
-            if output.is_json() {
-                print_json(&response)
-            } else {
-                print_json(&response)
-            }
+            print_json(&response)
         }
     }
 }
