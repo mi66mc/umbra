@@ -150,22 +150,61 @@ fn parses_sugar_commands() {
 
 #[test]
 fn parses_sync_force_full() {
-    let sync = Cli::parse_from([
+    let vault_id = "00000000-0000-0000-0000-000000000001";
+    let cli = Cli::parse_from([
         "umbra",
         "sync",
         "run",
-        "--vault",
-        "00000000-0000-0000-0000-000000000001",
+        "--vault-id",
+        vault_id,
         "--force-full",
     ]);
 
-    assert!(matches!(
-        sync.command,
-        Command::Sync(crate::SyncCommand::Run {
-            force_full: true,
-            ..
-        })
-    ));
+    let Command::Sync(crate::SyncCommand::Run {
+        vault_id: parsed_vault_id,
+        vault,
+        since_vault_revision,
+        force_full,
+    }) = cli.command
+    else {
+        panic!("expected sync run");
+    };
+
+    assert_eq!(parsed_vault_id.unwrap().to_string(), vault_id);
+    assert_eq!(vault, None);
+    assert_eq!(since_vault_revision, None);
+    assert!(force_full);
+}
+
+#[test]
+fn parses_sync_vault_name_and_default() {
+    let named = Cli::parse_from(["umbra", "sync", "run", "--vault", "Personal"]);
+    let Command::Sync(crate::SyncCommand::Run {
+        vault_id,
+        vault,
+        force_full,
+        ..
+    }) = named.command
+    else {
+        panic!("expected sync run");
+    };
+    assert_eq!(vault_id, None);
+    assert_eq!(vault.as_deref(), Some("Personal"));
+    assert!(!force_full);
+
+    let defaulted = Cli::parse_from(["umbra", "sync", "run"]);
+    let Command::Sync(crate::SyncCommand::Run {
+        vault_id,
+        vault,
+        force_full,
+        ..
+    }) = defaulted.command
+    else {
+        panic!("expected sync run");
+    };
+    assert_eq!(vault_id, None);
+    assert_eq!(vault, None);
+    assert!(!force_full);
 }
 
 #[test]

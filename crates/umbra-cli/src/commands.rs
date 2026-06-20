@@ -594,6 +594,7 @@ pub async fn run(
         }
         Command::Sync(SyncCommand::Run {
             vault_id,
+            vault,
             since_vault_revision,
             force_full,
         }) => {
@@ -604,6 +605,7 @@ pub async fn run(
                 "profile has no device id; run `umbra login` first",
             ))?;
             let mut cache = crate::cache::LocalCache::open(&config.active_profile)?;
+            let vault_id = resolve_vault_id(profile, &cache, vault_id, vault.as_deref())?;
             let since_vault_revision = if force_full {
                 0
             } else if let Some(value) = since_vault_revision {

@@ -203,8 +203,10 @@ pub enum SecretCommand {
 #[derive(Debug, Subcommand)]
 pub enum SyncCommand {
     Run {
-        #[arg(long = "vault", alias = "vault-id")]
-        vault_id: VaultId,
+        #[arg(long)]
+        vault_id: Option<VaultId>,
+        #[arg(long)]
+        vault: Option<String>,
         #[arg(long)]
         since_vault_revision: Option<RevisionId>,
         #[arg(long)]
