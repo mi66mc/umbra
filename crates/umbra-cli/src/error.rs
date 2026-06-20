@@ -44,6 +44,7 @@ pub enum CliError {
     #[error("keychain error: {0}")]
     Keyring(#[from] keyring::Error),
     #[error("profile is locked; run `umbra unlock` or enter the master password when prompted")]
+    #[allow(dead_code)]
     Locked,
     #[error("local unlock state is expired; run `umbra unlock` again")]
     #[allow(dead_code)]

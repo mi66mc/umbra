@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::fs;
 use std::path::PathBuf;
 
@@ -186,6 +187,8 @@ impl<K: UnlockKeyStore> UnlockStore<K> {
     }
 
     pub(crate) fn save(&self, state: &UnlockedLocalState) -> Result<(), CliError> {
+        self.validate_state_identity(state)?;
+
         if let Some(parent) = self.state_path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -194,27 +197,55 @@ impl<K: UnlockKeyStore> UnlockStore<K> {
         let aad = self.aad(state.device_id);
         let plaintext = serde_json::to_vec(&StoredUnlockState::from(state))?;
         let envelope = encrypt_local_unlock_state(&key, aad, &plaintext)?;
-        fs::write(&self.state_path, serde_json::to_vec_pretty(&envelope)?)?;
-        self.key_store.set_unlock_key(&self.profile, &key)?;
+        let temp_path = self.temp_state_path();
+        fs::write(&temp_path, serde_json::to_vec_pretty(&envelope)?)?;
+
+        if let Err(error) = self.key_store.set_unlock_key(&self.profile, &key) {
+            let _ = fs::remove_file(&temp_path);
+            return Err(error);
+        }
+
+        promote_temp_file(&temp_path, &self.state_path)?;
         Ok(())
     }
 
     pub(crate) fn load(&self) -> Result<Option<UnlockedLocalState>, CliError> {
-        if !self.state_path.exists() {
-            return Ok(None);
-        }
-
         let Some(key) = self.key_store.get_unlock_key(&self.profile)? else {
             self.remove_state_file()?;
             return Ok(None);
         };
 
-        let envelope: CryptoEnvelopeV1 = serde_json::from_slice(&fs::read(&self.state_path)?)?;
-        let device_id = self.device_id.ok_or(CliError::Locked)?;
+        let bytes = match fs::read(&self.state_path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(CliError::from(error)),
+        };
+
+        let envelope: CryptoEnvelopeV1 = match serde_json::from_slice(&bytes) {
+            Ok(envelope) => envelope,
+            Err(_) => return self.clear_invalid_state(),
+        };
+        let Some(device_id) = self.device_id else {
+            self.clear()?;
+            return Ok(None);
+        };
         let aad = self.aad(device_id);
-        let plaintext = decrypt_local_unlock_state(&key, &aad, &envelope)?;
-        let state =
-            UnlockedLocalState::try_from(serde_json::from_slice::<StoredUnlockState>(&plaintext)?)?;
+        let plaintext = match decrypt_local_unlock_state(&key, &aad, &envelope) {
+            Ok(plaintext) => plaintext,
+            Err(_) => return self.clear_invalid_state(),
+        };
+        let stored: StoredUnlockState = match serde_json::from_slice(&plaintext) {
+            Ok(stored) => stored,
+            Err(_) => return self.clear_invalid_state(),
+        };
+        let state = match UnlockedLocalState::try_from(stored) {
+            Ok(state) => state,
+            Err(_) => return self.clear_invalid_state(),
+        };
+
+        if !self.state_matches_store(&state) {
+            return self.clear_invalid_state();
+        }
 
         if state.is_expired(Utc::now()) {
             self.clear()?;
@@ -262,6 +293,34 @@ impl<K: UnlockKeyStore> UnlockStore<K> {
         AadV1::local_unlock_state(&self.profile, device_id.to_string())
     }
 
+    fn validate_state_identity(&self, state: &UnlockedLocalState) -> Result<(), CliError> {
+        if !self.state_matches_store(state) {
+            return Err(CliError::Input(
+                "unlock state does not match active profile/device",
+            ));
+        }
+        Ok(())
+    }
+
+    fn state_matches_store(&self, state: &UnlockedLocalState) -> bool {
+        state.profile == self.profile && self.device_id == Some(state.device_id)
+    }
+
+    fn temp_state_path(&self) -> PathBuf {
+        let file_name = self
+            .state_path
+            .file_name()
+            .and_then(OsStr::to_str)
+            .unwrap_or("unlock-state.json");
+        self.state_path
+            .with_file_name(format!(".{file_name}.{}.tmp", uuid::Uuid::new_v4()))
+    }
+
+    fn clear_invalid_state(&self) -> Result<Option<UnlockedLocalState>, CliError> {
+        self.clear()?;
+        Ok(None)
+    }
+
     fn remove_state_file(&self) -> Result<(), CliError> {
         match fs::remove_file(&self.state_path) {
             Ok(()) => Ok(()),
@@ -272,7 +331,68 @@ impl<K: UnlockKeyStore> UnlockStore<K> {
 }
 
 fn keyring_account(profile: &str) -> String {
-    format!("unlock:{profile}")
+    format!("unlock:v1:{}", sanitize_keyring_component(profile))
+}
+
+fn sanitize_keyring_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+#[cfg(not(windows))]
+fn promote_temp_file(
+    temp_path: &std::path::Path,
+    state_path: &std::path::Path,
+) -> Result<(), CliError> {
+    fs::rename(temp_path, state_path).map_err(CliError::from)
+}
+
+#[cfg(windows)]
+fn promote_temp_file(
+    temp_path: &std::path::Path,
+    state_path: &std::path::Path,
+) -> Result<(), CliError> {
+    const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
+
+    unsafe extern "system" {
+        fn MoveFileExW(
+            lp_existing_file_name: *const u16,
+            lp_new_file_name: *const u16,
+            dw_flags: u32,
+        ) -> i32;
+    }
+
+    let temp_path = wide_path(temp_path);
+    let state_path = wide_path(state_path);
+    // SAFETY: Both path buffers are null-terminated UTF-16 pointers that remain
+    // alive for the duration of the call, and the flags request an atomic replace.
+    let result = unsafe {
+        MoveFileExW(
+            temp_path.as_ptr(),
+            state_path.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if result == 0 {
+        return Err(CliError::from(std::io::Error::last_os_error()));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn wide_path(path: &std::path::Path) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+
+    path.as_os_str().encode_wide().chain(Some(0)).collect()
 }
 
 #[cfg(test)]
@@ -285,10 +405,15 @@ mod tests {
     #[derive(Clone, Default)]
     struct MemoryKeyStore {
         values: Arc<Mutex<HashMap<String, String>>>,
+        fail_set: Arc<Mutex<bool>>,
     }
 
     impl UnlockKeyStore for MemoryKeyStore {
         fn set_unlock_key(&self, profile: &str, key: &LocalUnlockKey) -> Result<(), CliError> {
+            if *self.fail_set.lock().unwrap() {
+                return Err(CliError::Input("keychain unavailable"));
+            }
+
             self.values
                 .lock()
                 .unwrap()
@@ -311,6 +436,12 @@ mod tests {
         }
     }
 
+    impl MemoryKeyStore {
+        fn fail_set(&self) {
+            *self.fail_set.lock().unwrap() = true;
+        }
+    }
+
     fn test_store(name: &str) -> (UnlockStore<MemoryKeyStore>, tempfile::TempDir) {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join(format!("{name}.json"));
@@ -322,6 +453,23 @@ mod tests {
                 MemoryKeyStore::default(),
             ),
             temp,
+        )
+    }
+
+    fn unlocked_state(profile: &str, device_id: uuid::Uuid, key_byte: u8) -> UnlockedLocalState {
+        let mut vault_keys = BTreeMap::new();
+        vault_keys.insert(
+            uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000010").unwrap(),
+            VaultKey::from_bytes([key_byte; 32]),
+        );
+
+        UnlockedLocalState::new(
+            profile.to_owned(),
+            uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap(),
+            device_id,
+            chrono::Utc::now() + chrono::Duration::minutes(15),
+            UserPrivateKey::from_bytes([7u8; 32]),
+            vault_keys,
         )
     }
 
@@ -399,6 +547,121 @@ mod tests {
                 .get_unlock_key("personal")
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn keychain_set_failure_does_not_replace_existing_state() {
+        let (store, _temp) = test_store("personal");
+        let device_id = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+        let vault_id = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000010").unwrap();
+        store
+            .save(&unlocked_state("personal", device_id, 9))
+            .unwrap();
+        let before = fs::read(store.state_path()).unwrap();
+
+        store.key_store().fail_set();
+        assert!(
+            store
+                .save(&unlocked_state("personal", device_id, 8))
+                .is_err()
+        );
+
+        assert_eq!(fs::read(store.state_path()).unwrap(), before);
+        let loaded = store.load().unwrap().unwrap();
+        assert_eq!(
+            loaded.vault_keys.get(&vault_id).unwrap().to_base64url(),
+            VaultKey::from_bytes([9u8; 32]).to_base64url()
+        );
+    }
+
+    #[test]
+    fn corrupt_state_is_cleared_and_not_loaded() {
+        let (store, _temp) = test_store("personal");
+        let device_id = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+        store
+            .save(&unlocked_state("personal", device_id, 9))
+            .unwrap();
+        fs::write(store.state_path(), b"{not json").unwrap();
+
+        assert!(store.load().unwrap().is_none());
+        assert!(!store.state_path().exists());
+        assert!(
+            store
+                .key_store()
+                .get_unlock_key("personal")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn save_rejects_mismatched_state() {
+        let (store, _temp) = test_store("personal");
+        let device_id = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+
+        let error = store
+            .save(&unlocked_state("work", device_id, 9))
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "input error: unlock state does not match active profile/device"
+        );
+        assert!(!store.state_path().exists());
+
+        let wrong_device_id =
+            uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
+        let error = store
+            .save(&unlocked_state("personal", wrong_device_id, 9))
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "input error: unlock state does not match active profile/device"
+        );
+        assert!(!store.state_path().exists());
+    }
+
+    #[test]
+    fn loaded_mismatched_state_is_cleared_and_not_loaded() {
+        let (store, _temp) = test_store("personal");
+        let device_id = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+        let key = LocalUnlockKey::generate();
+        let stored = StoredUnlockState {
+            version: UNLOCK_STATE_VERSION,
+            profile: "work".to_owned(),
+            user_id: uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap(),
+            device_id,
+            expires_at: chrono::Utc::now() + chrono::Duration::minutes(15),
+            private_key: UserPrivateKey::from_bytes([7u8; 32]).to_base64url(),
+            vault_keys: BTreeMap::new(),
+        };
+        let envelope = encrypt_local_unlock_state(
+            &key,
+            store.aad(device_id),
+            &serde_json::to_vec(&stored).unwrap(),
+        )
+        .unwrap();
+        fs::write(store.state_path(), serde_json::to_vec(&envelope).unwrap()).unwrap();
+        store.key_store().set_unlock_key("personal", &key).unwrap();
+
+        assert!(store.load().unwrap().is_none());
+        assert!(!store.state_path().exists());
+        assert!(
+            store
+                .key_store()
+                .get_unlock_key("personal")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn keyring_account_includes_versioned_sanitized_profile() {
+        assert_eq!(
+            keyring_account("miguel@example.com/local"),
+            "unlock:v1:miguel_example.com_local"
         );
     }
 }
