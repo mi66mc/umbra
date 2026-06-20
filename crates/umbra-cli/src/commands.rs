@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use umbra_core::{ItemKind, ItemPlaintextV1, VaultId, VaultKind};
@@ -117,9 +119,85 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
             println!("logged in: {}", config.active_profile);
             Ok(())
         }
-        Command::Unlock { .. } => Err(CliError::Input("unlock is not implemented yet")),
-        Command::Lock => Err(CliError::Input("lock is not implemented yet")),
-        Command::Status => Err(CliError::Input("status is not implemented yet")),
+        Command::Unlock {
+            vault_id,
+            vault,
+            all,
+            ttl_minutes,
+        } => {
+            let profile_name = config.active_profile.clone();
+            let profile = active_profile(&config)?;
+            let user_id = profile.user_id.ok_or(CliError::Input(
+                "profile has no user id; run `umbra login` first",
+            ))?;
+            let device_id = profile.device_id.ok_or(CliError::Input(
+                "profile has no device id; run `umbra register` first",
+            ))?;
+            if ttl_minutes <= 0 {
+                return Err(CliError::Input("ttl-minutes must be greater than zero"));
+            }
+
+            let mut cache = crate::cache::LocalCache::open(&profile_name)?;
+            let vault_ids =
+                selected_unlock_vaults(profile, &cache, vault_id, vault.as_deref(), all)?;
+            for vault_id in vault_ids.iter().copied() {
+                crate::sync::ensure_vault_synced(
+                    profile,
+                    &mut cache,
+                    vault_id,
+                    crate::sync::SyncMode::IfChanged,
+                )
+                .await?;
+            }
+
+            let password = rpassword::prompt_password("Master password: ")?;
+            let unlocked = crate::crypto_state::load_unlocked_profile(
+                profile,
+                &MasterPassword::new(password.into_bytes()),
+            )?;
+            let mut vault_keys = BTreeMap::new();
+            for vault_id in vault_ids {
+                let wrapping = cache
+                    .latest_key_wrapping(vault_id, user_id)?
+                    .ok_or(CliError::MissingVaultKeyWrapping(vault_id))?;
+                let envelope: VaultKeyWrappingEnvelopeV1 =
+                    serde_json::from_value(wrapping.envelope)?;
+                let aad = AadV1::vault_key_wrapping(vault_id.to_string());
+                let vault_key = unwrap_vault_key(&unlocked.private_key, &aad, &envelope)?;
+                vault_keys.insert(vault_id, vault_key);
+            }
+
+            let state = crate::unlock_store::UnlockedLocalState::new(
+                profile_name.clone(),
+                user_id,
+                device_id,
+                chrono::Utc::now() + chrono::Duration::minutes(ttl_minutes),
+                unlocked.private_key,
+                vault_keys,
+            );
+            crate::unlock_store::UnlockStore::open(&profile_name, profile.device_id)
+                .save(&state)?;
+            print_json(&crate::unlock_store::UnlockStatus {
+                unlocked: true,
+                profile: profile_name,
+                expires_at: Some(state.expires_at),
+                vault_count: state.vault_keys.len(),
+            })
+        }
+        Command::Lock => {
+            let profile_name = config.active_profile.clone();
+            let profile = active_profile(&config)?;
+            crate::unlock_store::UnlockStore::open(&profile_name, profile.device_id).clear()?;
+            println!("locked");
+            Ok(())
+        }
+        Command::Status => {
+            let profile_name = config.active_profile.clone();
+            let profile = active_profile(&config)?;
+            let status = crate::unlock_store::UnlockStore::open(&profile_name, profile.device_id)
+                .status()?;
+            print_json(&status)
+        }
         Command::Auth(AuthCommand::Token(TokenCommand::Set { server_url, token })) => {
             let profile = active_profile_mut(&mut config);
             profile.server_url = server_url;
@@ -589,6 +667,34 @@ fn resolve_vault_id(
     profile.default_vault_id.ok_or(CliError::Input(
         "no default vault configured; pass --vault-id/--vault or create a vault first",
     ))
+}
+
+fn selected_unlock_vaults(
+    profile: &crate::config::ProfileConfig,
+    cache: &crate::cache::LocalCache,
+    vault_id: Option<VaultId>,
+    vault_name: Option<&str>,
+    all: bool,
+) -> Result<Vec<VaultId>, CliError> {
+    if all && (vault_id.is_some() || vault_name.is_some()) {
+        return Err(CliError::Input(
+            "use either --all or a single vault selector",
+        ));
+    }
+
+    if all {
+        let vaults = cache.cached_vault_ids()?;
+        if vaults.is_empty() {
+            return Err(CliError::Input(
+                "no cached vaults; run `umbra vault list` first",
+            ));
+        }
+        return Ok(vaults);
+    }
+
+    Ok(vec![resolve_vault_id(
+        profile, cache, vault_id, vault_name,
+    )?])
 }
 
 struct DecryptedCachedItem {

@@ -280,6 +280,18 @@ impl LocalCache {
         rows.collect::<Result<Vec<_>, _>>().map_err(CliError::from)
     }
 
+    pub fn cached_vault_ids(&self) -> Result<Vec<uuid::Uuid>, CliError> {
+        let mut statement = self.connection.prepare(
+            r#"
+            SELECT vault_id
+            FROM vaults
+            ORDER BY name ASC, vault_id ASC
+            "#,
+        )?;
+        let rows = statement.query_map([], |row| parse_uuid(row.get::<_, String>(0)?))?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(CliError::from)
+    }
+
     #[allow(dead_code)]
     pub fn sync_state(&self, vault_id: uuid::Uuid) -> Result<Option<CachedSyncState>, CliError> {
         let mut statement = self.connection.prepare(
@@ -727,6 +739,7 @@ mod tests {
         assert_eq!(vault.current_key_generation, 1);
         assert!(!vault.needs_key_rotation);
         assert_eq!(cache.list_vaults().unwrap(), vec![vault]);
+        assert_eq!(cache.cached_vault_ids().unwrap(), vec![vault_id]);
     }
 
     #[test]
