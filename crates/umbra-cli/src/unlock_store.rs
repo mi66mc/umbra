@@ -5,11 +5,12 @@ use std::ffi::OsStr;
 use std::fs;
 use std::path::PathBuf;
 
+use base64ct::{Base64UrlUnpadded, Encoding};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use umbra_crypto::{
-    AadV1, CryptoEnvelopeV1, LocalUnlockKey, UserPrivateKey, VaultKey, decrypt_local_unlock_state,
-    encrypt_local_unlock_state,
+    decrypt_local_unlock_state, encrypt_local_unlock_state, AadV1, CryptoEnvelopeV1,
+    LocalUnlockKey, UserPrivateKey, VaultKey,
 };
 
 use crate::cache::profile_cache_dir;
@@ -197,22 +198,31 @@ impl<K: UnlockKeyStore> UnlockStore<K> {
             fs::create_dir_all(parent)?;
         }
 
-        let key = LocalUnlockKey::generate();
+        let existing_key = self.key_store.get_unlock_key(&self.profile)?;
+        let key = existing_key
+            .clone()
+            .unwrap_or_else(LocalUnlockKey::generate);
         let aad = self.aad(state.device_id);
         let plaintext = serde_json::to_vec(&StoredUnlockState::from(state))?;
         let envelope = encrypt_local_unlock_state(&key, aad, &plaintext)?;
         let temp_path = self.temp_state_path();
         fs::write(&temp_path, serde_json::to_vec_pretty(&envelope)?)?;
-        let previous_key = self.key_store.get_unlock_key(&self.profile)?;
 
-        if let Err(error) = self.key_store.set_unlock_key(&self.profile, &key) {
-            let _ = fs::remove_file(&temp_path);
-            return Err(error);
+        if existing_key.is_none() {
+            match self.key_store.set_unlock_key(&self.profile, &key) {
+                Ok(()) => {}
+                Err(error) => {
+                    let _ = fs::remove_file(&temp_path);
+                    return Err(error);
+                }
+            }
         }
 
         if let Err(error) = self.promote_temp_file(&temp_path) {
             let _ = fs::remove_file(&temp_path);
-            self.restore_unlock_key(previous_key)?;
+            if existing_key.is_none() {
+                self.key_store.clear_unlock_key(&self.profile)?;
+            }
             return Err(error);
         }
         Ok(())
@@ -334,14 +344,6 @@ impl<K: UnlockKeyStore> UnlockStore<K> {
             .with_file_name(format!(".{file_name}.{}.tmp", uuid::Uuid::new_v4()))
     }
 
-    fn restore_unlock_key(&self, previous_key: Option<LocalUnlockKey>) -> Result<(), CliError> {
-        if let Some(previous_key) = previous_key {
-            self.key_store.set_unlock_key(&self.profile, &previous_key)
-        } else {
-            self.key_store.clear_unlock_key(&self.profile)
-        }
-    }
-
     fn promote_temp_file(&self, temp_path: &std::path::Path) -> Result<(), CliError> {
         #[cfg(test)]
         if self.fail_promote {
@@ -368,20 +370,10 @@ impl<K: UnlockKeyStore> UnlockStore<K> {
 }
 
 fn keyring_account(profile: &str) -> String {
-    format!("unlock:v1:{}", sanitize_keyring_component(profile))
-}
-
-fn sanitize_keyring_component(value: &str) -> String {
-    value
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect()
+    format!(
+        "unlock:v1:{}",
+        Base64UrlUnpadded::encode_string(profile.as_bytes())
+    )
 }
 
 #[cfg(not(windows))]
@@ -578,17 +570,15 @@ mod tests {
         store.clear().unwrap();
 
         assert!(!store.state_path().exists());
-        assert!(
-            store
-                .key_store()
-                .get_unlock_key("personal")
-                .unwrap()
-                .is_none()
-        );
+        assert!(store
+            .key_store()
+            .get_unlock_key("personal")
+            .unwrap()
+            .is_none());
     }
 
     #[test]
-    fn keychain_set_failure_does_not_replace_existing_state() {
+    fn existing_key_update_does_not_write_keychain_or_replace_on_keychain_failure() {
         let (store, _temp) = test_store("personal");
         let device_id = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
         let vault_id = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000010").unwrap();
@@ -598,18 +588,29 @@ mod tests {
         let before = fs::read(store.state_path()).unwrap();
 
         store.key_store().fail_set();
-        assert!(
-            store
-                .save(&unlocked_state("personal", device_id, 8))
-                .is_err()
-        );
+        store
+            .save(&unlocked_state("personal", device_id, 8))
+            .unwrap();
 
-        assert_eq!(fs::read(store.state_path()).unwrap(), before);
+        assert_ne!(fs::read(store.state_path()).unwrap(), before);
         let loaded = store.load().unwrap().unwrap();
         assert_eq!(
             loaded.vault_keys.get(&vault_id).unwrap().to_base64url(),
-            VaultKey::from_bytes([9u8; 32]).to_base64url()
+            VaultKey::from_bytes([8u8; 32]).to_base64url()
         );
+    }
+
+    #[test]
+    fn first_save_keychain_set_failure_does_not_write_state() {
+        let (store, _temp) = test_store("personal");
+        let device_id = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+
+        store.key_store().fail_set();
+        assert!(store
+            .save(&unlocked_state("personal", device_id, 9))
+            .is_err());
+
+        assert!(!store.state_path().exists());
     }
 
     #[test]
@@ -623,11 +624,9 @@ mod tests {
         let before = fs::read(store.state_path()).unwrap();
 
         let failing_store = store.clone().with_promote_failure();
-        assert!(
-            failing_store
-                .save(&unlocked_state("personal", device_id, 8))
-                .is_err()
-        );
+        assert!(failing_store
+            .save(&unlocked_state("personal", device_id, 8))
+            .is_err());
 
         assert_eq!(fs::read(store.state_path()).unwrap(), before);
         let loaded = store.load().unwrap().unwrap();
@@ -644,13 +643,11 @@ mod tests {
         store.key_store().set_unlock_key("personal", &key).unwrap();
 
         assert!(store.load().unwrap().is_none());
-        assert!(
-            store
-                .key_store()
-                .get_unlock_key("personal")
-                .unwrap()
-                .is_none()
-        );
+        assert!(store
+            .key_store()
+            .get_unlock_key("personal")
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -664,13 +661,11 @@ mod tests {
 
         assert!(store.load().unwrap().is_none());
         assert!(!store.state_path().exists());
-        assert!(
-            store
-                .key_store()
-                .get_unlock_key("personal")
-                .unwrap()
-                .is_none()
-        );
+        assert!(store
+            .key_store()
+            .get_unlock_key("personal")
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -726,20 +721,17 @@ mod tests {
 
         assert!(store.load().unwrap().is_none());
         assert!(!store.state_path().exists());
-        assert!(
-            store
-                .key_store()
-                .get_unlock_key("personal")
-                .unwrap()
-                .is_none()
-        );
+        assert!(store
+            .key_store()
+            .get_unlock_key("personal")
+            .unwrap()
+            .is_none());
     }
 
     #[test]
-    fn keyring_account_includes_versioned_sanitized_profile() {
-        assert_eq!(
-            keyring_account("miguel@example.com/local"),
-            "unlock:v1:miguel_example.com_local"
-        );
+    fn keyring_account_includes_versioned_non_lossy_profile_encoding() {
+        assert_eq!(keyring_account("a/b"), "unlock:v1:YS9i");
+        assert_eq!(keyring_account("a_b"), "unlock:v1:YV9i");
+        assert_ne!(keyring_account("a/b"), keyring_account("a_b"));
     }
 }
