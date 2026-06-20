@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use umbra_core::{ItemKind, ItemPlaintextV1, VaultId, VaultKind};
 use umbra_crypto::{
-    AadV1, CryptoEnvelopeV1, MasterPassword, VaultKey, VaultKeyWrappingEnvelopeV1, decrypt_item,
-    encrypt_item, generate_vault_key, unwrap_vault_key, wrap_vault_key_for_user,
+    AadV1, CryptoEnvelopeV1, MasterPassword, UserPublicKey, VaultKey, VaultKeyWrappingEnvelopeV1,
+    decrypt_item, encrypt_item, generate_vault_key, unwrap_vault_key, wrap_vault_key_for_user,
 };
 use umbra_protocol::{
     CreateItemRequest, CreateVaultRequest, ItemRevisionResponse, PROTOCOL_VERSION, SyncRequest,
@@ -257,14 +257,10 @@ pub async fn run(command: Command, mut config: CliConfig) -> Result<(), CliError
             let initial_key_wrapping = match wrapping_json {
                 Some(value) => serde_json::from_str(&value)?,
                 None => {
-                    let password = rpassword::prompt_password("Master password: ")?;
-                    let unlocked = crate::crypto_state::load_unlocked_profile(
-                        profile,
-                        &MasterPassword::new(password.into_bytes()),
-                    )?;
+                    let public_key = profile_public_key(profile)?;
                     let vault_key = generate_vault_key();
                     let aad = AadV1::vault_key_wrapping(requested_vault_id.to_string());
-                    let wrapping = wrap_vault_key_for_user(&unlocked.public_key, &vault_key, aad)?;
+                    let wrapping = wrap_vault_key_for_user(&public_key, &vault_key, aad)?;
                     serde_json::to_value(wrapping)?
                 }
             };
@@ -698,6 +694,13 @@ fn selected_unlock_vaults(
     )?])
 }
 
+fn profile_public_key(profile: &crate::config::ProfileConfig) -> Result<UserPublicKey, CliError> {
+    let public_key = profile.client_public_key.as_deref().ok_or(CliError::Input(
+        "profile has no account public key; run `umbra register` for this profile",
+    ))?;
+    Ok(UserPublicKey::from_base64url(public_key)?)
+}
+
 struct DecryptedCachedItem {
     plaintext: ItemPlaintextV1,
 }
@@ -822,5 +825,33 @@ pub fn parse_item_kind(value: &str) -> Result<ItemKind, String> {
             custom.trim_start_matches("custom:").to_owned(),
         )),
         _ => Err("expected known kind or custom:<name>".to_owned()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn profile_public_key_reads_configured_key() {
+        let public_key = UserPublicKey::from_bytes([7; 32]);
+        let profile = crate::config::ProfileConfig {
+            client_public_key: Some(public_key.to_base64url()),
+            ..crate::config::ProfileConfig::default()
+        };
+
+        assert_eq!(profile_public_key(&profile).unwrap(), public_key);
+    }
+
+    #[test]
+    fn profile_public_key_requires_configured_key() {
+        let profile = crate::config::ProfileConfig::default();
+
+        assert!(matches!(
+            profile_public_key(&profile),
+            Err(CliError::Input(
+                "profile has no account public key; run `umbra register` for this profile"
+            ))
+        ));
     }
 }
