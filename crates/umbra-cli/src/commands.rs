@@ -726,7 +726,7 @@ fn render_vaults(output: OutputMode, vaults: &[VaultResponse]) -> Result<(), Cli
         .map(|vault| {
             vec![
                 vault.name.clone(),
-                format!("{:?}", vault.kind),
+                vault_kind_label(vault.kind).to_owned(),
                 vault.vault_id.to_string(),
                 vault.vault_revision.to_string(),
                 vault.access_revision.to_string(),
@@ -743,6 +743,15 @@ fn render_vaults(output: OutputMode, vaults: &[VaultResponse]) -> Result<(), Cli
         &rows,
     );
     Ok(())
+}
+
+fn vault_kind_label(kind: VaultKind) -> &'static str {
+    match kind {
+        VaultKind::Personal => "personal",
+        VaultKind::Shared => "shared",
+        VaultKind::Project => "project",
+        VaultKind::Org => "org",
+    }
 }
 
 fn render_cache_status(
@@ -963,5 +972,13 @@ mod tests {
                 "profile has no account public key; run `umbra register` for this profile"
             ))
         ));
+    }
+
+    #[test]
+    fn vault_kind_label_uses_cli_names() {
+        assert_eq!(vault_kind_label(VaultKind::Personal), "personal");
+        assert_eq!(vault_kind_label(VaultKind::Shared), "shared");
+        assert_eq!(vault_kind_label(VaultKind::Project), "project");
+        assert_eq!(vault_kind_label(VaultKind::Org), "org");
     }
 }
