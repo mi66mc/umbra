@@ -145,7 +145,13 @@ fn parses_sugar_commands() {
         "--vault",
         "00000000-0000-0000-0000-000000000001",
     ]);
-    assert!(matches!(sync.command, Command::Sync(_)));
+    assert!(matches!(
+        sync.command,
+        Command::Sync(crate::SyncCommand::Run {
+            vault: Some(value),
+            ..
+        }) if value == "00000000-0000-0000-0000-000000000001"
+    ));
 }
 
 #[test]

@@ -666,6 +666,10 @@ fn resolve_vault_id(
     }
 
     if let Some(vault_name) = vault_name {
+        if let Ok(vault_id) = Uuid::parse_str(vault_name) {
+            return Ok(vault_id);
+        }
+
         let matches = cache.find_vaults_by_name(vault_name)?;
         return match matches.as_slice() {
             [vault] => Ok(vault.vault_id),
@@ -982,5 +986,17 @@ mod tests {
         assert_eq!(vault_kind_label(VaultKind::Shared), "shared");
         assert_eq!(vault_kind_label(VaultKind::Project), "project");
         assert_eq!(vault_kind_label(VaultKind::Org), "org");
+    }
+
+    #[test]
+    fn resolve_vault_id_accepts_uuid_string_vault_selector() {
+        let profile = crate::config::ProfileConfig::default();
+        let cache = crate::cache::LocalCache::open_in_memory("personal").unwrap();
+        let vault_id = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+
+        assert_eq!(
+            resolve_vault_id(&profile, &cache, None, Some(&vault_id.to_string())).unwrap(),
+            vault_id
+        );
     }
 }
