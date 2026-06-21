@@ -1036,21 +1036,7 @@ fn render_secret_list(output: OutputMode, plaintext: &ItemPlaintextV1) -> Result
         return print_json(&bundle);
     }
 
-    let rows = plaintext
-        .fields
-        .iter()
-        .map(|field| {
-            vec![
-                field.name.clone(),
-                if field.sensitive {
-                    "[secret]".to_owned()
-                } else {
-                    field.value.clone()
-                },
-            ]
-        })
-        .collect::<Vec<_>>();
-    crate::output::print_table(&["key", "value"], &rows);
+    crate::output::print_table(&["key", "kind", "sensitive"], &listed_secret_rows(&bundle));
     Ok(())
 }
 
@@ -1067,6 +1053,24 @@ fn listed_secret_bundle(plaintext: &ItemPlaintextV1) -> ListedSecretBundle {
             })
             .collect(),
     }
+}
+
+fn listed_secret_rows(bundle: &ListedSecretBundle) -> Vec<Vec<String>> {
+    bundle
+        .fields
+        .iter()
+        .map(|field| {
+            vec![
+                field.key.clone(),
+                field.kind.clone(),
+                if field.sensitive {
+                    "yes".to_owned()
+                } else {
+                    "no".to_owned()
+                },
+            ]
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1376,5 +1380,37 @@ mod tests {
         assert!(!value.to_string().contains("secret"));
         assert!(!value.to_string().contains("enabled"));
         assert!(!value.to_string().contains("value"));
+    }
+
+    #[test]
+    fn listed_secret_rows_omit_secret_values() {
+        let mut plaintext =
+            crate::item_plaintext::build_secret_bundle("umbra/prod", "DATABASE_URL", "secret");
+        crate::item_plaintext::set_plaintext_field(
+            &mut plaintext,
+            "FEATURE_FLAG",
+            "enabled".to_owned(),
+        );
+
+        let bundle = listed_secret_bundle(&plaintext);
+        let rows = listed_secret_rows(&bundle);
+
+        assert_eq!(
+            rows,
+            vec![
+                vec![
+                    "DATABASE_URL".to_owned(),
+                    "Secret".to_owned(),
+                    "yes".to_owned(),
+                ],
+                vec![
+                    "FEATURE_FLAG".to_owned(),
+                    "Text".to_owned(),
+                    "no".to_owned(),
+                ],
+            ]
+        );
+        assert!(!format!("{rows:?}").contains("secret"));
+        assert!(!format!("{rows:?}").contains("enabled"));
     }
 }
