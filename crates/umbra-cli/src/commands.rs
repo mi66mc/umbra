@@ -1119,12 +1119,12 @@ struct ListedSecretBundle {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct DecryptedListedItem {
-    item_id: Uuid,
-    title: String,
-    kind: String,
-    revision: i64,
-    field_count: usize,
+pub(crate) struct DecryptedListedItem {
+    pub(crate) item_id: Uuid,
+    pub(crate) title: String,
+    pub(crate) kind: String,
+    pub(crate) revision: i64,
+    pub(crate) field_count: usize,
 }
 
 struct DecryptedCachedItem {
