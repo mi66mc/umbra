@@ -1031,8 +1031,9 @@ fn find_secret_bundle(
 }
 
 fn render_secret_list(output: OutputMode, plaintext: &ItemPlaintextV1) -> Result<(), CliError> {
+    let bundle = listed_secret_bundle(plaintext);
     if output.is_json() {
-        return print_json(plaintext);
+        return print_json(&bundle);
     }
 
     let rows = plaintext
@@ -1051,6 +1052,34 @@ fn render_secret_list(output: OutputMode, plaintext: &ItemPlaintextV1) -> Result
         .collect::<Vec<_>>();
     crate::output::print_table(&["key", "value"], &rows);
     Ok(())
+}
+
+fn listed_secret_bundle(plaintext: &ItemPlaintextV1) -> ListedSecretBundle {
+    ListedSecretBundle {
+        project_env: plaintext.title.clone(),
+        fields: plaintext
+            .fields
+            .iter()
+            .map(|field| ListedSecretField {
+                key: field.name.clone(),
+                kind: format!("{:?}", field.kind),
+                sensitive: field.sensitive,
+            })
+            .collect(),
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ListedSecretField {
+    key: String,
+    kind: String,
+    sensitive: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ListedSecretBundle {
+    project_env: String,
+    fields: Vec<ListedSecretField>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1319,5 +1348,33 @@ mod tests {
             select_cached_item_revision_before_unlock(&cache, vault_id, Some(item_id), None),
             Err(CliError::Input("cached item not found"))
         ));
+    }
+
+    #[test]
+    fn listed_secret_bundle_omits_secret_values() {
+        let mut plaintext =
+            crate::item_plaintext::build_secret_bundle("umbra/prod", "DATABASE_URL", "secret");
+        crate::item_plaintext::set_plaintext_field(
+            &mut plaintext,
+            "FEATURE_FLAG",
+            "enabled".to_owned(),
+        );
+
+        let bundle = listed_secret_bundle(&plaintext);
+        let value = serde_json::to_value(&bundle).unwrap();
+
+        assert_eq!(bundle.project_env, "umbra/prod");
+        assert_eq!(bundle.fields.len(), 2);
+        assert_eq!(bundle.fields[0].key, "DATABASE_URL");
+        assert_eq!(bundle.fields[0].kind, "Secret");
+        assert!(bundle.fields[0].sensitive);
+        assert_eq!(bundle.fields[1].key, "FEATURE_FLAG");
+        assert_eq!(bundle.fields[1].kind, "Text");
+        assert!(!bundle.fields[1].sensitive);
+        assert!(value.get("fields").is_some());
+        assert!(value.to_string().contains("DATABASE_URL"));
+        assert!(!value.to_string().contains("secret"));
+        assert!(!value.to_string().contains("enabled"));
+        assert!(!value.to_string().contains("value"));
     }
 }
