@@ -377,14 +377,22 @@ pub async fn run(
                 sync_outcome.latest_vault_revision,
                 sync_outcome.latest_access_revision,
             );
-            let vault_key = unlock_vault_key(&config.active_profile, profile, &cache, vault_id)?;
-            let revision = select_cached_item_revision(
+            let selected_revision = select_cached_item_revision_before_unlock(
                 &cache,
-                &vault_key,
                 vault_id,
                 item_id,
                 title.as_deref(),
             )?;
+            let vault_key = unlock_vault_key(&config.active_profile, profile, &cache, vault_id)?;
+            let revision = match selected_revision {
+                Some(revision) => revision,
+                None => select_cached_item_revision_by_title(
+                    &cache,
+                    &vault_key,
+                    vault_id,
+                    title.as_deref().expect("title selector was validated"),
+                )?,
+            };
             let item = decrypt_cached_item(&vault_key, &revision)?;
             render_item_plaintext(output, revision.item_id, &item.plaintext)
         }
@@ -991,13 +999,12 @@ fn decrypt_cached_item(
     decrypt_cached_item_wrapper(vault_key, revision, wrapper)
 }
 
-fn select_cached_item_revision(
+fn select_cached_item_revision_before_unlock(
     cache: &crate::cache::LocalCache,
-    vault_key: &VaultKey,
     vault_id: VaultId,
     item_id: Option<Uuid>,
     title: Option<&str>,
-) -> Result<crate::cache::CachedItemRevision, CliError> {
+) -> Result<Option<crate::cache::CachedItemRevision>, CliError> {
     if item_id.is_some() && title.is_some() {
         return Err(CliError::Input("use either --item-id or --title, not both"));
     }
@@ -1005,13 +1012,23 @@ fn select_cached_item_revision(
     if let Some(item_id) = item_id {
         return cache
             .latest_item_revision(vault_id, item_id)?
-            .ok_or(CliError::Input("cached item not found"));
+            .ok_or(CliError::Input("cached item not found"))
+            .map(Some);
     }
 
-    let Some(title) = title else {
+    if title.is_none() {
         return Err(CliError::Input("pass --item-id or --title"));
     };
 
+    Ok(None)
+}
+
+fn select_cached_item_revision_by_title(
+    cache: &crate::cache::LocalCache,
+    vault_key: &VaultKey,
+    vault_id: VaultId,
+    title: &str,
+) -> Result<crate::cache::CachedItemRevision, CliError> {
     let mut matches = Vec::new();
     for revision in cache.list_latest_item_revisions(vault_id)? {
         let item = decrypt_cached_item(vault_key, &revision)?;
@@ -1136,5 +1153,45 @@ mod tests {
             resolve_vault_id(&profile, &cache, None, Some(&vault_id.to_string())).unwrap(),
             vault_id
         );
+    }
+
+    #[test]
+    fn pre_unlock_item_selector_rejects_both_selectors() {
+        let cache = crate::cache::LocalCache::open_in_memory("personal").unwrap();
+        let vault_id = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+        let item_id = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
+
+        assert!(matches!(
+            select_cached_item_revision_before_unlock(
+                &cache,
+                vault_id,
+                Some(item_id),
+                Some("GitHub")
+            ),
+            Err(CliError::Input("use either --item-id or --title, not both"))
+        ));
+    }
+
+    #[test]
+    fn pre_unlock_item_selector_rejects_missing_selector() {
+        let cache = crate::cache::LocalCache::open_in_memory("personal").unwrap();
+        let vault_id = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+
+        assert!(matches!(
+            select_cached_item_revision_before_unlock(&cache, vault_id, None, None),
+            Err(CliError::Input("pass --item-id or --title"))
+        ));
+    }
+
+    #[test]
+    fn pre_unlock_item_selector_rejects_missing_item_id() {
+        let cache = crate::cache::LocalCache::open_in_memory("personal").unwrap();
+        let vault_id = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+        let item_id = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
+
+        assert!(matches!(
+            select_cached_item_revision_before_unlock(&cache, vault_id, Some(item_id), None),
+            Err(CliError::Input("cached item not found"))
+        ));
     }
 }
