@@ -315,7 +315,8 @@ pub async fn run(
         }) => {
             let profile = active_profile(&config)?;
             let mut cache = crate::cache::LocalCache::open(&config.active_profile)?;
-            let vault_id = resolve_vault_id(profile, &cache, vault_id, vault.as_deref())?;
+            let vault_id =
+                resolve_vault_id_for_output(profile, &cache, vault_id, vault.as_deref(), output)?;
             let mode = if offline {
                 crate::sync::SyncMode::Offline
             } else {
@@ -363,7 +364,8 @@ pub async fn run(
         }) => {
             let profile = active_profile(&config)?;
             let mut cache = crate::cache::LocalCache::open(&config.active_profile)?;
-            let vault_id = resolve_vault_id(profile, &cache, vault_id, vault.as_deref())?;
+            let vault_id =
+                resolve_vault_id_for_output(profile, &cache, vault_id, vault.as_deref(), output)?;
             let mode = if offline {
                 crate::sync::SyncMode::Offline
             } else {
@@ -410,7 +412,8 @@ pub async fn run(
             require_login(profile)?;
             let client = UmbraHttpClient::new(profile)?;
             let mut cache = crate::cache::LocalCache::open(&config.active_profile)?;
-            let vault_id = resolve_vault_id(profile, &cache, vault_id, vault.as_deref())?;
+            let vault_id =
+                resolve_vault_id_for_output(profile, &cache, vault_id, vault.as_deref(), output)?;
             let (item_id, envelope) = match envelope_json {
                 Some(envelope_json) => (None, serde_json::from_str(&envelope_json)?),
                 None => {
@@ -502,7 +505,8 @@ pub async fn run(
                 None => rpassword::prompt_password("Value: ")?,
             };
             let mut cache = crate::cache::LocalCache::open(&config.active_profile)?;
-            let vault_id = resolve_vault_id(profile, &cache, vault_id, vault.as_deref())?;
+            let vault_id =
+                resolve_vault_id_for_output(profile, &cache, vault_id, vault.as_deref(), output)?;
             crate::sync::ensure_vault_synced(
                 profile,
                 &mut cache,
@@ -577,7 +581,8 @@ pub async fn run(
         }) => {
             let profile = active_profile(&config)?;
             let mut cache = crate::cache::LocalCache::open(&config.active_profile)?;
-            let vault_id = resolve_vault_id(profile, &cache, vault_id, vault.as_deref())?;
+            let vault_id =
+                resolve_vault_id_for_output(profile, &cache, vault_id, vault.as_deref(), output)?;
             let mode = if offline {
                 crate::sync::SyncMode::Offline
             } else {
@@ -608,7 +613,8 @@ pub async fn run(
         }) => {
             let profile = active_profile(&config)?;
             let mut cache = crate::cache::LocalCache::open(&config.active_profile)?;
-            let vault_id = resolve_vault_id(profile, &cache, vault_id, vault.as_deref())?;
+            let vault_id =
+                resolve_vault_id_for_output(profile, &cache, vault_id, vault.as_deref(), output)?;
             let mode = if offline {
                 crate::sync::SyncMode::Offline
             } else {
@@ -653,7 +659,8 @@ pub async fn run(
             require_login(profile)?;
             let client = UmbraHttpClient::new(profile)?;
             let mut cache = crate::cache::LocalCache::open(&config.active_profile)?;
-            let vault_id = resolve_vault_id(profile, &cache, vault_id, vault.as_deref())?;
+            let vault_id =
+                resolve_vault_id_for_output(profile, &cache, vault_id, vault.as_deref(), output)?;
             crate::sync::ensure_vault_synced(
                 profile,
                 &mut cache,
@@ -722,7 +729,8 @@ pub async fn run(
                 "profile has no device id; run `umbra login` first",
             ))?;
             let mut cache = crate::cache::LocalCache::open(&config.active_profile)?;
-            let vault_id = resolve_vault_id(profile, &cache, vault_id, vault.as_deref())?;
+            let vault_id =
+                resolve_vault_id_for_output(profile, &cache, vault_id, vault.as_deref(), output)?;
             let since_vault_revision = if force_full {
                 0
             } else if let Some(value) = since_vault_revision {
@@ -802,6 +810,32 @@ fn resolve_vault_id(
     profile.default_vault_id.ok_or(CliError::Input(
         "no default vault configured; pass --vault-id/--vault or create a vault first",
     ))
+}
+
+fn resolve_vault_id_for_output(
+    profile: &crate::config::ProfileConfig,
+    cache: &crate::cache::LocalCache,
+    vault_id: Option<VaultId>,
+    vault_name: Option<&str>,
+    output: OutputMode,
+) -> Result<VaultId, CliError> {
+    match resolve_vault_id(profile, cache, vault_id, vault_name) {
+        Ok(vault_id) => Ok(vault_id),
+        Err(CliError::Input(
+            "no default vault configured; pass --vault-id/--vault or create a vault first",
+        )) if !output.is_json() => {
+            let vaults = cache.list_vaults()?;
+            if vaults.is_empty() {
+                return Err(CliError::Input(
+                    "no cached vaults; run `umbra vault list` first",
+                ));
+            }
+
+            crate::interactive::select_vault(&vaults)?
+                .ok_or(CliError::Input("vault selection cancelled"))
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn selected_unlock_vaults(
@@ -1377,6 +1411,19 @@ mod tests {
             resolve_vault_id(&profile, &cache, None, Some(&vault_id.to_string())).unwrap(),
             vault_id
         );
+    }
+
+    #[test]
+    fn resolve_vault_id_keeps_json_mode_non_interactive() {
+        let profile = crate::config::ProfileConfig::default();
+        let cache = crate::cache::LocalCache::open_in_memory("personal").unwrap();
+
+        assert!(matches!(
+            resolve_vault_id_for_output(&profile, &cache, None, None, OutputMode::Json),
+            Err(CliError::Input(
+                "no default vault configured; pass --vault-id/--vault or create a vault first"
+            ))
+        ));
     }
 
     #[test]
