@@ -49,17 +49,13 @@ umbra register \
 
 umbra login --profile personal
 
-umbra profile list
-umbra profile use personal
-
-umbra vault list
-
 umbra vault create Personal
+umbra vault list
 
 umbra unlock --vault Personal --ttl-minutes 30
 
 umbra secret set pulzar/dev DATABASE_URL "postgres://user:pass@localhost:5432/app" --vault Personal
-
+umbra secret list pulzar/dev --vault Personal
 umbra secret get pulzar/dev DATABASE_URL --vault Personal
 
 umbra item create \
@@ -70,10 +66,18 @@ umbra item create \
   --field password=secret
 
 umbra item list --vault Personal
-umbra item get --vault Personal --item-id "$ITEM_ID"
+umbra item get --vault Personal --title GitHub
 
+umbra sync run --vault Personal
 umbra status
 umbra lock
+```
+
+Commands print human-readable output by default. Pass `--json` for scriptable output:
+
+```bash
+umbra --json vault list
+umbra --json item get --vault Personal --title GitHub
 ```
 
 The CLI encrypts item plaintext locally before upload. The server receives only JSON envelopes and key wrappings. The local SQLite cache stores encrypted envelopes and wrapped vault keys, not plaintext fields.
@@ -103,12 +107,12 @@ Normal online read/write commands first try the local unlock state. If the selec
 Useful commands:
 
 ```bash
-umbra sync run --vault "$VAULT_ID"
+umbra sync run --vault Personal
 umbra cache status
 umbra item list --vault Personal
-umbra item get --vault Personal --item-id "$ITEM_ID"
+umbra item get --vault Personal --title GitHub
 umbra item list --vault Personal --offline
-umbra item get --vault Personal --item-id "$ITEM_ID" --offline
+umbra item get --vault Personal --title GitHub --offline
 ```
 
 Online read commands call sync status first and only run full sync when item or access revisions changed. `--offline` reads only from the local encrypted-envelope cache and may be stale. `--cached` remains an alias for `--offline` on item reads for compatibility.
