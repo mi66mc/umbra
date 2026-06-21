@@ -513,22 +513,7 @@ pub async fn run(
             let vault_key = unlock_vault_key(&config.active_profile, profile, &cache, vault_id)?;
             let kind = ItemKind::EnvBundle;
             let kind_name = item_kind_name(&kind);
-            let mut existing_bundle = None;
-            for revision in cache.list_latest_item_revisions(vault_id)? {
-                let Ok(wrapper) =
-                    serde_json::from_value::<ItemEnvelopeWrapper>(revision.envelope.clone())
-                else {
-                    continue;
-                };
-                if wrapper.kind != kind_name {
-                    continue;
-                }
-                let item = decrypt_cached_item_wrapper(&vault_key, &revision, wrapper)?;
-                if item.plaintext.title == project_env {
-                    existing_bundle = Some((revision, item.plaintext));
-                    break;
-                }
-            }
+            let existing_bundle = find_secret_bundle(&cache, &vault_key, vault_id, &project_env)?;
 
             let response: ItemRevisionResponse =
                 if let Some((revision, mut plaintext)) = existing_bundle {
@@ -584,6 +569,36 @@ pub async fn run(
             .await?;
             print_json(&response)
         }
+        Command::Secret(SecretCommand::List {
+            project_env,
+            vault_id,
+            vault,
+            offline,
+        }) => {
+            let profile = active_profile(&config)?;
+            let mut cache = crate::cache::LocalCache::open(&config.active_profile)?;
+            let vault_id = resolve_vault_id(profile, &cache, vault_id, vault.as_deref())?;
+            let mode = if offline {
+                crate::sync::SyncMode::Offline
+            } else {
+                require_login(profile)?;
+                crate::sync::SyncMode::IfChanged
+            };
+            let sync_outcome =
+                crate::sync::ensure_vault_synced(profile, &mut cache, vault_id, mode).await?;
+            let _ = (
+                sync_outcome.synced,
+                sync_outcome.latest_vault_revision,
+                sync_outcome.latest_access_revision,
+            );
+            let vault_key = unlock_vault_key(&config.active_profile, profile, &cache, vault_id)?;
+            let Some((_revision, plaintext)) =
+                find_secret_bundle(&cache, &vault_key, vault_id, &project_env)?
+            else {
+                return Err(CliError::Input("secret bundle not found"));
+            };
+            render_secret_list(output, &plaintext)
+        }
         Command::Secret(SecretCommand::Get {
             project_env,
             key,
@@ -627,6 +642,72 @@ pub async fn run(
                 }
             }
             Err(CliError::Input("secret not found"))
+        }
+        Command::Secret(SecretCommand::Rm {
+            project_env,
+            key,
+            vault_id,
+            vault,
+        }) => {
+            let profile = active_profile(&config)?;
+            require_login(profile)?;
+            let client = UmbraHttpClient::new(profile)?;
+            let mut cache = crate::cache::LocalCache::open(&config.active_profile)?;
+            let vault_id = resolve_vault_id(profile, &cache, vault_id, vault.as_deref())?;
+            crate::sync::ensure_vault_synced(
+                profile,
+                &mut cache,
+                vault_id,
+                crate::sync::SyncMode::IfChanged,
+            )
+            .await?;
+            let vault_key = unlock_vault_key(&config.active_profile, profile, &cache, vault_id)?;
+            let Some((revision, mut plaintext)) =
+                find_secret_bundle(&cache, &vault_key, vault_id, &project_env)?
+            else {
+                return Err(CliError::Input("secret bundle not found"));
+            };
+            if !crate::item_plaintext::remove_plaintext_field(&mut plaintext, &key) {
+                return Err(CliError::Input("secret key not found"));
+            }
+
+            let kind = ItemKind::EnvBundle;
+            let kind_name = item_kind_name(&kind);
+            let next_revision = revision.revision + 1;
+            let envelope = encrypt_item_plaintext(
+                vault_id,
+                revision.item_id,
+                next_revision,
+                kind_name,
+                &vault_key,
+                &plaintext,
+            )?;
+            let response: ItemRevisionResponse = client
+                .put(
+                    &format!("/api/v1/vaults/{vault_id}/items/{}", revision.item_id),
+                    &UpdateItemRequest {
+                        protocol_version: PROTOCOL_VERSION,
+                        vault_id,
+                        item_id: revision.item_id,
+                        expected_revision: revision.revision,
+                        envelope,
+                    },
+                )
+                .await?;
+            cache.upsert_item_revision(&response)?;
+            crate::sync::ensure_vault_synced(
+                profile,
+                &mut cache,
+                vault_id,
+                crate::sync::SyncMode::Always,
+            )
+            .await?;
+            if output.is_json() {
+                print_json(&response)
+            } else {
+                println!("removed {key} from {project_env}");
+                Ok(())
+            }
         }
         Command::Sync(SyncCommand::Run {
             vault_id,
@@ -924,6 +1005,51 @@ fn render_item_list(output: OutputMode, items: &[DecryptedListedItem]) -> Result
         })
         .collect::<Vec<_>>();
     crate::output::print_table(&["title", "kind", "item_id", "rev", "fields"], &rows);
+    Ok(())
+}
+
+fn find_secret_bundle(
+    cache: &crate::cache::LocalCache,
+    vault_key: &VaultKey,
+    vault_id: VaultId,
+    project_env: &str,
+) -> Result<Option<(crate::cache::CachedItemRevision, ItemPlaintextV1)>, CliError> {
+    for revision in cache.list_latest_item_revisions(vault_id)? {
+        let Ok(wrapper) = serde_json::from_value::<ItemEnvelopeWrapper>(revision.envelope.clone())
+        else {
+            continue;
+        };
+        if wrapper.kind != "env_bundle" {
+            continue;
+        }
+        let item = decrypt_cached_item_wrapper(vault_key, &revision, wrapper)?;
+        if item.plaintext.title == project_env {
+            return Ok(Some((revision, item.plaintext)));
+        }
+    }
+    Ok(None)
+}
+
+fn render_secret_list(output: OutputMode, plaintext: &ItemPlaintextV1) -> Result<(), CliError> {
+    if output.is_json() {
+        return print_json(plaintext);
+    }
+
+    let rows = plaintext
+        .fields
+        .iter()
+        .map(|field| {
+            vec![
+                field.name.clone(),
+                if field.sensitive {
+                    "[secret]".to_owned()
+                } else {
+                    field.value.clone()
+                },
+            ]
+        })
+        .collect::<Vec<_>>();
+    crate::output::print_table(&["key", "value"], &rows);
     Ok(())
 }
 

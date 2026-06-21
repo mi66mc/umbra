@@ -388,6 +388,52 @@ fn parses_secret_commands() {
 }
 
 #[test]
+fn parses_secret_list_and_rm() {
+    let list = Cli::parse_from([
+        "umbra",
+        "secret",
+        "list",
+        "pulzar/dev",
+        "--vault",
+        "Personal",
+    ]);
+    let Command::Secret(SecretCommand::List {
+        project_env,
+        vault,
+        offline,
+        ..
+    }) = list.command
+    else {
+        panic!("expected secret list");
+    };
+    assert_eq!(project_env, "pulzar/dev");
+    assert_eq!(vault.as_deref(), Some("Personal"));
+    assert!(!offline);
+
+    let rm = Cli::parse_from([
+        "umbra",
+        "secret",
+        "rm",
+        "pulzar/dev",
+        "DATABASE_URL",
+        "--vault",
+        "Personal",
+    ]);
+    let Command::Secret(SecretCommand::Rm {
+        project_env,
+        key,
+        vault,
+        ..
+    }) = rm.command
+    else {
+        panic!("expected secret rm");
+    };
+    assert_eq!(project_env, "pulzar/dev");
+    assert_eq!(key, "DATABASE_URL");
+    assert_eq!(vault.as_deref(), Some("Personal"));
+}
+
+#[test]
 fn parses_vault_name_sugar_for_items_and_secrets() {
     let item = Cli::parse_from(["umbra", "item", "list", "--vault", "Personal", "--offline"]);
     assert!(matches!(

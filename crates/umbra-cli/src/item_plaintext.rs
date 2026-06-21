@@ -102,6 +102,12 @@ pub fn set_plaintext_field(item: &mut ItemPlaintextV1, name: &str, value: String
     }
 }
 
+pub fn remove_plaintext_field(item: &mut ItemPlaintextV1, name: &str) -> bool {
+    let before = item.fields.len();
+    item.fields.retain(|field| field.name != name);
+    item.fields.len() != before
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,5 +163,16 @@ mod tests {
         assert_eq!(item.fields[0].value, "new");
         assert_eq!(item.fields[1].name, "OPENAI_API_KEY");
         assert!(item.fields[1].sensitive);
+    }
+
+    #[test]
+    fn remove_plaintext_field_removes_existing_field() {
+        let mut item = build_secret_bundle("umbra/prod", "DATABASE_URL", "old");
+        set_plaintext_field(&mut item, "OPENAI_API_KEY", "secret".to_owned());
+
+        assert!(remove_plaintext_field(&mut item, "DATABASE_URL"));
+        assert!(!remove_plaintext_field(&mut item, "MISSING"));
+        assert_eq!(item.fields.len(), 1);
+        assert_eq!(item.fields[0].name, "OPENAI_API_KEY");
     }
 }

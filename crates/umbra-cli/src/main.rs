@@ -200,6 +200,23 @@ pub enum SecretCommand {
         #[arg(long)]
         offline: bool,
     },
+    List {
+        project_env: String,
+        #[arg(long)]
+        vault_id: Option<VaultId>,
+        #[arg(long)]
+        vault: Option<String>,
+        #[arg(long)]
+        offline: bool,
+    },
+    Rm {
+        project_env: String,
+        key: String,
+        #[arg(long)]
+        vault_id: Option<VaultId>,
+        #[arg(long)]
+        vault: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
