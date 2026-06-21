@@ -306,7 +306,7 @@ pub async fn run(
                 crate::sync::SyncMode::Always,
             )
             .await?;
-            print_json(&vault)
+            render_vault_created(output, &vault)
         }
         Command::Item(ItemCommand::List {
             vault_id,
@@ -453,7 +453,7 @@ pub async fn run(
                 crate::sync::SyncMode::Always,
             )
             .await?;
-            print_json(&response)
+            render_item_revision_created(output, "created item", &response)
         }
         Command::Item(ItemCommand::Update {
             vault_id,
@@ -567,7 +567,7 @@ pub async fn run(
                 crate::sync::SyncMode::Always,
             )
             .await?;
-            print_json(&response)
+            render_item_revision_created(output, "saved secret", &response)
         }
         Command::Secret(SecretCommand::List {
             project_env,
@@ -865,6 +865,38 @@ fn render_vaults(output: OutputMode, vaults: &[VaultResponse]) -> Result<(), Cli
         &["name", "kind", "id", "vault_rev", "access_rev", "rotate"],
         &rows,
     );
+    Ok(())
+}
+
+fn render_vault_created(output: OutputMode, vault: &VaultResponse) -> Result<(), CliError> {
+    if output.is_json() {
+        return print_json(vault);
+    }
+
+    crate::output::print_kv(&[
+        ("created vault", vault.name.clone()),
+        ("id", vault.vault_id.to_string()),
+        ("kind", vault_kind_label(vault.kind).to_owned()),
+    ]);
+    Ok(())
+}
+
+fn render_item_revision_created(
+    output: OutputMode,
+    action: &str,
+    response: &ItemRevisionResponse,
+) -> Result<(), CliError> {
+    if output.is_json() {
+        return print_json(response);
+    }
+
+    crate::output::print_kv(&[
+        ("action", action.to_owned()),
+        ("item_id", response.item_id.to_string()),
+        ("vault_id", response.vault_id.to_string()),
+        ("revision", response.revision.to_string()),
+        ("vault revision", response.vault_revision.to_string()),
+    ]);
     Ok(())
 }
 
@@ -1300,6 +1332,39 @@ mod tests {
         assert_eq!(vault_kind_label(VaultKind::Shared), "shared");
         assert_eq!(vault_kind_label(VaultKind::Project), "project");
         assert_eq!(vault_kind_label(VaultKind::Org), "org");
+    }
+
+    #[test]
+    fn render_vault_created_accepts_json_and_human_modes() {
+        let vault = VaultResponse {
+            vault_id: Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap(),
+            org_id: None,
+            name: "Personal".to_owned(),
+            kind: VaultKind::Personal,
+            vault_revision: 1,
+            access_revision: 2,
+            current_key_generation: 1,
+            needs_key_rotation: false,
+        };
+
+        assert!(render_vault_created(OutputMode::Json, &vault).is_ok());
+        assert!(render_vault_created(OutputMode::Human, &vault).is_ok());
+    }
+
+    #[test]
+    fn render_item_revision_created_accepts_json_and_human_modes() {
+        let response = ItemRevisionResponse {
+            item_id: Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap(),
+            vault_id: Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap(),
+            revision: 3,
+            vault_revision: 4,
+            key_generation: 1,
+            author_user_id: None,
+            envelope: serde_json::json!({"kind": "login"}),
+        };
+
+        assert!(render_item_revision_created(OutputMode::Json, "created item", &response).is_ok());
+        assert!(render_item_revision_created(OutputMode::Human, "created item", &response).is_ok());
     }
 
     #[test]
