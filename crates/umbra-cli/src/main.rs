@@ -193,7 +193,7 @@ pub enum SecretCommand {
     },
     Get {
         project_env: String,
-        key: String,
+        key: Option<String>,
         #[arg(long)]
         vault_id: Option<VaultId>,
         #[arg(long)]
@@ -212,7 +212,7 @@ pub enum SecretCommand {
     },
     Rm {
         project_env: String,
-        key: String,
+        key: Option<String>,
         #[arg(long)]
         vault_id: Option<VaultId>,
         #[arg(long)]

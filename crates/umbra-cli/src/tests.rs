@@ -381,7 +381,7 @@ fn parses_secret_commands() {
         get.command,
         Command::Secret(SecretCommand::Get {
             project_env,
-            key,
+            key: Some(key),
             ..
         }) if project_env == "umbra/prod" && key == "OPENAI_API_KEY"
     ));
@@ -429,7 +429,45 @@ fn parses_secret_list_and_rm() {
         panic!("expected secret rm");
     };
     assert_eq!(project_env, "pulzar/dev");
-    assert_eq!(key, "DATABASE_URL");
+    assert_eq!(key.as_deref(), Some("DATABASE_URL"));
+    assert_eq!(vault.as_deref(), Some("Personal"));
+}
+
+#[test]
+fn parses_secret_get_and_rm_without_key_for_interactive_selection() {
+    let get = Cli::parse_from([
+        "umbra",
+        "secret",
+        "get",
+        "pulzar/dev",
+        "--vault",
+        "Personal",
+    ]);
+    let Command::Secret(SecretCommand::Get {
+        project_env,
+        key,
+        vault,
+        ..
+    }) = get.command
+    else {
+        panic!("expected secret get");
+    };
+    assert_eq!(project_env, "pulzar/dev");
+    assert_eq!(key, None);
+    assert_eq!(vault.as_deref(), Some("Personal"));
+
+    let rm = Cli::parse_from(["umbra", "secret", "rm", "pulzar/dev", "--vault", "Personal"]);
+    let Command::Secret(SecretCommand::Rm {
+        project_env,
+        key,
+        vault,
+        ..
+    }) = rm.command
+    else {
+        panic!("expected secret rm");
+    };
+    assert_eq!(project_env, "pulzar/dev");
+    assert_eq!(key, None);
     assert_eq!(vault.as_deref(), Some("Personal"));
 }
 

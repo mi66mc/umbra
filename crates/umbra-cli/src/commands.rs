@@ -617,25 +617,17 @@ pub async fn run(
                 sync_outcome.latest_access_revision,
             );
             let vault_key = unlock_vault_key(&config.active_profile, profile, &cache, vault_id)?;
-            for revision in cache.list_latest_item_revisions(vault_id)? {
-                let Ok(wrapper) =
-                    serde_json::from_value::<ItemEnvelopeWrapper>(revision.envelope.clone())
-                else {
-                    continue;
-                };
-                if wrapper.kind != "env_bundle" {
-                    continue;
-                }
-                let item = decrypt_cached_item_wrapper(&vault_key, &revision, wrapper)?;
-                if item.plaintext.title != project_env {
-                    continue;
-                }
-                if let Some(field) = item.plaintext.fields.iter().find(|field| field.name == key) {
-                    println!("{}", field.value);
-                    return Ok(());
-                }
+            let Some((_revision, plaintext)) =
+                find_secret_bundle(&cache, &vault_key, vault_id, &project_env)?
+            else {
+                return Err(CliError::Input("secret bundle not found"));
+            };
+            let key = resolve_secret_key_for_output(key, &plaintext, output)?;
+            if let Some(field) = plaintext.fields.iter().find(|field| field.name == key) {
+                println!("{}", field.value);
+                return Ok(());
             }
-            Err(CliError::Input("secret not found"))
+            Err(CliError::Input("secret key not found"))
         }
         Command::Secret(SecretCommand::Rm {
             project_env,
@@ -662,6 +654,7 @@ pub async fn run(
             else {
                 return Err(CliError::Input("secret bundle not found"));
             };
+            let key = resolve_secret_key_for_output(key, &plaintext, output)?;
             if !crate::item_plaintext::remove_plaintext_field(&mut plaintext, &key) {
                 return Err(CliError::Input("secret key not found"));
             }
@@ -1118,6 +1111,23 @@ fn render_secret_list(output: OutputMode, plaintext: &ItemPlaintextV1) -> Result
     Ok(())
 }
 
+fn resolve_secret_key_for_output(
+    key: Option<String>,
+    plaintext: &ItemPlaintextV1,
+    output: OutputMode,
+) -> Result<String, CliError> {
+    if let Some(key) = key {
+        return Ok(key);
+    }
+
+    if output.is_json() {
+        return Err(CliError::Input("pass a secret key"));
+    }
+
+    crate::interactive::select_secret_key(plaintext)?
+        .ok_or(CliError::Input("secret key selection cancelled"))
+}
+
 fn listed_secret_bundle(plaintext: &ItemPlaintextV1) -> ListedSecretBundle {
     ListedSecretBundle {
         project_env: plaintext.title.clone(),
@@ -1481,7 +1491,7 @@ mod tests {
     }
 
     #[test]
-    fn pre_unlock_item_selector_rejects_missing_selector() {
+    fn pre_unlock_item_selector_allows_missing_selector_in_human_mode() {
         let cache = crate::cache::LocalCache::open_in_memory("personal").unwrap();
         let vault_id = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
 
@@ -1491,9 +1501,9 @@ mod tests {
                 vault_id,
                 None,
                 None,
-                OutputMode::Json
+                OutputMode::Human
             ),
-            Err(CliError::Input("pass --item-id or --title"))
+            Ok(ItemSelectionNeed::NeedsInteractiveDecrypt)
         ));
     }
 
@@ -1558,6 +1568,17 @@ mod tests {
         assert!(!value.to_string().contains("secret"));
         assert!(!value.to_string().contains("enabled"));
         assert!(!value.to_string().contains("value"));
+    }
+
+    #[test]
+    fn secret_key_selector_requires_key_in_json_mode() {
+        let plaintext =
+            crate::item_plaintext::build_secret_bundle("umbra/prod", "DATABASE_URL", "secret");
+
+        assert!(matches!(
+            resolve_secret_key_for_output(None, &plaintext, OutputMode::Json),
+            Err(CliError::Input("pass a secret key"))
+        ));
     }
 
     #[test]
