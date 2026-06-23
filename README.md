@@ -57,6 +57,7 @@ umbra unlock --vault Personal --ttl-minutes 30
 umbra secret set pulzar/dev DATABASE_URL "postgres://user:pass@localhost:5432/app" --vault Personal
 umbra secret list pulzar/dev --vault Personal
 umbra secret get pulzar/dev DATABASE_URL --vault Personal
+umbra secret get pulzar/dev --vault Personal
 
 umbra item create \
   --vault Personal \
@@ -67,6 +68,7 @@ umbra item create \
 
 umbra item list --vault Personal
 umbra item get --vault Personal --title GitHub
+umbra item get --vault Personal
 
 umbra sync run --vault Personal
 umbra status
@@ -79,6 +81,8 @@ Commands print human-readable output by default. Pass `--json` for scriptable ou
 umbra --json vault list
 umbra --json item get --vault Personal --title GitHub
 ```
+
+Interactive selection only runs in human output mode. Omit `--vault` when you want the CLI to prompt from cached vaults, omit `--title`/`--item-id` from `item get` to choose an item, and omit the key from `secret get` or `secret rm` to choose a field. Commands run with `--json` require explicit selectors and never open prompts.
 
 The CLI encrypts item plaintext locally before upload. The server receives only JSON envelopes and key wrappings. The local SQLite cache stores encrypted envelopes and wrapped vault keys, not plaintext fields.
 
@@ -111,8 +115,10 @@ umbra sync run --vault Personal
 umbra cache status
 umbra item list --vault Personal
 umbra item get --vault Personal --title GitHub
+umbra item get --vault Personal
 umbra item list --vault Personal --offline
 umbra item get --vault Personal --title GitHub --offline
+umbra secret get pulzar/dev --vault Personal
 ```
 
 Online read commands call sync status first and only run full sync when item or access revisions changed. `--offline` reads only from the local encrypted-envelope cache and may be stale. `--cached` remains an alias for `--offline` on item reads for compatibility.
