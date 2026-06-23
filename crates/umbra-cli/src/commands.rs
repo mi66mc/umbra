@@ -335,23 +335,7 @@ pub async fn run(
             } else {
                 let vault_key =
                     unlock_vault_key(&config.active_profile, profile, &cache, vault_id)?;
-                let mut items = Vec::new();
-                for revision in cache.list_latest_item_revisions(vault_id)? {
-                    let Ok(wrapper) =
-                        serde_json::from_value::<ItemEnvelopeWrapper>(revision.envelope.clone())
-                    else {
-                        continue;
-                    };
-                    let kind = wrapper.kind.clone();
-                    let item = decrypt_cached_item_wrapper(&vault_key, &revision, wrapper)?;
-                    items.push(DecryptedListedItem {
-                        item_id: revision.item_id,
-                        title: item.plaintext.title,
-                        kind,
-                        revision: revision.revision,
-                        field_count: item.plaintext.fields.len(),
-                    });
-                }
+                let items = decrypted_listed_items(&cache, &vault_key, vault_id)?;
                 render_item_list(output, &items)
             }
         }
@@ -379,21 +363,25 @@ pub async fn run(
                 sync_outcome.latest_vault_revision,
                 sync_outcome.latest_access_revision,
             );
-            let selected_revision = select_cached_item_revision_before_unlock(
+            let selection = select_cached_item_revision_before_unlock_for_output(
                 &cache,
                 vault_id,
                 item_id,
                 title.as_deref(),
+                output,
             )?;
             let vault_key = unlock_vault_key(&config.active_profile, profile, &cache, vault_id)?;
-            let revision = match selected_revision {
-                Some(revision) => revision,
-                None => select_cached_item_revision_by_title(
+            let revision = match selection {
+                ItemSelectionNeed::Selected(revision) => revision,
+                ItemSelectionNeed::NeedsTitleDecrypt => select_cached_item_revision_by_title(
                     &cache,
                     &vault_key,
                     vault_id,
                     title.as_deref().expect("title selector was validated"),
                 )?,
+                ItemSelectionNeed::NeedsInteractiveDecrypt => {
+                    select_cached_item_revision_interactively(&cache, &vault_key, vault_id)?
+                }
             };
             let item = decrypt_cached_item(&vault_key, &revision)?;
             render_item_plaintext(output, revision.item_id, &item.plaintext)
@@ -1074,6 +1062,30 @@ fn render_item_list(output: OutputMode, items: &[DecryptedListedItem]) -> Result
     Ok(())
 }
 
+fn decrypted_listed_items(
+    cache: &crate::cache::LocalCache,
+    vault_key: &VaultKey,
+    vault_id: VaultId,
+) -> Result<Vec<DecryptedListedItem>, CliError> {
+    let mut items = Vec::new();
+    for revision in cache.list_latest_item_revisions(vault_id)? {
+        let Ok(wrapper) = serde_json::from_value::<ItemEnvelopeWrapper>(revision.envelope.clone())
+        else {
+            continue;
+        };
+        let kind = wrapper.kind.clone();
+        let item = decrypt_cached_item_wrapper(vault_key, &revision, wrapper)?;
+        items.push(DecryptedListedItem {
+            item_id: revision.item_id,
+            title: item.plaintext.title,
+            kind,
+            revision: revision.revision,
+            field_count: item.plaintext.fields.len(),
+        });
+    }
+    Ok(items)
+}
+
 fn find_secret_bundle(
     cache: &crate::cache::LocalCache,
     vault_key: &VaultKey,
@@ -1165,6 +1177,12 @@ struct DecryptedCachedItem {
     plaintext: ItemPlaintextV1,
 }
 
+enum ItemSelectionNeed {
+    Selected(crate::cache::CachedItemRevision),
+    NeedsTitleDecrypt,
+    NeedsInteractiveDecrypt,
+}
+
 fn unlock_vault_key(
     profile_name: &str,
     profile: &crate::config::ProfileConfig,
@@ -1224,12 +1242,13 @@ fn decrypt_cached_item(
     decrypt_cached_item_wrapper(vault_key, revision, wrapper)
 }
 
-fn select_cached_item_revision_before_unlock(
+fn select_cached_item_revision_before_unlock_for_output(
     cache: &crate::cache::LocalCache,
     vault_id: VaultId,
     item_id: Option<Uuid>,
     title: Option<&str>,
-) -> Result<Option<crate::cache::CachedItemRevision>, CliError> {
+    output: OutputMode,
+) -> Result<ItemSelectionNeed, CliError> {
     if item_id.is_some() && title.is_some() {
         return Err(CliError::Input("use either --item-id or --title, not both"));
     }
@@ -1238,14 +1257,18 @@ fn select_cached_item_revision_before_unlock(
         return cache
             .latest_item_revision(vault_id, item_id)?
             .ok_or(CliError::Input("cached item not found"))
-            .map(Some);
+            .map(ItemSelectionNeed::Selected);
     }
 
-    if title.is_none() {
-        return Err(CliError::Input("pass --item-id or --title"));
-    };
+    if title.is_some() {
+        return Ok(ItemSelectionNeed::NeedsTitleDecrypt);
+    }
 
-    Ok(None)
+    if output.is_json() {
+        return Err(CliError::Input("pass --item-id or --title"));
+    }
+
+    Ok(ItemSelectionNeed::NeedsInteractiveDecrypt)
 }
 
 fn select_cached_item_revision_by_title(
@@ -1267,6 +1290,19 @@ fn select_cached_item_revision_by_title(
         [] => Err(CliError::Input("cached item title not found")),
         _ => Err(CliError::Input("item title is ambiguous; pass --item-id")),
     }
+}
+
+fn select_cached_item_revision_interactively(
+    cache: &crate::cache::LocalCache,
+    vault_key: &VaultKey,
+    vault_id: VaultId,
+) -> Result<crate::cache::CachedItemRevision, CliError> {
+    let items = decrypted_listed_items(cache, vault_key, vault_id)?;
+    let item_id = crate::interactive::select_item(&items)?
+        .ok_or(CliError::Input("item selection cancelled"))?;
+    cache
+        .latest_item_revision(vault_id, item_id)?
+        .ok_or(CliError::Input("cached item not found"))
 }
 
 fn decrypt_cached_item_wrapper(
@@ -1433,11 +1469,12 @@ mod tests {
         let item_id = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
 
         assert!(matches!(
-            select_cached_item_revision_before_unlock(
+            select_cached_item_revision_before_unlock_for_output(
                 &cache,
                 vault_id,
                 Some(item_id),
-                Some("GitHub")
+                Some("GitHub"),
+                OutputMode::Human,
             ),
             Err(CliError::Input("use either --item-id or --title, not both"))
         ));
@@ -1449,7 +1486,30 @@ mod tests {
         let vault_id = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
 
         assert!(matches!(
-            select_cached_item_revision_before_unlock(&cache, vault_id, None, None),
+            select_cached_item_revision_before_unlock_for_output(
+                &cache,
+                vault_id,
+                None,
+                None,
+                OutputMode::Json
+            ),
+            Err(CliError::Input("pass --item-id or --title"))
+        ));
+    }
+
+    #[test]
+    fn item_selector_requires_selector_in_json_mode() {
+        let cache = crate::cache::LocalCache::open_in_memory("personal").unwrap();
+        let vault_id = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+
+        assert!(matches!(
+            select_cached_item_revision_before_unlock_for_output(
+                &cache,
+                vault_id,
+                None,
+                None,
+                OutputMode::Json
+            ),
             Err(CliError::Input("pass --item-id or --title"))
         ));
     }
@@ -1461,7 +1521,13 @@ mod tests {
         let item_id = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
 
         assert!(matches!(
-            select_cached_item_revision_before_unlock(&cache, vault_id, Some(item_id), None),
+            select_cached_item_revision_before_unlock_for_output(
+                &cache,
+                vault_id,
+                Some(item_id),
+                None,
+                OutputMode::Human,
+            ),
             Err(CliError::Input("cached item not found"))
         ));
     }
