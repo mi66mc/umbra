@@ -466,7 +466,10 @@ mod tests {
 
         let value = serde_json::to_value(&request).unwrap();
 
-        assert_eq!(value["pending_device"]["name"], serde_json::json!("new laptop"));
+        assert_eq!(
+            value["pending_device"]["name"],
+            serde_json::json!("new laptop")
+        );
         assert_eq!(value["device_id"], serde_json::Value::Null);
     }
 
