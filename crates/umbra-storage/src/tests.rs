@@ -1,10 +1,11 @@
 use crate::convert::{
-    item_kind_to_str, member_state_to_str, str_to_member_state, str_to_vault_kind,
-    str_to_vault_role, vault_kind_to_str, vault_role_to_str,
+    device_state_to_str, item_kind_to_str, member_state_to_str, str_to_device_state,
+    str_to_member_state, str_to_vault_kind, str_to_vault_role, vault_kind_to_str,
+    vault_role_to_str,
 };
 use crate::*;
 use serial_test::serial;
-use umbra_core::{ItemKind, MemberState, OrgRole, VaultKind, VaultRole};
+use umbra_core::{DeviceState, ItemKind, MemberState, OrgRole, VaultKind, VaultRole};
 
 #[test]
 fn enum_string_conversions_roundtrip() {
@@ -19,6 +20,10 @@ fn enum_string_conversions_roundtrip() {
     assert_eq!(
         str_to_member_state(member_state_to_str(MemberState::Active)).unwrap(),
         MemberState::Active
+    );
+    assert_eq!(
+        str_to_device_state(device_state_to_str(DeviceState::Trusted)).unwrap(),
+        DeviceState::Trusted
     );
     assert_eq!(item_kind_to_str(&ItemKind::ApiKey), "api_key");
 }
@@ -35,14 +40,14 @@ async fn postgres_migrations_create_required_schema() {
         SELECT COUNT(*)
         FROM information_schema.tables
         WHERE table_schema = 'public'
-          AND table_name IN ('users', 'orgs', 'vaults', 'vault_members', 'vault_key_wrappings', 'item_revisions', 'sessions', 'session_nonces')
+          AND table_name IN ('users', 'orgs', 'vaults', 'vault_members', 'vault_key_wrappings', 'item_revisions', 'sessions', 'session_nonces', 'device_recovery_challenges')
         "#,
     )
     .fetch_one(storage.pool())
     .await
     .unwrap();
 
-    assert_eq!(tables, 8);
+    assert_eq!(tables, 9);
 }
 
 #[tokio::test]
@@ -59,7 +64,10 @@ async fn postgres_signed_sessions_reject_nonce_replay() {
             name: "signed laptop".to_owned(),
             public_key: Some("device-public-key".to_owned()),
             fingerprint: "signed-device".to_owned(),
-            trusted: true,
+            state: DeviceState::Trusted,
+            approval_code_hash: None,
+            approval_expires_at: None,
+            bootstrap_public_key: None,
         })
         .await
         .unwrap();
@@ -86,6 +94,119 @@ async fn postgres_signed_sessions_reject_nonce_replay() {
     assert!(matches!(
         storage.remember_session_nonce(session.id, "nonce-1").await,
         Err(StorageError::Conflict)
+    ));
+}
+
+#[tokio::test]
+#[serial(postgres)]
+async fn postgres_devices_support_pending_trust_and_revoke() {
+    let Some(storage) = fresh_test_storage().await else {
+        return;
+    };
+    let user = create_test_user(&storage, "pending-device@example.com").await;
+    let expires_at = chrono::Utc::now() + chrono::Duration::minutes(10);
+
+    let pending = storage
+        .create_device(CreateDevice {
+            id: None,
+            user_id: user.id,
+            name: "new laptop".to_owned(),
+            public_key: Some("device-public-key".to_owned()),
+            fingerprint: "device-fingerprint".to_owned(),
+            state: DeviceState::Pending,
+            approval_code_hash: Some("approval-hash".to_owned()),
+            approval_expires_at: Some(expires_at),
+            bootstrap_public_key: Some("bootstrap-public-key".to_owned()),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(pending.state, DeviceState::Pending);
+    assert_eq!(pending.approval_code_hash.as_deref(), Some("approval-hash"));
+    assert_eq!(
+        pending.bootstrap_public_key.as_deref(),
+        Some("bootstrap-public-key")
+    );
+    assert_eq!(pending.bootstrap_bundle, None);
+    assert_eq!(pending.trusted_at, None);
+
+    let pending_devices = storage
+        .list_pending_devices_for_user(user.id)
+        .await
+        .unwrap();
+    assert_eq!(pending_devices.len(), 1);
+    assert_eq!(pending_devices[0].id, pending.id);
+
+    let found = storage
+        .find_pending_device_by_approval_hash(user.id, "approval-hash")
+        .await
+        .unwrap();
+    assert_eq!(found.id, pending.id);
+
+    let bundle = serde_json::json!({"ciphertext": "opaque-bootstrap-bundle"});
+    let approved = storage
+        .approve_pending_device(ApprovePendingDevice {
+            device_id: pending.id,
+            bootstrap_bundle: bundle.clone(),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(approved.state, DeviceState::Trusted);
+    assert_eq!(approved.approval_code_hash, None);
+    assert_eq!(approved.approval_expires_at, None);
+    assert_eq!(approved.bootstrap_bundle, Some(bundle));
+    assert!(approved.trusted_at.is_some());
+
+    storage.revoke_device(approved.id).await.unwrap();
+    let revoked = storage.find_device_by_id(approved.id).await.unwrap();
+    assert_eq!(revoked.state, DeviceState::Revoked);
+    assert!(revoked.revoked_at.is_some());
+}
+
+#[tokio::test]
+#[serial(postgres)]
+async fn postgres_recovery_challenge_consumes_once() {
+    let Some(storage) = fresh_test_storage().await else {
+        return;
+    };
+    let user = create_test_user(&storage, "recovery-device@example.com").await;
+    let device = storage
+        .create_device(CreateDevice {
+            id: None,
+            user_id: user.id,
+            name: "recovering laptop".to_owned(),
+            public_key: Some("device-public-key".to_owned()),
+            fingerprint: "recovery-device".to_owned(),
+            state: DeviceState::Pending,
+            approval_code_hash: None,
+            approval_expires_at: None,
+            bootstrap_public_key: Some("bootstrap-public-key".to_owned()),
+        })
+        .await
+        .unwrap();
+    let challenge = storage
+        .create_recovery_challenge(CreateRecoveryChallenge {
+            id: None,
+            user_id: user.id,
+            device_id: device.id,
+            challenge_hash: "challenge-hash".to_owned(),
+            expires_at: chrono::Utc::now() + chrono::Duration::minutes(10),
+        })
+        .await
+        .unwrap();
+
+    let consumed = storage
+        .consume_recovery_challenge(challenge.id, user.id, device.id, "challenge-hash")
+        .await
+        .unwrap();
+    assert!(consumed.consumed_at.is_some());
+
+    assert!(matches!(
+        storage
+            .consume_recovery_challenge(challenge.id, user.id, device.id, "challenge-hash")
+            .await,
+        Err(StorageError::NotFound)
     ));
 }
 

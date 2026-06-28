@@ -1,5 +1,5 @@
 use sqlx::Row;
-use umbra_core::{ItemKind, MemberState, OrgRole, VaultKind, VaultRole};
+use umbra_core::{DeviceState, ItemKind, MemberState, OrgRole, VaultKind, VaultRole};
 
 use crate::StorageError;
 use crate::models::*;
@@ -30,14 +30,20 @@ pub(crate) fn user_auth_from_row(
 }
 
 pub(crate) fn device_from_row(row: sqlx::postgres::PgRow) -> Result<DeviceRecord, StorageError> {
+    let state: String = row.try_get("state")?;
     Ok(DeviceRecord {
         id: row.try_get("id")?,
         user_id: row.try_get("user_id")?,
         name: row.try_get("name")?,
         public_key: row.try_get("public_key")?,
         fingerprint: row.try_get("fingerprint")?,
-        trusted: row.try_get("trusted")?,
+        state: str_to_device_state(&state)?,
+        approval_code_hash: row.try_get("approval_code_hash")?,
+        approval_expires_at: row.try_get("approval_expires_at")?,
+        bootstrap_public_key: row.try_get("bootstrap_public_key")?,
+        bootstrap_bundle: row.try_get("bootstrap_bundle")?,
         created_at: row.try_get("created_at")?,
+        trusted_at: row.try_get("trusted_at")?,
         last_seen_at: row.try_get("last_seen_at")?,
         revoked_at: row.try_get("revoked_at")?,
     })
@@ -164,6 +170,20 @@ pub(crate) fn session_from_row(row: sqlx::postgres::PgRow) -> Result<SessionReco
     })
 }
 
+pub(crate) fn recovery_challenge_from_row(
+    row: sqlx::postgres::PgRow,
+) -> Result<RecoveryChallengeRecord, StorageError> {
+    Ok(RecoveryChallengeRecord {
+        id: row.try_get("id")?,
+        user_id: row.try_get("user_id")?,
+        device_id: row.try_get("device_id")?,
+        challenge_hash: row.try_get("challenge_hash")?,
+        expires_at: row.try_get("expires_at")?,
+        consumed_at: row.try_get("consumed_at")?,
+        created_at: row.try_get("created_at")?,
+    })
+}
+
 pub(crate) fn vault_kind_to_str(kind: VaultKind) -> &'static str {
     match kind {
         VaultKind::Personal => "personal",
@@ -178,6 +198,26 @@ pub(crate) fn org_role_to_str(role: OrgRole) -> &'static str {
         OrgRole::Owner => "owner",
         OrgRole::Admin => "admin",
         OrgRole::Member => "member",
+    }
+}
+
+pub(crate) fn device_state_to_str(state: DeviceState) -> &'static str {
+    match state {
+        DeviceState::Pending => "pending",
+        DeviceState::Trusted => "trusted",
+        DeviceState::Revoked => "revoked",
+    }
+}
+
+pub(crate) fn str_to_device_state(value: &str) -> Result<DeviceState, StorageError> {
+    match value {
+        "pending" => Ok(DeviceState::Pending),
+        "trusted" => Ok(DeviceState::Trusted),
+        "revoked" => Ok(DeviceState::Revoked),
+        value => Err(StorageError::InvalidDatabaseValue {
+            field: "devices.state",
+            value: value.to_owned(),
+        }),
     }
 }
 

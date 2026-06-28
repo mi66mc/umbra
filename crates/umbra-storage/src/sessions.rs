@@ -88,4 +88,19 @@ impl Storage {
 
         Ok(())
     }
+
+    pub async fn revoke_sessions_for_device(&self, device_id: Uuid) -> Result<u64, StorageError> {
+        let result = sqlx::query(
+            r#"
+            UPDATE sessions
+            SET revoked_at = now()
+            WHERE device_id = $1 AND revoked_at IS NULL
+            "#,
+        )
+        .bind(device_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected())
+    }
 }

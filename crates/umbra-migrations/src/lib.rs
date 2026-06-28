@@ -52,9 +52,12 @@ mod tests {
     fn embeds_migrations() {
         let migrations = MIGRATOR.iter().collect::<Vec<_>>();
 
-        assert_eq!(migrations.len(), 4);
+        assert_eq!(migrations.len(), 5);
         assert!(migrations.iter().any(|migration| {
             migration.version == 4 && migration.description == "vault access revision"
+        }));
+        assert!(migrations.iter().any(|migration| {
+            migration.version == 5 && migration.description == "device trust state"
         }));
     }
 }

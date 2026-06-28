@@ -1,8 +1,8 @@
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use umbra_core::{
-    DeviceId, ItemId, ItemKind, MemberState, OrgId, OrgRole, RevisionId, UserId, VaultId,
-    VaultKind, VaultRole,
+    DeviceId, DeviceState, ItemId, ItemKind, MemberState, OrgId, OrgRole, RevisionId, UserId,
+    VaultId, VaultKind, VaultRole,
 };
 use uuid::Uuid;
 
@@ -49,7 +49,10 @@ pub struct CreateDevice {
     pub name: String,
     pub public_key: Option<String>,
     pub fingerprint: String,
-    pub trusted: bool,
+    pub state: DeviceState,
+    pub approval_code_hash: Option<String>,
+    pub approval_expires_at: Option<DateTime<Utc>>,
+    pub bootstrap_public_key: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -59,10 +62,41 @@ pub struct DeviceRecord {
     pub name: String,
     pub public_key: Option<String>,
     pub fingerprint: String,
-    pub trusted: bool,
+    pub state: DeviceState,
+    pub approval_code_hash: Option<String>,
+    pub approval_expires_at: Option<DateTime<Utc>>,
+    pub bootstrap_public_key: Option<String>,
+    pub bootstrap_bundle: Option<Value>,
     pub created_at: DateTime<Utc>,
+    pub trusted_at: Option<DateTime<Utc>>,
     pub last_seen_at: Option<DateTime<Utc>>,
     pub revoked_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ApprovePendingDevice {
+    pub device_id: DeviceId,
+    pub bootstrap_bundle: Value,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateRecoveryChallenge {
+    pub id: Option<Uuid>,
+    pub user_id: UserId,
+    pub device_id: DeviceId,
+    pub challenge_hash: String,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RecoveryChallengeRecord {
+    pub id: Uuid,
+    pub user_id: UserId,
+    pub device_id: DeviceId,
+    pub challenge_hash: String,
+    pub expires_at: DateTime<Utc>,
+    pub consumed_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone)]
