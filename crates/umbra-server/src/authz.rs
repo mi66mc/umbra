@@ -3,16 +3,16 @@ use umbra_core::{MemberState, UserId, VaultRole};
 use uuid::Uuid;
 
 use crate::error::ServerError;
-use crate::signed_auth::authenticated_user_from_headers;
+use crate::signed_auth::{AuthenticatedUser, authenticated_user_from_headers};
 use crate::state::AppState;
 use crate::util::token_hash;
 
-pub(crate) async fn authenticate(
+pub(crate) async fn authenticate_context(
     state: &AppState,
     headers: &HeaderMap,
-) -> Result<UserId, ServerError> {
+) -> Result<AuthenticatedUser, ServerError> {
     if let Some(authenticated) = authenticated_user_from_headers(headers) {
-        return Ok(authenticated.user_id);
+        return Ok(authenticated);
     }
 
     let token = headers
@@ -24,7 +24,20 @@ pub(crate) async fn authenticate(
         .storage
         .find_active_session_by_hash(&token_hash(token))
         .await?;
-    Ok(session.user_id)
+
+    Ok(AuthenticatedUser {
+        user_id: session.user_id,
+        device_id: session.device_id,
+    })
+}
+
+pub(crate) async fn authenticate(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<UserId, ServerError> {
+    authenticate_context(state, headers)
+        .await
+        .map(|authenticated| authenticated.user_id)
 }
 
 pub(crate) async fn ensure_org_manager(

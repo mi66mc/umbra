@@ -16,21 +16,28 @@ use umbra_auth::{
     HEADER_TIMESTAMP, SignedRequestParts, body_sha256_b64, verify_request, verifying_key_from_b64,
 };
 
-const AUTHENTICATED_USER_HEADER: &str = "x-umbra-authenticated-user";
+pub(crate) const AUTHENTICATED_USER_HEADER: &str = "x-umbra-authenticated-user";
+pub(crate) const AUTHENTICATED_DEVICE_HEADER: &str = "x-umbra-authenticated-device";
 const MAX_BODY_BYTES: usize = 1024 * 1024;
 const MAX_CLOCK_SKEW_SECONDS: i64 = 300;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct AuthenticatedUser {
     pub user_id: Uuid,
+    pub device_id: Option<Uuid>,
 }
 
 pub(crate) fn authenticated_user_from_headers(headers: &HeaderMap) -> Option<AuthenticatedUser> {
-    headers
+    let user_id = headers
         .get(AUTHENTICATED_USER_HEADER)
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| Uuid::parse_str(value).ok())
-        .map(|user_id| AuthenticatedUser { user_id })
+        .and_then(|value| Uuid::parse_str(value).ok())?;
+    let device_id = headers
+        .get(AUTHENTICATED_DEVICE_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| Uuid::parse_str(value).ok());
+
+    Some(AuthenticatedUser { user_id, device_id })
 }
 
 pub(crate) async fn auth_middleware(
@@ -39,24 +46,36 @@ pub(crate) async fn auth_middleware(
     next: Next,
 ) -> Result<Response, StatusCode> {
     request.headers_mut().remove(AUTHENTICATED_USER_HEADER);
+    request.headers_mut().remove(AUTHENTICATED_DEVICE_HEADER);
     let (mut parts, body) = request.into_parts();
     let body_bytes = to_bytes(body, MAX_BODY_BYTES)
         .await
         .map_err(|_| StatusCode::BAD_REQUEST)?;
 
-    let user_id = if let Some(user_id) = authenticate_bearer(&state, &parts.headers).await? {
-        user_id
-    } else {
-        authenticate_signed(&state, &parts, &body_bytes).await?
-    };
+    let authenticated =
+        if let Some(authenticated) = authenticate_bearer(&state, &parts.headers).await? {
+            authenticated
+        } else {
+            authenticate_signed(&state, &parts, &body_bytes).await?
+        };
 
-    let header_value = user_id
+    let user_header_value = authenticated
+        .user_id
         .to_string()
         .parse()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     parts
         .headers
-        .insert(AUTHENTICATED_USER_HEADER, header_value);
+        .insert(AUTHENTICATED_USER_HEADER, user_header_value);
+    if let Some(device_id) = authenticated.device_id {
+        let device_header_value = device_id
+            .to_string()
+            .parse()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        parts
+            .headers
+            .insert(AUTHENTICATED_DEVICE_HEADER, device_header_value);
+    }
     Ok(next
         .run(Request::from_parts(parts, Body::from(body_bytes)))
         .await)
@@ -65,7 +84,7 @@ pub(crate) async fn auth_middleware(
 async fn authenticate_bearer(
     state: &AppState,
     headers: &HeaderMap,
-) -> Result<Option<Uuid>, StatusCode> {
+) -> Result<Option<AuthenticatedUser>, StatusCode> {
     let Some(token) = headers
         .get("authorization")
         .and_then(|value| value.to_str().ok())
@@ -82,14 +101,17 @@ async fn authenticate_bearer(
     if session.auth_scheme != "bearer" {
         return Err(StatusCode::UNAUTHORIZED);
     }
-    Ok(Some(session.user_id))
+    Ok(Some(AuthenticatedUser {
+        user_id: session.user_id,
+        device_id: session.device_id,
+    }))
 }
 
 async fn authenticate_signed(
     state: &AppState,
     parts: &axum::http::request::Parts,
     body: &[u8],
-) -> Result<Uuid, StatusCode> {
+) -> Result<AuthenticatedUser, StatusCode> {
     let session_id = parse_uuid_header(&parts.headers, HEADER_SESSION_ID)?;
     let device_id = parse_uuid_header(&parts.headers, HEADER_DEVICE_ID)?;
     let timestamp_unix = required_header(&parts.headers, HEADER_TIMESTAMP)?
@@ -154,7 +176,10 @@ async fn authenticate_signed(
         .await
         .map_err(|_| StatusCode::UNAUTHORIZED)?;
 
-    Ok(session.user_id)
+    Ok(AuthenticatedUser {
+        user_id: session.user_id,
+        device_id: Some(device_id),
+    })
 }
 
 fn required_header<'a>(headers: &'a HeaderMap, name: &str) -> Result<&'a str, StatusCode> {

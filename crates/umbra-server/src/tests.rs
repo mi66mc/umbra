@@ -34,6 +34,9 @@ use uuid::Uuid;
 use crate::config::AppConfig;
 use crate::error::ServerError;
 use crate::http::{health, router};
+use crate::signed_auth::{
+    AUTHENTICATED_DEVICE_HEADER, AUTHENTICATED_USER_HEADER, authenticated_user_from_headers,
+};
 use crate::state::{AppState, OpaqueCipherSuite};
 use crate::util::{
     decode_b64, encode_b64, generate_opaque_server_setup_secret, opaque_server_setup_from_config,
@@ -64,6 +67,30 @@ fn dev_config_can_use_ephemeral_opaque_setup_when_explicitly_allowed() {
     config.auth.opaque.allow_ephemeral_setup = true;
 
     opaque_server_setup_from_config(&config).expect("dev ephemeral setup is allowed");
+}
+
+#[test]
+fn authenticated_user_context_reads_optional_device_header() {
+    let user_id = Uuid::new_v4();
+    let device_id = Uuid::new_v4();
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        AUTHENTICATED_USER_HEADER,
+        user_id.to_string().parse().unwrap(),
+    );
+
+    let context = authenticated_user_from_headers(&headers).unwrap();
+    assert_eq!(context.user_id, user_id);
+    assert_eq!(context.device_id, None);
+
+    headers.insert(
+        AUTHENTICATED_DEVICE_HEADER,
+        device_id.to_string().parse().unwrap(),
+    );
+
+    let context = authenticated_user_from_headers(&headers).unwrap();
+    assert_eq!(context.user_id, user_id);
+    assert_eq!(context.device_id, Some(device_id));
 }
 
 #[tokio::test]
@@ -602,6 +629,117 @@ async fn signed_login_can_create_org_and_rejects_nonce_replay() {
         },
     )
     .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+#[serial(postgres)]
+async fn signed_login_rejects_revoked_device_state() {
+    let Some(storage) = fresh_test_storage().await else {
+        return;
+    };
+    let app = router(test_state_with_storage(storage.clone()));
+    let signing_key = ed25519_dalek::SigningKey::generate(&mut rand_core::OsRng);
+    let email = "revoked-signed-login@example.com";
+    let password = b"revoked signed login password";
+
+    let registration_start =
+        ClientRegistration::<OpaqueCipherSuite>::start(&mut OsRng, password).unwrap();
+    let (status, start_response): (StatusCode, OpaqueRegisterStartResponse) = json_request(
+        app.clone(),
+        Method::POST,
+        "/api/v1/auth/register/start",
+        None,
+        &OpaqueRegisterStartRequest {
+            protocol_version: PROTOCOL_VERSION,
+            email: email.to_owned(),
+            registration_request: encode_b64(registration_start.message.serialize().as_slice()),
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let registration_response = RegistrationResponse::<OpaqueCipherSuite>::deserialize(
+        &decode_b64(&start_response.registration_response).unwrap(),
+    )
+    .unwrap();
+    let registration_finish = registration_start
+        .state
+        .finish(
+            &mut OsRng,
+            password,
+            registration_response,
+            ClientRegistrationFinishParameters::default(),
+        )
+        .unwrap();
+    let (status, register): (StatusCode, RegisterResponse) = json_request(
+        app.clone(),
+        Method::POST,
+        "/api/v1/auth/register/finish",
+        None,
+        &OpaqueRegisterFinishRequest {
+            protocol_version: PROTOCOL_VERSION,
+            registration_id: start_response.registration_id,
+            email: email.to_owned(),
+            display_name: Some("Revoked Signed".to_owned()),
+            public_key: "user-public-key".to_owned(),
+            encrypted_private_key: json!({"ciphertext": "private"}),
+            initial_device: DeviceRegisterRequest {
+                name: "revoked laptop".to_owned(),
+                public_key: verifying_key_to_b64(&signing_key.verifying_key()),
+                fingerprint: "revoked-device-fingerprint".to_owned(),
+            },
+            registration_upload: encode_b64(registration_finish.message.serialize().as_slice()),
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    storage.revoke_device(register.device_id).await.unwrap();
+
+    let login_start = ClientLogin::<OpaqueCipherSuite>::start(&mut OsRng, password).unwrap();
+    let (status, login_response): (StatusCode, OpaqueLoginStartResponse) = json_request(
+        app.clone(),
+        Method::POST,
+        "/api/v1/auth/login/start",
+        None,
+        &OpaqueLoginStartRequest {
+            protocol_version: PROTOCOL_VERSION,
+            email: email.to_owned(),
+            credential_request: encode_b64(login_start.message.serialize().as_slice()),
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let credential_response = CredentialResponse::<OpaqueCipherSuite>::deserialize(
+        &decode_b64(&login_response.credential_response).unwrap(),
+    )
+    .unwrap();
+    let login_finish = login_start
+        .state
+        .finish(
+            &mut OsRng,
+            password,
+            credential_response,
+            ClientLoginFinishParameters::default(),
+        )
+        .unwrap();
+    let (status, _finish): (StatusCode, serde_json::Value) = json_request(
+        app,
+        Method::POST,
+        "/api/v1/auth/login/finish",
+        None,
+        &OpaqueLoginFinishRequest {
+            protocol_version: PROTOCOL_VERSION,
+            login_id: login_response.login_id,
+            device_id: Some(register.device_id),
+            pending_device: None,
+            credential_finalization: encode_b64(login_finish.message.serialize().as_slice()),
+        },
+    )
+    .await;
+
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
