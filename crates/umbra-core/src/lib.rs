@@ -62,6 +62,24 @@ pub enum MemberState {
     Removed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceState {
+    Pending,
+    Trusted,
+    Revoked,
+}
+
+impl DeviceState {
+    pub fn can_authenticate(self) -> bool {
+        matches!(self, Self::Trusted)
+    }
+
+    pub fn is_pending(self) -> bool {
+        matches!(self, Self::Pending)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ItemKind {
@@ -248,6 +266,16 @@ mod tests {
         let decoded: ItemPlaintextV1 = serde_json::from_str(&json).unwrap();
 
         assert_eq!(decoded, item);
+    }
+
+    #[test]
+    fn serializes_device_state_as_snake_case() {
+        let encoded = serde_json::to_string(&DeviceState::Pending).unwrap();
+        assert_eq!(encoded, "\"pending\"");
+
+        let decoded: DeviceState = serde_json::from_str("\"trusted\"").unwrap();
+        assert_eq!(decoded, DeviceState::Trusted);
+        assert!(decoded.can_authenticate());
     }
 
     #[test]

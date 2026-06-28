@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use umbra_core::{
-    DeviceId, ItemId, ItemKind, OrgId, OrgRole, RevisionId, UserId, VaultId, VaultKind, VaultRole,
+    DeviceId, DeviceState, ItemId, ItemKind, OrgId, OrgRole, RevisionId, UserId, VaultId,
+    VaultKind, VaultRole,
 };
 
 pub const PROTOCOL_VERSION: u16 = 1;
@@ -59,6 +60,8 @@ pub struct OpaqueLoginFinishRequest {
     pub login_id: uuid::Uuid,
     #[serde(default)]
     pub device_id: Option<DeviceId>,
+    #[serde(default)]
+    pub pending_device: Option<PendingDeviceRequest>,
     pub credential_finalization: String,
 }
 
@@ -69,6 +72,8 @@ pub struct OpaqueLoginFinishResponse {
     pub session_token: Option<String>,
     pub auth_scheme: String,
     pub encrypted_private_key: serde_json::Value,
+    #[serde(default)]
+    pub pending_device: Option<PendingDeviceResponse>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -102,6 +107,92 @@ pub struct DeviceTrustRequest {
     pub protocol_version: u16,
     pub device_id: DeviceId,
     pub trust_proof: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceResponse {
+    pub device_id: DeviceId,
+    pub name: String,
+    pub public_key: Option<String>,
+    pub fingerprint: String,
+    pub state: DeviceState,
+    pub created_at: String,
+    pub trusted_at: Option<String>,
+    pub revoked_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingDeviceRequest {
+    pub protocol_version: u16,
+    pub name: String,
+    pub public_key: String,
+    pub fingerprint: String,
+    pub bootstrap_public_key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingDeviceResponse {
+    pub device_id: DeviceId,
+    pub session_id: uuid::Uuid,
+    pub approval_code: String,
+    pub fingerprint: String,
+    pub expires_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingDeviceSummary {
+    pub device_id: DeviceId,
+    pub name: String,
+    pub fingerprint: String,
+    pub bootstrap_public_key: String,
+    pub approval_expires_at: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApproveDeviceRequest {
+    pub protocol_version: u16,
+    pub approval_code: String,
+    pub bootstrap_bundle: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalLookupRequest {
+    pub protocol_version: u16,
+    pub approval_code: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceBootstrapResponse {
+    pub device_id: DeviceId,
+    pub state: DeviceState,
+    pub bootstrap_bundle: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryChallengeStartRequest {
+    pub protocol_version: u16,
+    pub device_id: DeviceId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryChallengeStartResponse {
+    pub challenge_id: uuid::Uuid,
+    pub encrypted_challenge: serde_json::Value,
+    pub expires_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoverTrustRequest {
+    pub protocol_version: u16,
+    pub challenge_id: uuid::Uuid,
+    pub challenge_response: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoverTrustResponse {
+    pub device_id: DeviceId,
+    pub state: DeviceState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -339,6 +430,44 @@ mod tests {
         let decoded: ItemRevisionResponse = serde_json::from_str(&encoded).unwrap();
 
         assert_eq!(decoded, response);
+    }
+
+    #[test]
+    fn pending_device_response_roundtrips() {
+        let response = PendingDeviceResponse {
+            device_id: Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap(),
+            session_id: Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap(),
+            approval_code: "UMBRA-7K4Q-2M9D".to_owned(),
+            fingerprint: "SHA256:abc".to_owned(),
+            expires_at: "2026-06-28T12:00:00Z".to_owned(),
+        };
+
+        let encoded = serde_json::to_string(&response).unwrap();
+        let decoded: PendingDeviceResponse = serde_json::from_str(&encoded).unwrap();
+
+        assert_eq!(decoded, response);
+    }
+
+    #[test]
+    fn opaque_login_finish_can_request_pending_device() {
+        let request = OpaqueLoginFinishRequest {
+            protocol_version: PROTOCOL_VERSION,
+            login_id: Uuid::parse_str("00000000-0000-0000-0000-000000000003").unwrap(),
+            device_id: None,
+            pending_device: Some(PendingDeviceRequest {
+                protocol_version: PROTOCOL_VERSION,
+                name: "new laptop".to_owned(),
+                public_key: "device-public-key".to_owned(),
+                fingerprint: "device-fingerprint".to_owned(),
+                bootstrap_public_key: "bootstrap-public-key".to_owned(),
+            }),
+            credential_finalization: "final".to_owned(),
+        };
+
+        let value = serde_json::to_value(&request).unwrap();
+
+        assert_eq!(value["pending_device"]["name"], serde_json::json!("new laptop"));
+        assert_eq!(value["device_id"], serde_json::Value::Null);
     }
 
     #[test]
