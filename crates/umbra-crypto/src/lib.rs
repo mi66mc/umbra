@@ -126,6 +126,10 @@ impl UserPrivateKey {
         Self(bytes)
     }
 
+    pub fn as_bytes_array(&self) -> Result<[u8; KEY_LEN], CryptoError> {
+        Ok(self.0)
+    }
+
     fn static_secret(&self) -> StaticSecret {
         StaticSecret::from(self.0)
     }
@@ -151,6 +155,10 @@ pub struct UserPublicKey([u8; KEY_LEN]);
 impl UserPublicKey {
     pub fn from_bytes(bytes: [u8; KEY_LEN]) -> Self {
         Self(bytes)
+    }
+
+    pub fn as_bytes_array(&self) -> Result<[u8; KEY_LEN], CryptoError> {
+        Ok(self.0)
     }
 
     fn public_key(&self) -> PublicKey {
@@ -402,6 +410,33 @@ impl AadV1 {
             kind: None,
         }
     }
+
+    pub fn device_bootstrap(device_id: impl Into<String>) -> Self {
+        Self {
+            app: "umbra".to_owned(),
+            purpose: "device_bootstrap".to_owned(),
+            schema: 1,
+            vault_id: device_id.into(),
+            item_id: None,
+            revision: None,
+            kind: None,
+        }
+    }
+
+    pub fn recovery_challenge(
+        device_id: impl Into<String>,
+        challenge_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            app: "umbra".to_owned(),
+            purpose: "device_recovery_challenge".to_owned(),
+            schema: 1,
+            vault_id: device_id.into(),
+            item_id: Some(challenge_id.into()),
+            revision: None,
+            kind: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -436,6 +471,52 @@ pub struct EncryptionPayloadV1 {
     pub nonce: String,
     pub aad: AadV1,
     pub ciphertext: String,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceBootstrapBundleV1 {
+    pub version: u16,
+    pub user_secret_key: String,
+    pub kdf_params: Argon2idParams,
+    pub encrypted_user_private_key: CryptoEnvelopeV1,
+    pub account_public_key: String,
+    pub default_vault_id: Option<String>,
+}
+
+impl std::fmt::Debug for DeviceBootstrapBundleV1 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeviceBootstrapBundleV1")
+            .field("version", &self.version)
+            .field("user_secret_key", &"[redacted]")
+            .field("kdf_params", &self.kdf_params)
+            .field(
+                "encrypted_user_private_key",
+                &self.encrypted_user_private_key,
+            )
+            .field("account_public_key", &self.account_public_key)
+            .field("default_vault_id", &self.default_vault_id)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceBootstrapEnvelopeV1 {
+    pub version: u16,
+    #[serde(rename = "type")]
+    pub envelope_type: String,
+    pub recipient_public_key: String,
+    pub ephemeral_public_key: String,
+    pub encryption: EncryptionPayloadV1,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryChallengeEnvelopeV1 {
+    pub version: u16,
+    #[serde(rename = "type")]
+    pub envelope_type: String,
+    pub recipient_public_key: String,
+    pub ephemeral_public_key: String,
+    pub encryption: EncryptionPayloadV1,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -579,6 +660,100 @@ pub fn wrap_vault_key_for_user(
     })
 }
 
+pub fn encrypt_device_bootstrap_bundle(
+    recipient_public_key: &UserPublicKey,
+    aad: AadV1,
+    bundle: &DeviceBootstrapBundleV1,
+) -> Result<DeviceBootstrapEnvelopeV1, CryptoError> {
+    let ephemeral_private = StaticSecret::random_from_rng(OsRng);
+    let ephemeral_public = PublicKey::from(&ephemeral_private);
+    let recipient = PublicKey::from(recipient_public_key.as_bytes_array()?);
+    let shared_secret = ephemeral_private.diffie_hellman(&recipient);
+    let wrapping_key = derive_wrapping_key(shared_secret.as_bytes(), &aad)?;
+    let plaintext = serde_json::to_vec(bundle).map_err(|_| CryptoError::InvalidEncoding)?;
+    let payload = encrypt_payload_with_key(Key::from_slice(&wrapping_key), aad, &plaintext)?;
+
+    Ok(DeviceBootstrapEnvelopeV1 {
+        version: ENVELOPE_VERSION_V1,
+        envelope_type: "device_bootstrap".to_owned(),
+        recipient_public_key: recipient_public_key.to_base64url(),
+        ephemeral_public_key: encode_b64(&ephemeral_public.to_bytes()),
+        encryption: payload,
+    })
+}
+
+pub fn decrypt_device_bootstrap_bundle(
+    recipient_private_key: &UserPrivateKey,
+    expected_aad: &AadV1,
+    envelope: &DeviceBootstrapEnvelopeV1,
+) -> Result<DeviceBootstrapBundleV1, CryptoError> {
+    assert_supported_envelope_version(envelope.version)?;
+    if envelope.envelope_type != "device_bootstrap" {
+        return Err(CryptoError::MissingEnvelopeField("type"));
+    }
+    ensure_aad(expected_aad, &envelope.encryption.aad)?;
+
+    let ephemeral_public =
+        PublicKey::from(decode_array::<KEY_LEN>(&envelope.ephemeral_public_key)?);
+    let shared_secret = recipient_private_key
+        .static_secret()
+        .diffie_hellman(&ephemeral_public);
+    let wrapping_key = derive_wrapping_key(shared_secret.as_bytes(), expected_aad)?;
+    let plaintext = decrypt_payload_with_key(
+        Key::from_slice(&wrapping_key),
+        expected_aad,
+        &envelope.encryption,
+    )?;
+
+    serde_json::from_slice(&plaintext).map_err(|_| CryptoError::InvalidEncoding)
+}
+
+pub fn encrypt_recovery_challenge(
+    recipient_public_key: &UserPublicKey,
+    aad: AadV1,
+    challenge: &[u8],
+) -> Result<RecoveryChallengeEnvelopeV1, CryptoError> {
+    let ephemeral_private = StaticSecret::random_from_rng(OsRng);
+    let ephemeral_public = PublicKey::from(&ephemeral_private);
+    let recipient = PublicKey::from(recipient_public_key.as_bytes_array()?);
+    let shared_secret = ephemeral_private.diffie_hellman(&recipient);
+    let wrapping_key = derive_wrapping_key(shared_secret.as_bytes(), &aad)?;
+    let payload = encrypt_payload_with_key(Key::from_slice(&wrapping_key), aad, challenge)?;
+
+    Ok(RecoveryChallengeEnvelopeV1 {
+        version: ENVELOPE_VERSION_V1,
+        envelope_type: "device_recovery_challenge".to_owned(),
+        recipient_public_key: recipient_public_key.to_base64url(),
+        ephemeral_public_key: encode_b64(&ephemeral_public.to_bytes()),
+        encryption: payload,
+    })
+}
+
+pub fn decrypt_recovery_challenge(
+    recipient_private_key: &UserPrivateKey,
+    expected_aad: &AadV1,
+    envelope: &RecoveryChallengeEnvelopeV1,
+) -> Result<Vec<u8>, CryptoError> {
+    assert_supported_envelope_version(envelope.version)?;
+    if envelope.envelope_type != "device_recovery_challenge" {
+        return Err(CryptoError::MissingEnvelopeField("type"));
+    }
+    ensure_aad(expected_aad, &envelope.encryption.aad)?;
+
+    let ephemeral_public =
+        PublicKey::from(decode_array::<KEY_LEN>(&envelope.ephemeral_public_key)?);
+    let shared_secret = recipient_private_key
+        .static_secret()
+        .diffie_hellman(&ephemeral_public);
+    let wrapping_key = derive_wrapping_key(shared_secret.as_bytes(), expected_aad)?;
+
+    decrypt_payload_with_key(
+        Key::from_slice(&wrapping_key),
+        expected_aad,
+        &envelope.encryption,
+    )
+}
+
 pub fn unwrap_vault_key(
     private_key: &UserPrivateKey,
     expected_aad: &AadV1,
@@ -661,11 +836,11 @@ fn derive_wrapping_key(
     Ok(output)
 }
 
-fn encrypt_with_key(
+fn encrypt_payload_with_key(
     key: &Key,
     aad: AadV1,
     plaintext: &[u8],
-) -> Result<CryptoEnvelopeV1, CryptoError> {
+) -> Result<EncryptionPayloadV1, CryptoError> {
     let nonce = Nonce::generate();
     let aad_bytes = aad_bytes(&aad)?;
     let cipher = XChaCha20Poly1305::new(key);
@@ -679,12 +854,52 @@ fn encrypt_with_key(
         )
         .map_err(|_| CryptoError::EncryptFailed)?;
 
-    Ok(CryptoEnvelopeV1 {
-        version: ENVELOPE_VERSION_V1,
-        suite: DEFAULT_SUITE.to_owned(),
+    Ok(EncryptionPayloadV1 {
+        alg: XCHACHA20_POLY1305_ALG.to_owned(),
         nonce: nonce.to_base64url(),
         aad,
         ciphertext: encode_b64(&ciphertext),
+    })
+}
+
+fn decrypt_payload_with_key(
+    key: &Key,
+    expected_aad: &AadV1,
+    payload: &EncryptionPayloadV1,
+) -> Result<Vec<u8>, CryptoError> {
+    if payload.alg != XCHACHA20_POLY1305_ALG {
+        return Err(CryptoError::DecryptFailed);
+    }
+    ensure_aad(expected_aad, &payload.aad)?;
+
+    let nonce = decode_array::<NONCE_LEN>(&payload.nonce)?;
+    let ciphertext = decode_b64(&payload.ciphertext)?;
+    let aad_bytes = aad_bytes(expected_aad)?;
+    let cipher = XChaCha20Poly1305::new(key);
+
+    cipher
+        .decrypt(
+            XNonce::from_slice(&nonce),
+            chacha20poly1305::aead::Payload {
+                msg: &ciphertext,
+                aad: &aad_bytes,
+            },
+        )
+        .map_err(|_| CryptoError::DecryptFailed)
+}
+
+fn encrypt_with_key(
+    key: &Key,
+    aad: AadV1,
+    plaintext: &[u8],
+) -> Result<CryptoEnvelopeV1, CryptoError> {
+    let payload = encrypt_payload_with_key(key, aad, plaintext)?;
+    Ok(CryptoEnvelopeV1 {
+        version: ENVELOPE_VERSION_V1,
+        suite: DEFAULT_SUITE.to_owned(),
+        nonce: payload.nonce,
+        aad: payload.aad,
+        ciphertext: payload.ciphertext,
     })
 }
 
@@ -751,12 +966,39 @@ mod tests {
     use super::*;
 
     fn fast_params(salt: Salt) -> Argon2idParams {
+        fast_params_from_salt(salt.to_base64url())
+    }
+
+    fn fast_params_from_salt(salt: impl Into<String>) -> Argon2idParams {
         Argon2idParams {
             profile: KdfProfile::Custom,
             memory_mib: 64,
             iterations: 3,
             parallelism: 1,
-            salt: salt.to_base64url(),
+            salt: salt.into(),
+        }
+    }
+
+    fn bootstrap_bundle() -> DeviceBootstrapBundleV1 {
+        let password = MasterPassword::new("correct horse battery staple");
+        let user_secret_key = UserSecretKey::generate();
+        let kdf_params = fast_params_from_salt(Salt::generate().to_base64url());
+        let account_kek = derive_account_kek(&password, &user_secret_key, &kdf_params).unwrap();
+        let account = generate_user_keypair();
+        let encrypted_user_private_key = encrypt_user_private_key(
+            &account_kek,
+            &account.private_key,
+            AadV1::user_private_key(account.public_key.to_base64url()),
+        )
+        .unwrap();
+
+        DeviceBootstrapBundleV1 {
+            version: ENVELOPE_VERSION_V1,
+            user_secret_key: user_secret_key.to_base64url(),
+            kdf_params,
+            encrypted_user_private_key,
+            account_public_key: account.public_key.to_base64url(),
+            default_vault_id: Some("vault-1".to_owned()),
         }
     }
 
@@ -819,6 +1061,75 @@ mod tests {
         let unwrapped = unwrap_vault_key(&keypair.private_key, &aad, &envelope).unwrap();
 
         assert_eq!(unwrapped, vault_key);
+    }
+
+    #[test]
+    fn device_bootstrap_bundle_roundtrips() {
+        let recipient = generate_user_keypair();
+        let aad = AadV1::device_bootstrap("device-1");
+        let bundle = bootstrap_bundle();
+
+        let envelope =
+            encrypt_device_bootstrap_bundle(&recipient.public_key, aad.clone(), &bundle).unwrap();
+        let decrypted =
+            decrypt_device_bootstrap_bundle(&recipient.private_key, &aad, &envelope).unwrap();
+
+        assert_eq!(envelope.version, ENVELOPE_VERSION_V1);
+        assert_eq!(envelope.envelope_type, "device_bootstrap");
+        assert_eq!(
+            envelope.recipient_public_key,
+            recipient.public_key.to_base64url()
+        );
+        assert_eq!(envelope.encryption.alg, XCHACHA20_POLY1305_ALG);
+        assert_eq!(decrypted, bundle);
+
+        let debug = format!("{bundle:?}");
+        assert!(!debug.contains(&bundle.user_secret_key));
+    }
+
+    #[test]
+    fn device_bootstrap_bundle_fails_with_wrong_key_or_aad() {
+        let recipient = generate_user_keypair();
+        let wrong_recipient = generate_user_keypair();
+        let aad = AadV1::device_bootstrap("device-1");
+        let bundle = bootstrap_bundle();
+        let envelope =
+            encrypt_device_bootstrap_bundle(&recipient.public_key, aad.clone(), &bundle).unwrap();
+
+        assert!(matches!(
+            decrypt_device_bootstrap_bundle(&wrong_recipient.private_key, &aad, &envelope),
+            Err(CryptoError::DecryptFailed)
+        ));
+
+        assert!(matches!(
+            decrypt_device_bootstrap_bundle(
+                &recipient.private_key,
+                &AadV1::device_bootstrap("device-2"),
+                &envelope
+            ),
+            Err(CryptoError::AadMismatch)
+        ));
+    }
+
+    #[test]
+    fn recovery_challenge_roundtrips() {
+        let recipient = generate_user_keypair();
+        let aad = AadV1::recovery_challenge("device-1", "challenge-1");
+        let challenge = b"challenge-response";
+
+        let envelope =
+            encrypt_recovery_challenge(&recipient.public_key, aad.clone(), challenge).unwrap();
+        let decrypted =
+            decrypt_recovery_challenge(&recipient.private_key, &aad, &envelope).unwrap();
+
+        assert_eq!(envelope.version, ENVELOPE_VERSION_V1);
+        assert_eq!(envelope.envelope_type, "device_recovery_challenge");
+        assert_eq!(
+            envelope.recipient_public_key,
+            recipient.public_key.to_base64url()
+        );
+        assert_eq!(envelope.encryption.alg, XCHACHA20_POLY1305_ALG);
+        assert_eq!(decrypted, challenge);
     }
 
     #[test]
