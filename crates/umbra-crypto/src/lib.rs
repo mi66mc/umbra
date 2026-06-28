@@ -15,6 +15,8 @@ pub const DEFAULT_SUITE: &str = "UMBRA_XCHACHA20POLY1305_HKDFSHA256_V1";
 pub const XCHACHA20_POLY1305_ALG: &str = "xchacha20-poly1305";
 pub const VAULT_KEY_WRAPPING_TYPE: &str = "vault_key_wrapping";
 pub const USER_PUBLIC_KEY_WRAPPING_METHOD: &str = "user_public_key";
+pub const DEVICE_BOOTSTRAP_TYPE: &str = "device_bootstrap";
+pub const DEVICE_RECOVERY_CHALLENGE_TYPE: &str = "device_recovery_challenge";
 pub const KEY_LEN: usize = 32;
 pub const NONCE_LEN: usize = 24;
 
@@ -414,7 +416,7 @@ impl AadV1 {
     pub fn device_bootstrap(device_id: impl Into<String>) -> Self {
         Self {
             app: "umbra".to_owned(),
-            purpose: "device_bootstrap".to_owned(),
+            purpose: DEVICE_BOOTSTRAP_TYPE.to_owned(),
             schema: 1,
             vault_id: device_id.into(),
             item_id: None,
@@ -429,7 +431,7 @@ impl AadV1 {
     ) -> Self {
         Self {
             app: "umbra".to_owned(),
-            purpose: "device_recovery_challenge".to_owned(),
+            purpose: DEVICE_RECOVERY_CHALLENGE_TYPE.to_owned(),
             schema: 1,
             vault_id: device_id.into(),
             item_id: Some(challenge_id.into()),
@@ -635,6 +637,7 @@ pub fn wrap_vault_key_for_user(
     let ephemeral_private = StaticSecret::random_from_rng(OsRng);
     let ephemeral_public = PublicKey::from(&ephemeral_private);
     let shared_secret = ephemeral_private.diffie_hellman(&public_key.public_key());
+    ensure_contributory_shared_secret(shared_secret.as_bytes())?;
     let wrapping_key = derive_wrapping_key(shared_secret.as_bytes(), &aad)?;
     let envelope = encrypt_with_key(
         Key::from_slice(&wrapping_key),
@@ -665,17 +668,22 @@ pub fn encrypt_device_bootstrap_bundle(
     aad: AadV1,
     bundle: &DeviceBootstrapBundleV1,
 ) -> Result<DeviceBootstrapEnvelopeV1, CryptoError> {
+    ensure_device_bootstrap_aad(&aad)?;
+
     let ephemeral_private = StaticSecret::random_from_rng(OsRng);
     let ephemeral_public = PublicKey::from(&ephemeral_private);
     let recipient = PublicKey::from(recipient_public_key.as_bytes_array()?);
     let shared_secret = ephemeral_private.diffie_hellman(&recipient);
+    ensure_contributory_shared_secret(shared_secret.as_bytes())?;
     let wrapping_key = derive_wrapping_key(shared_secret.as_bytes(), &aad)?;
-    let plaintext = serde_json::to_vec(bundle).map_err(|_| CryptoError::InvalidEncoding)?;
-    let payload = encrypt_payload_with_key(Key::from_slice(&wrapping_key), aad, &plaintext)?;
+    let mut plaintext = serde_json::to_vec(bundle).map_err(|_| CryptoError::InvalidEncoding)?;
+    let payload_result = encrypt_payload_with_key(Key::from_slice(&wrapping_key), aad, &plaintext);
+    plaintext.zeroize();
+    let payload = payload_result?;
 
     Ok(DeviceBootstrapEnvelopeV1 {
         version: ENVELOPE_VERSION_V1,
-        envelope_type: "device_bootstrap".to_owned(),
+        envelope_type: DEVICE_BOOTSTRAP_TYPE.to_owned(),
         recipient_public_key: recipient_public_key.to_base64url(),
         ephemeral_public_key: encode_b64(&ephemeral_public.to_bytes()),
         encryption: payload,
@@ -687,25 +695,30 @@ pub fn decrypt_device_bootstrap_bundle(
     expected_aad: &AadV1,
     envelope: &DeviceBootstrapEnvelopeV1,
 ) -> Result<DeviceBootstrapBundleV1, CryptoError> {
+    ensure_device_bootstrap_aad(expected_aad)?;
     assert_supported_envelope_version(envelope.version)?;
-    if envelope.envelope_type != "device_bootstrap" {
+    if envelope.envelope_type != DEVICE_BOOTSTRAP_TYPE {
         return Err(CryptoError::MissingEnvelopeField("type"));
     }
     ensure_aad(expected_aad, &envelope.encryption.aad)?;
+    ensure_recipient_public_key(recipient_private_key, &envelope.recipient_public_key)?;
 
     let ephemeral_public =
         PublicKey::from(decode_array::<KEY_LEN>(&envelope.ephemeral_public_key)?);
     let shared_secret = recipient_private_key
         .static_secret()
         .diffie_hellman(&ephemeral_public);
+    ensure_contributory_shared_secret(shared_secret.as_bytes())?;
     let wrapping_key = derive_wrapping_key(shared_secret.as_bytes(), expected_aad)?;
-    let plaintext = decrypt_payload_with_key(
+    let mut plaintext = decrypt_payload_with_key(
         Key::from_slice(&wrapping_key),
         expected_aad,
         &envelope.encryption,
     )?;
+    let bundle = serde_json::from_slice(&plaintext).map_err(|_| CryptoError::InvalidEncoding);
+    plaintext.zeroize();
 
-    serde_json::from_slice(&plaintext).map_err(|_| CryptoError::InvalidEncoding)
+    bundle
 }
 
 pub fn encrypt_recovery_challenge(
@@ -713,16 +726,19 @@ pub fn encrypt_recovery_challenge(
     aad: AadV1,
     challenge: &[u8],
 ) -> Result<RecoveryChallengeEnvelopeV1, CryptoError> {
+    ensure_recovery_challenge_aad(&aad)?;
+
     let ephemeral_private = StaticSecret::random_from_rng(OsRng);
     let ephemeral_public = PublicKey::from(&ephemeral_private);
     let recipient = PublicKey::from(recipient_public_key.as_bytes_array()?);
     let shared_secret = ephemeral_private.diffie_hellman(&recipient);
+    ensure_contributory_shared_secret(shared_secret.as_bytes())?;
     let wrapping_key = derive_wrapping_key(shared_secret.as_bytes(), &aad)?;
     let payload = encrypt_payload_with_key(Key::from_slice(&wrapping_key), aad, challenge)?;
 
     Ok(RecoveryChallengeEnvelopeV1 {
         version: ENVELOPE_VERSION_V1,
-        envelope_type: "device_recovery_challenge".to_owned(),
+        envelope_type: DEVICE_RECOVERY_CHALLENGE_TYPE.to_owned(),
         recipient_public_key: recipient_public_key.to_base64url(),
         ephemeral_public_key: encode_b64(&ephemeral_public.to_bytes()),
         encryption: payload,
@@ -734,17 +750,20 @@ pub fn decrypt_recovery_challenge(
     expected_aad: &AadV1,
     envelope: &RecoveryChallengeEnvelopeV1,
 ) -> Result<Vec<u8>, CryptoError> {
+    ensure_recovery_challenge_aad(expected_aad)?;
     assert_supported_envelope_version(envelope.version)?;
-    if envelope.envelope_type != "device_recovery_challenge" {
+    if envelope.envelope_type != DEVICE_RECOVERY_CHALLENGE_TYPE {
         return Err(CryptoError::MissingEnvelopeField("type"));
     }
     ensure_aad(expected_aad, &envelope.encryption.aad)?;
+    ensure_recipient_public_key(recipient_private_key, &envelope.recipient_public_key)?;
 
     let ephemeral_public =
         PublicKey::from(decode_array::<KEY_LEN>(&envelope.ephemeral_public_key)?);
     let shared_secret = recipient_private_key
         .static_secret()
         .diffie_hellman(&ephemeral_public);
+    ensure_contributory_shared_secret(shared_secret.as_bytes())?;
     let wrapping_key = derive_wrapping_key(shared_secret.as_bytes(), expected_aad)?;
 
     decrypt_payload_with_key(
@@ -776,6 +795,7 @@ pub fn unwrap_vault_key(
     let shared_secret = private_key
         .static_secret()
         .diffie_hellman(&ephemeral_public.public_key());
+    ensure_contributory_shared_secret(shared_secret.as_bytes())?;
     let wrapping_key = derive_wrapping_key(shared_secret.as_bytes(), expected_aad)?;
     let crypto_envelope = CryptoEnvelopeV1 {
         version: envelope.version,
@@ -834,6 +854,50 @@ fn derive_wrapping_key(
     hk.expand(b"umbra:vault-key-wrapping:v1", &mut output)
         .map_err(|_| CryptoError::InvalidKeyLength)?;
     Ok(output)
+}
+
+fn ensure_contributory_shared_secret(shared_secret: &[u8; KEY_LEN]) -> Result<(), CryptoError> {
+    if shared_secret.ct_eq(&[0u8; KEY_LEN]).into() {
+        Err(CryptoError::DecryptFailed)
+    } else {
+        Ok(())
+    }
+}
+
+fn ensure_device_bootstrap_aad(aad: &AadV1) -> Result<(), CryptoError> {
+    if aad.purpose == DEVICE_BOOTSTRAP_TYPE {
+        Ok(())
+    } else {
+        Err(CryptoError::DecryptFailed)
+    }
+}
+
+fn ensure_recovery_challenge_aad(aad: &AadV1) -> Result<(), CryptoError> {
+    if aad.purpose != DEVICE_RECOVERY_CHALLENGE_TYPE {
+        return Err(CryptoError::DecryptFailed);
+    }
+    if aad.item_id.is_none() {
+        return Err(CryptoError::MissingEnvelopeField("item_id"));
+    }
+    Ok(())
+}
+
+fn ensure_recipient_public_key(
+    private_key: &UserPrivateKey,
+    recipient_public_key: &str,
+) -> Result<(), CryptoError> {
+    let envelope_public_key = UserPublicKey::from_base64url(recipient_public_key)?;
+    let derived_public_key = PublicKey::from(&private_key.static_secret());
+
+    if envelope_public_key
+        .as_bytes_array()?
+        .ct_eq(&derived_public_key.to_bytes())
+        .into()
+    {
+        Ok(())
+    } else {
+        Err(CryptoError::DecryptFailed)
+    }
 }
 
 fn encrypt_payload_with_key(
@@ -1112,6 +1176,43 @@ mod tests {
     }
 
     #[test]
+    fn bootstrap_decrypt_fails_if_recipient_public_key_metadata_is_tampered() {
+        let recipient = generate_user_keypair();
+        let other_recipient = generate_user_keypair();
+        let aad = AadV1::device_bootstrap("device-1");
+        let bundle = bootstrap_bundle();
+        let mut envelope =
+            encrypt_device_bootstrap_bundle(&recipient.public_key, aad.clone(), &bundle).unwrap();
+        envelope.recipient_public_key = other_recipient.public_key.to_base64url();
+
+        assert!(matches!(
+            decrypt_device_bootstrap_bundle(&recipient.private_key, &aad, &envelope),
+            Err(CryptoError::DecryptFailed)
+        ));
+    }
+
+    #[test]
+    fn bootstrap_rejects_wrong_purpose_aad() {
+        let recipient = generate_user_keypair();
+        let wrong_aad = AadV1::vault_key_wrapping("device-1");
+        let bundle = bootstrap_bundle();
+
+        assert!(matches!(
+            encrypt_device_bootstrap_bundle(&recipient.public_key, wrong_aad.clone(), &bundle),
+            Err(CryptoError::DecryptFailed)
+        ));
+
+        let aad = AadV1::device_bootstrap("device-1");
+        let envelope =
+            encrypt_device_bootstrap_bundle(&recipient.public_key, aad, &bundle).unwrap();
+
+        assert!(matches!(
+            decrypt_device_bootstrap_bundle(&recipient.private_key, &wrong_aad, &envelope),
+            Err(CryptoError::DecryptFailed)
+        ));
+    }
+
+    #[test]
     fn recovery_challenge_roundtrips() {
         let recipient = generate_user_keypair();
         let aad = AadV1::recovery_challenge("device-1", "challenge-1");
@@ -1130,6 +1231,94 @@ mod tests {
         );
         assert_eq!(envelope.encryption.alg, XCHACHA20_POLY1305_ALG);
         assert_eq!(decrypted, challenge);
+    }
+
+    #[test]
+    fn recovery_decrypt_fails_if_recipient_public_key_metadata_is_tampered() {
+        let recipient = generate_user_keypair();
+        let other_recipient = generate_user_keypair();
+        let aad = AadV1::recovery_challenge("device-1", "challenge-1");
+        let mut envelope =
+            encrypt_recovery_challenge(&recipient.public_key, aad.clone(), b"challenge").unwrap();
+        envelope.recipient_public_key = other_recipient.public_key.to_base64url();
+
+        assert!(matches!(
+            decrypt_recovery_challenge(&recipient.private_key, &aad, &envelope),
+            Err(CryptoError::DecryptFailed)
+        ));
+    }
+
+    #[test]
+    fn recovery_rejects_wrong_purpose_aad() {
+        let recipient = generate_user_keypair();
+        let wrong_aad = AadV1::device_bootstrap("device-1");
+
+        assert!(matches!(
+            encrypt_recovery_challenge(&recipient.public_key, wrong_aad.clone(), b"challenge"),
+            Err(CryptoError::DecryptFailed)
+        ));
+
+        let mut missing_challenge_id = AadV1::recovery_challenge("device-1", "challenge-1");
+        missing_challenge_id.item_id = None;
+        assert!(matches!(
+            encrypt_recovery_challenge(
+                &recipient.public_key,
+                missing_challenge_id.clone(),
+                b"challenge"
+            ),
+            Err(CryptoError::MissingEnvelopeField("item_id"))
+        ));
+
+        let aad = AadV1::recovery_challenge("device-1", "challenge-1");
+        let envelope =
+            encrypt_recovery_challenge(&recipient.public_key, aad, b"challenge").unwrap();
+
+        assert!(matches!(
+            decrypt_recovery_challenge(&recipient.private_key, &wrong_aad, &envelope),
+            Err(CryptoError::DecryptFailed)
+        ));
+        assert!(matches!(
+            decrypt_recovery_challenge(&recipient.private_key, &missing_challenge_id, &envelope),
+            Err(CryptoError::MissingEnvelopeField("item_id"))
+        ));
+    }
+
+    #[test]
+    fn rejects_non_contributory_shared_secret() {
+        let recipient = generate_user_keypair();
+        let aad = AadV1::device_bootstrap("device-1");
+        let bundle = bootstrap_bundle();
+        let all_zero_public_key = UserPublicKey::from_bytes([0u8; KEY_LEN]);
+
+        assert!(matches!(
+            encrypt_device_bootstrap_bundle(&all_zero_public_key, aad.clone(), &bundle),
+            Err(CryptoError::DecryptFailed)
+        ));
+
+        let mut envelope =
+            encrypt_device_bootstrap_bundle(&recipient.public_key, aad.clone(), &bundle).unwrap();
+        envelope.ephemeral_public_key = encode_b64(&[0u8; KEY_LEN]);
+
+        assert!(matches!(
+            decrypt_device_bootstrap_bundle(&recipient.private_key, &aad, &envelope),
+            Err(CryptoError::DecryptFailed)
+        ));
+
+        let recovery_aad = AadV1::recovery_challenge("device-1", "challenge-1");
+        assert!(matches!(
+            encrypt_recovery_challenge(&all_zero_public_key, recovery_aad.clone(), b"challenge"),
+            Err(CryptoError::DecryptFailed)
+        ));
+
+        let mut recovery_envelope =
+            encrypt_recovery_challenge(&recipient.public_key, recovery_aad.clone(), b"challenge")
+                .unwrap();
+        recovery_envelope.ephemeral_public_key = encode_b64(&[0u8; KEY_LEN]);
+
+        assert!(matches!(
+            decrypt_recovery_challenge(&recipient.private_key, &recovery_aad, &recovery_envelope),
+            Err(CryptoError::DecryptFailed)
+        ));
     }
 
     #[test]
