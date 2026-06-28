@@ -3632,6 +3632,7 @@ dependencies = [
  "tracing-subscriber",
  "umbra-auth",
  "umbra-core",
+ "umbra-crypto",
  "umbra-migrations",
  "umbra-protocol",
  "umbra-storage",

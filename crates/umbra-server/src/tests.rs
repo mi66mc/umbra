@@ -19,13 +19,15 @@ use umbra_auth::{
     HEADER_BODY_SHA256, HEADER_DEVICE_ID, HEADER_NONCE, HEADER_SESSION_ID, HEADER_SIGNATURE,
     HEADER_TIMESTAMP, SignedRequestParts, body_sha256_b64, sign_request, verifying_key_to_b64,
 };
-use umbra_core::{VaultKind, VaultRole};
+use umbra_core::{DeviceState, VaultKind, VaultRole};
 use umbra_protocol::{
-    AddVaultMemberRequest, CreateItemRequest, CreateOrgRequest, CreateVaultRequest,
-    DeviceRegisterRequest, ItemRevisionResponse, OpaqueLoginFinishRequest,
-    OpaqueLoginFinishResponse, OpaqueLoginStartRequest, OpaqueLoginStartResponse,
-    OpaqueRegisterFinishRequest, OpaqueRegisterStartRequest, OpaqueRegisterStartResponse,
-    OrgResponse, PROTOCOL_VERSION, RegisterResponse, SyncRequest, SyncResponse, SyncStatusRequest,
+    AddVaultMemberRequest, ApprovalLookupRequest, ApproveDeviceRequest, CreateItemRequest,
+    CreateOrgRequest, CreateVaultRequest, DeviceBootstrapResponse, DeviceRegisterRequest,
+    DeviceResponse, ItemRevisionResponse, OpaqueLoginFinishRequest, OpaqueLoginFinishResponse,
+    OpaqueLoginStartRequest, OpaqueLoginStartResponse, OpaqueRegisterFinishRequest,
+    OpaqueRegisterStartRequest, OpaqueRegisterStartResponse, OrgResponse, PROTOCOL_VERSION,
+    PendingDeviceRequest, PendingDeviceSummary, RecoverTrustRequest, RecoveryChallengeStartRequest,
+    RecoveryChallengeStartResponse, RegisterResponse, SyncRequest, SyncResponse, SyncStatusRequest,
     SyncStatusResponse, UpdateItemRequest, VaultResponse, VaultStatusCursor, VaultSyncCursor,
 };
 use umbra_storage::Storage;
@@ -743,6 +745,160 @@ async fn signed_login_rejects_revoked_device_state() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
+#[tokio::test]
+#[serial(postgres)]
+async fn pending_device_cannot_access_sync() {
+    let Some(storage) = fresh_test_storage().await else {
+        return;
+    };
+    let app = router(test_state_with_storage(storage));
+    let pending = register_and_pending_login(
+        app.clone(),
+        "pending-sync@example.com",
+        b"pending sync password",
+    )
+    .await;
+
+    let (status, _body): (StatusCode, serde_json::Value) = json_request(
+        app,
+        Method::POST,
+        "/api/v1/sync",
+        Some(&pending.session_token),
+        &SyncRequest {
+            protocol_version: PROTOCOL_VERSION,
+            device_id: pending.device_id,
+            vaults: vec![],
+        },
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+#[serial(postgres)]
+async fn trusted_device_approves_pending_device_and_pending_downloads_bootstrap() {
+    let Some(storage) = fresh_test_storage().await else {
+        return;
+    };
+    let app = router(test_state_with_storage(storage));
+    let trusted = register_and_signed_login(
+        app.clone(),
+        "approval-flow@example.com",
+        b"approval password",
+        "approval-flow-trusted",
+    )
+    .await;
+    let pending = login_pending_device_existing_user(
+        app.clone(),
+        "approval-flow@example.com",
+        b"approval password",
+        "approval-flow-pending",
+    )
+    .await;
+
+    let (status, summary): (StatusCode, PendingDeviceSummary) = signed_json_request(
+        app.clone(),
+        Method::POST,
+        "/api/v1/devices/approval-lookup",
+        trusted.auth("lookup-approval"),
+        &ApprovalLookupRequest {
+            protocol_version: PROTOCOL_VERSION,
+            approval_code: pending.approval_code.clone(),
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(summary.device_id, pending.device_id);
+    assert_eq!(summary.bootstrap_public_key, pending.bootstrap_public_key);
+
+    let bootstrap_bundle = json!({"encrypted": "bootstrap-bundle"});
+    let (status, approved): (StatusCode, DeviceResponse) = signed_json_request(
+        app.clone(),
+        Method::POST,
+        &format!("/api/v1/devices/{}/approve", pending.device_id),
+        trusted.auth("approve-device"),
+        &ApproveDeviceRequest {
+            protocol_version: PROTOCOL_VERSION,
+            approval_code: pending.approval_code.clone(),
+            bootstrap_bundle: bootstrap_bundle.clone(),
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(approved.device_id, pending.device_id);
+    assert_eq!(approved.state, DeviceState::Trusted);
+
+    let (status, bootstrap): (StatusCode, DeviceBootstrapResponse) = json_request(
+        app,
+        Method::GET,
+        &format!("/api/v1/devices/{}/bootstrap", pending.device_id),
+        Some(&pending.session_token),
+        &json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(bootstrap.device_id, pending.device_id);
+    assert_eq!(bootstrap.state, DeviceState::Trusted);
+    assert_eq!(bootstrap.bootstrap_bundle, Some(bootstrap_bundle));
+}
+
+#[tokio::test]
+#[serial(postgres)]
+async fn recovery_trust_requires_valid_challenge_response() {
+    let Some(storage) = fresh_test_storage().await else {
+        return;
+    };
+    let app = router(test_state_with_storage(storage));
+    let pending = register_and_pending_login(
+        app.clone(),
+        "recovery-flow@example.com",
+        b"recovery password",
+    )
+    .await;
+
+    let (status, challenge): (StatusCode, RecoveryChallengeStartResponse) = json_request(
+        app.clone(),
+        Method::POST,
+        &format!("/api/v1/devices/{}/recovery-challenge", pending.device_id),
+        Some(&pending.session_token),
+        &RecoveryChallengeStartRequest {
+            protocol_version: PROTOCOL_VERSION,
+            device_id: pending.device_id,
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _body): (StatusCode, serde_json::Value) = json_request(
+        app.clone(),
+        Method::POST,
+        &format!("/api/v1/devices/{}/recover-trust", pending.device_id),
+        Some(&pending.session_token),
+        &RecoverTrustRequest {
+            protocol_version: PROTOCOL_VERSION,
+            challenge_id: challenge.challenge_id,
+            challenge_response: "not-the-challenge".to_owned(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        status,
+        StatusCode::NOT_FOUND | StatusCode::UNAUTHORIZED
+    ));
+
+    let (status, bootstrap): (StatusCode, DeviceBootstrapResponse) = json_request(
+        app,
+        Method::GET,
+        &format!("/api/v1/devices/{}/bootstrap", pending.device_id),
+        Some(&pending.session_token),
+        &json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(bootstrap.state, DeviceState::Pending);
+}
+
 async fn register_and_login(app: Router, email: &str, password: &[u8]) -> String {
     let registration_start =
         ClientRegistration::<OpaqueCipherSuite>::start(&mut OsRng, password).unwrap();
@@ -843,6 +999,228 @@ async fn register_and_login(app: Router, email: &str, password: &[u8]) -> String
     finish
         .session_token
         .expect("legacy bearer login returns a session token")
+}
+
+struct SignedLogin {
+    session_id: Uuid,
+    device_id: Uuid,
+    signing_key: ed25519_dalek::SigningKey,
+}
+
+impl SignedLogin {
+    fn auth(&self, nonce: &'static str) -> SignedRequestAuth<'_> {
+        SignedRequestAuth {
+            session_id: self.session_id,
+            device_id: self.device_id,
+            signing_key: &self.signing_key,
+            nonce,
+        }
+    }
+}
+
+struct PendingLogin {
+    device_id: Uuid,
+    session_token: String,
+    approval_code: String,
+    bootstrap_public_key: String,
+}
+
+async fn register_and_signed_login(
+    app: Router,
+    email: &str,
+    password: &[u8],
+    label: &str,
+) -> SignedLogin {
+    let signing_key = ed25519_dalek::SigningKey::generate(&mut rand_core::OsRng);
+    let register = register_user_with_device(
+        app.clone(),
+        email,
+        password,
+        Some(&format!("{label} user")),
+        &format!("{label} laptop"),
+        verifying_key_to_b64(&signing_key.verifying_key()),
+        format!("{label}-fingerprint"),
+        "user-public-key".to_owned(),
+    )
+    .await;
+    let finish = opaque_login_finish(app, email, password, Some(register.device_id), None).await;
+
+    assert_eq!(finish.auth_scheme, "signed");
+    assert_eq!(finish.session_token, None);
+
+    SignedLogin {
+        session_id: finish.session_id,
+        device_id: register.device_id,
+        signing_key,
+    }
+}
+
+async fn register_and_pending_login(app: Router, email: &str, password: &[u8]) -> PendingLogin {
+    let account_keypair = umbra_crypto::generate_user_keypair();
+    register_user_with_device(
+        app.clone(),
+        email,
+        password,
+        Some("Pending Device"),
+        "first laptop",
+        "first-device-public-key".to_owned(),
+        "first-device-fingerprint".to_owned(),
+        account_keypair.public_key.to_base64url(),
+    )
+    .await;
+
+    login_pending_device_existing_user(app, email, password, "pending-login").await
+}
+
+async fn login_pending_device_existing_user(
+    app: Router,
+    email: &str,
+    password: &[u8],
+    label: &str,
+) -> PendingLogin {
+    let pending_request = PendingDeviceRequest {
+        protocol_version: PROTOCOL_VERSION,
+        name: format!("{label} laptop"),
+        public_key: format!("{label}-public-key"),
+        fingerprint: format!("{label}-fingerprint"),
+        bootstrap_public_key: format!("{label}-bootstrap-public-key"),
+    };
+    let bootstrap_public_key = pending_request.bootstrap_public_key.clone();
+    let finish = opaque_login_finish(app, email, password, None, Some(pending_request)).await;
+    let pending = finish
+        .pending_device
+        .expect("pending device login returns pending device details");
+
+    assert_eq!(finish.auth_scheme, "pending");
+    assert_eq!(pending.session_id, finish.session_id);
+
+    PendingLogin {
+        device_id: pending.device_id,
+        session_token: finish
+            .session_token
+            .expect("pending login returns a bearer token"),
+        approval_code: pending.approval_code,
+        bootstrap_public_key,
+    }
+}
+
+async fn register_user_with_device(
+    app: Router,
+    email: &str,
+    password: &[u8],
+    display_name: Option<&str>,
+    device_name: &str,
+    device_public_key: String,
+    device_fingerprint: String,
+    account_public_key: String,
+) -> RegisterResponse {
+    let registration_start =
+        ClientRegistration::<OpaqueCipherSuite>::start(&mut OsRng, password).unwrap();
+    let (status, start_response): (StatusCode, OpaqueRegisterStartResponse) = json_request(
+        app.clone(),
+        Method::POST,
+        "/api/v1/auth/register/start",
+        None,
+        &OpaqueRegisterStartRequest {
+            protocol_version: PROTOCOL_VERSION,
+            email: email.to_owned(),
+            registration_request: encode_b64(registration_start.message.serialize().as_slice()),
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let registration_response = RegistrationResponse::<OpaqueCipherSuite>::deserialize(
+        &decode_b64(&start_response.registration_response).unwrap(),
+    )
+    .unwrap();
+    let registration_finish = registration_start
+        .state
+        .finish(
+            &mut OsRng,
+            password,
+            registration_response,
+            ClientRegistrationFinishParameters::default(),
+        )
+        .unwrap();
+    let (status, register): (StatusCode, RegisterResponse) = json_request(
+        app,
+        Method::POST,
+        "/api/v1/auth/register/finish",
+        None,
+        &OpaqueRegisterFinishRequest {
+            protocol_version: PROTOCOL_VERSION,
+            registration_id: start_response.registration_id,
+            email: email.to_owned(),
+            display_name: display_name.map(str::to_owned),
+            public_key: account_public_key,
+            encrypted_private_key: json!({"ciphertext": "private"}),
+            initial_device: DeviceRegisterRequest {
+                name: device_name.to_owned(),
+                public_key: device_public_key,
+                fingerprint: device_fingerprint,
+            },
+            registration_upload: encode_b64(registration_finish.message.serialize().as_slice()),
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    register
+}
+
+async fn opaque_login_finish(
+    app: Router,
+    email: &str,
+    password: &[u8],
+    device_id: Option<Uuid>,
+    pending_device: Option<PendingDeviceRequest>,
+) -> OpaqueLoginFinishResponse {
+    let login_start = ClientLogin::<OpaqueCipherSuite>::start(&mut OsRng, password).unwrap();
+    let (status, login_response): (StatusCode, OpaqueLoginStartResponse) = json_request(
+        app.clone(),
+        Method::POST,
+        "/api/v1/auth/login/start",
+        None,
+        &OpaqueLoginStartRequest {
+            protocol_version: PROTOCOL_VERSION,
+            email: email.to_owned(),
+            credential_request: encode_b64(login_start.message.serialize().as_slice()),
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let credential_response = CredentialResponse::<OpaqueCipherSuite>::deserialize(
+        &decode_b64(&login_response.credential_response).unwrap(),
+    )
+    .unwrap();
+    let login_finish = login_start
+        .state
+        .finish(
+            &mut OsRng,
+            password,
+            credential_response,
+            ClientLoginFinishParameters::default(),
+        )
+        .unwrap();
+    let (status, finish): (StatusCode, OpaqueLoginFinishResponse) = json_request(
+        app,
+        Method::POST,
+        "/api/v1/auth/login/finish",
+        None,
+        &OpaqueLoginFinishRequest {
+            protocol_version: PROTOCOL_VERSION,
+            login_id: login_response.login_id,
+            device_id,
+            pending_device,
+            credential_finalization: encode_b64(login_finish.message.serialize().as_slice()),
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    finish
 }
 
 async fn login_user_id(app: Router, email: &str, password: &[u8]) -> uuid::Uuid {
