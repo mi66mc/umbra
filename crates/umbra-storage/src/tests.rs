@@ -99,6 +99,53 @@ async fn postgres_signed_sessions_reject_nonce_replay() {
 
 #[tokio::test]
 #[serial(postgres)]
+async fn postgres_revoke_sessions_for_device_revokes_active_session() {
+    let Some(storage) = fresh_test_storage().await else {
+        return;
+    };
+    let user = create_test_user(&storage, "revoke-session@example.com").await;
+    let device = storage
+        .create_device(CreateDevice {
+            id: None,
+            user_id: user.id,
+            name: "session laptop".to_owned(),
+            public_key: Some("device-public-key".to_owned()),
+            fingerprint: "session-device".to_owned(),
+            state: DeviceState::Trusted,
+            approval_code_hash: None,
+            approval_expires_at: None,
+            bootstrap_public_key: None,
+        })
+        .await
+        .unwrap();
+    let session = storage
+        .create_session(CreateSession {
+            id: None,
+            user_id: user.id,
+            device_id: Some(device.id),
+            token_hash: "revoke-token-hash".to_owned(),
+            auth_scheme: "signed".to_owned(),
+            expires_at: chrono::Utc::now() + chrono::Duration::minutes(30),
+        })
+        .await
+        .unwrap();
+
+    let rows = storage.revoke_sessions_for_device(device.id).await.unwrap();
+    assert_eq!(rows, 1);
+    assert!(matches!(
+        storage.find_active_session_by_id(session.id).await,
+        Err(StorageError::NotFound)
+    ));
+    assert!(matches!(
+        storage
+            .find_active_session_by_hash("revoke-token-hash")
+            .await,
+        Err(StorageError::NotFound)
+    ));
+}
+
+#[tokio::test]
+#[serial(postgres)]
 async fn postgres_devices_support_pending_trust_and_revoke() {
     let Some(storage) = fresh_test_storage().await else {
         return;

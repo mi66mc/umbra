@@ -557,6 +557,7 @@ async fn signed_login_can_create_org_and_rejects_nonce_replay() {
             protocol_version: PROTOCOL_VERSION,
             login_id: login_response.login_id,
             device_id: Some(register.device_id),
+            pending_device: None,
             credential_finalization: encode_b64(login_finish.message.serialize().as_slice()),
         },
     )
@@ -694,6 +695,7 @@ async fn register_and_login(app: Router, email: &str, password: &[u8]) -> String
             protocol_version: PROTOCOL_VERSION,
             login_id: login_response.login_id,
             device_id: None,
+            pending_device: None,
             credential_finalization: encode_b64(login_finish.message.serialize().as_slice()),
         },
     )
@@ -743,6 +745,7 @@ async fn login_user_id(app: Router, email: &str, password: &[u8]) -> uuid::Uuid 
             protocol_version: PROTOCOL_VERSION,
             login_id: login_response.login_id,
             device_id: None,
+            pending_device: None,
             credential_finalization: encode_b64(login_finish.message.serialize().as_slice()),
         },
     )

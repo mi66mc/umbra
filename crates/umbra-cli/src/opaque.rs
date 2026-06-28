@@ -114,6 +114,7 @@ pub async fn login(
                 protocol_version: PROTOCOL_VERSION,
                 login_id: start_response.login_id,
                 device_id: Some(device_id),
+                pending_device: None,
                 credential_finalization: encode_b64(login_finish.message.serialize().as_slice()),
             },
         )

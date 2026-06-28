@@ -6,6 +6,7 @@ use axum::{
     response::Response,
 };
 use chrono::Utc;
+use umbra_core::DeviceState;
 use uuid::Uuid;
 
 use crate::state::AppState;
@@ -120,7 +121,7 @@ async fn authenticate_signed(
         .await
         .map_err(|_| StatusCode::UNAUTHORIZED)?;
     if device.user_id != session.user_id
-        || !device.trusted
+        || device.state != DeviceState::Trusted
         || device.revoked_at.is_some()
         || device.public_key.is_none()
     {

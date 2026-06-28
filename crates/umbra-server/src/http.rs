@@ -13,7 +13,7 @@ use opaque_ke::{
 };
 use serde_json::{Value, json};
 use tower_http::trace::TraceLayer;
-use umbra_core::{MemberState, OrgRole, VaultKind, VaultRole};
+use umbra_core::{DeviceState, MemberState, OrgRole, VaultKind, VaultRole};
 use umbra_migrations::MigrationStatus;
 use umbra_protocol::{
     AddOrgMemberRequest, AddVaultMemberRequest, CreateItemRequest, CreateOrgRequest,
@@ -161,7 +161,10 @@ async fn auth_register_finish(
             name: request.initial_device.name,
             public_key: Some(request.initial_device.public_key),
             fingerprint: request.initial_device.fingerprint,
-            trusted: true,
+            state: DeviceState::Trusted,
+            approval_code_hash: None,
+            approval_expires_at: None,
+            bootstrap_public_key: None,
         })
         .await?;
 
@@ -237,7 +240,7 @@ async fn auth_login_finish(
     let (session, session_token, auth_scheme) = if let Some(device_id) = request.device_id {
         let device = state.storage.find_device_by_id(device_id).await?;
         if device.user_id != user.id
-            || !device.trusted
+            || !device.state.can_authenticate()
             || device.revoked_at.is_some()
             || device.public_key.is_none()
         {
@@ -277,6 +280,7 @@ async fn auth_login_finish(
         session_token,
         auth_scheme,
         encrypted_private_key: user.encrypted_private_key,
+        pending_device: None,
     }))
 }
 
