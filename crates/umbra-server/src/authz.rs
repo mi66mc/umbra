@@ -1,5 +1,5 @@
 use axum::http::HeaderMap;
-use umbra_core::{MemberState, UserId, VaultRole};
+use umbra_core::{DeviceState, MemberState, VaultRole};
 use uuid::Uuid;
 
 use crate::error::ServerError;
@@ -31,13 +31,22 @@ pub(crate) async fn authenticate_context(
     })
 }
 
-pub(crate) async fn authenticate(
+pub(crate) async fn authenticate_trusted_context(
     state: &AppState,
     headers: &HeaderMap,
-) -> Result<UserId, ServerError> {
-    authenticate_context(state, headers)
-        .await
-        .map(|authenticated| authenticated.user_id)
+) -> Result<AuthenticatedUser, ServerError> {
+    let auth = authenticate_context(state, headers).await?;
+    let Some(device_id) = auth.device_id else {
+        return Err(ServerError::Forbidden);
+    };
+    let device = state.storage.find_device_by_id(device_id).await?;
+    if device.user_id != auth.user_id
+        || device.state != DeviceState::Trusted
+        || device.revoked_at.is_some()
+    {
+        return Err(ServerError::Forbidden);
+    }
+    Ok(auth)
 }
 
 pub(crate) async fn ensure_org_manager(

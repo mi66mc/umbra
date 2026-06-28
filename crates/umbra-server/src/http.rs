@@ -38,8 +38,8 @@ use umbra_storage::{
 use uuid::Uuid;
 
 use crate::authz::{
-    authenticate, authenticate_context, ensure_org_manager, ensure_org_vault_creator,
-    ensure_vault_admin, ensure_vault_member, ensure_vault_writer,
+    authenticate_context, authenticate_trusted_context, ensure_org_manager,
+    ensure_org_vault_creator, ensure_vault_admin, ensure_vault_member, ensure_vault_writer,
 };
 use crate::error::ServerError;
 use crate::signed_auth::auth_middleware;
@@ -142,8 +142,44 @@ fn approval_code() -> String {
     format!("UMBRA-{first}-{second}")
 }
 
-fn hash_secret(value: &str) -> String {
-    encode_b64(&Sha256::digest(value.as_bytes()))
+fn hmac_secret(state: &AppState, purpose: &str, value: &str) -> String {
+    let serialized_setup;
+    let key = if let Some(server_setup) = state.config.auth.opaque.server_setup.as_deref() {
+        server_setup.as_bytes()
+    } else {
+        serialized_setup = state.opaque_server_setup.serialize();
+        serialized_setup.as_slice()
+    };
+    encode_b64(&hmac_sha256(key, purpose.as_bytes(), value.as_bytes()))
+}
+
+fn hmac_sha256(key: &[u8], purpose: &[u8], value: &[u8]) -> [u8; 32] {
+    const BLOCK_LEN: usize = 64;
+    let mut key_block = [0u8; BLOCK_LEN];
+    if key.len() > BLOCK_LEN {
+        key_block[..32].copy_from_slice(&Sha256::digest(key));
+    } else {
+        key_block[..key.len()].copy_from_slice(key);
+    }
+
+    let mut ipad = [0x36u8; BLOCK_LEN];
+    let mut opad = [0x5cu8; BLOCK_LEN];
+    for index in 0..BLOCK_LEN {
+        ipad[index] ^= key_block[index];
+        opad[index] ^= key_block[index];
+    }
+
+    let mut inner = Sha256::new();
+    inner.update(ipad);
+    inner.update(purpose);
+    inner.update([0]);
+    inner.update(value);
+    let inner_hash = inner.finalize();
+
+    let mut outer = Sha256::new();
+    outer.update(opad);
+    outer.update(inner_hash);
+    outer.finalize().into()
 }
 
 fn device_response(device: DeviceRecord) -> DeviceResponse {
@@ -181,14 +217,8 @@ async fn require_trusted_current_device(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Result<(Uuid, Uuid), ServerError> {
-    let auth = authenticate_context(state, headers).await?;
-    let Some(current_device_id) = auth.device_id else {
-        return Err(ServerError::Forbidden);
-    };
-    let current = state.storage.find_device_by_id(current_device_id).await?;
-    if current.user_id != auth.user_id || current.state != DeviceState::Trusted {
-        return Err(ServerError::Forbidden);
-    }
+    let auth = authenticate_trusted_context(state, headers).await?;
+    let current_device_id = auth.device_id.ok_or(ServerError::Forbidden)?;
     Ok((auth.user_id, current_device_id))
 }
 
@@ -334,86 +364,87 @@ async fn auth_login_finish(
             "device_id and pending_device are mutually exclusive",
         ));
     }
-    let (session, session_token, auth_scheme, pending_device) =
-        if let Some(pending_request) = request.pending_device {
-            ensure_protocol(pending_request.protocol_version)?;
-            let approval_code = approval_code();
-            let approval_expires_at = Utc::now() + Duration::minutes(10);
-            let device = state
-                .storage
-                .create_device(CreateDevice {
-                    id: None,
-                    user_id: user.id,
-                    name: pending_request.name,
-                    public_key: Some(pending_request.public_key),
-                    fingerprint: pending_request.fingerprint,
-                    state: DeviceState::Pending,
-                    approval_code_hash: Some(hash_secret(&approval_code)),
-                    approval_expires_at: Some(approval_expires_at),
-                    bootstrap_public_key: Some(pending_request.bootstrap_public_key),
-                })
-                .await?;
-            let token = random_token();
-            let session = state
-                .storage
-                .create_session(CreateSession {
-                    id: None,
-                    user_id: user.id,
-                    device_id: Some(device.id),
-                    token_hash: token_hash(&token),
-                    auth_scheme: "bearer".to_owned(),
-                    expires_at,
-                })
-                .await?;
-            let session_id = session.id;
-            (
-                session,
-                Some(token),
-                "pending".to_owned(),
-                Some(PendingDeviceResponse {
-                    device_id: device.id,
-                    session_id,
-                    approval_code,
-                    fingerprint: device.fingerprint,
-                    expires_at: approval_expires_at.to_rfc3339(),
-                }),
-            )
-        } else if let Some(device_id) = request.device_id {
-            let device = state.storage.find_device_by_id(device_id).await?;
-            if device.user_id != user.id
-                || !device.state.can_authenticate()
-                || device.revoked_at.is_some()
-                || device.public_key.is_none()
-            {
-                return Err(ServerError::Unauthorized);
-            }
-            let session = state
-                .storage
-                .create_session(CreateSession {
-                    id: None,
-                    user_id: user.id,
-                    device_id: Some(device_id),
-                    token_hash: token_hash(&random_token()),
-                    auth_scheme: "signed".to_owned(),
-                    expires_at,
-                })
-                .await?;
-            (session, None, "signed".to_owned(), None)
-        } else {
-            let token = random_token();
-            let session = state
-                .storage
-                .create_session(CreateSession {
-                    id: None,
-                    user_id: user.id,
-                    device_id: None,
-                    token_hash: token_hash(&token),
-                    auth_scheme: "bearer".to_owned(),
-                    expires_at,
-                })
-                .await?;
-            (session, Some(token), "bearer".to_owned(), None)
-        };
+    let (session, session_token, auth_scheme, pending_device) = if let Some(pending_request) =
+        request.pending_device
+    {
+        ensure_protocol(pending_request.protocol_version)?;
+        let approval_code = approval_code();
+        let approval_expires_at = Utc::now() + Duration::minutes(10);
+        let device = state
+            .storage
+            .create_device(CreateDevice {
+                id: None,
+                user_id: user.id,
+                name: pending_request.name,
+                public_key: Some(pending_request.public_key),
+                fingerprint: pending_request.fingerprint,
+                state: DeviceState::Pending,
+                approval_code_hash: Some(hmac_secret(&state, "device-approval", &approval_code)),
+                approval_expires_at: Some(approval_expires_at),
+                bootstrap_public_key: Some(pending_request.bootstrap_public_key),
+            })
+            .await?;
+        let token = random_token();
+        let session = state
+            .storage
+            .create_session(CreateSession {
+                id: None,
+                user_id: user.id,
+                device_id: Some(device.id),
+                token_hash: token_hash(&token),
+                auth_scheme: "bearer".to_owned(),
+                expires_at,
+            })
+            .await?;
+        let session_id = session.id;
+        (
+            session,
+            Some(token),
+            "pending".to_owned(),
+            Some(PendingDeviceResponse {
+                device_id: device.id,
+                session_id,
+                approval_code,
+                fingerprint: device.fingerprint,
+                expires_at: approval_expires_at.to_rfc3339(),
+            }),
+        )
+    } else if let Some(device_id) = request.device_id {
+        let device = state.storage.find_device_by_id(device_id).await?;
+        if device.user_id != user.id
+            || !device.state.can_authenticate()
+            || device.revoked_at.is_some()
+            || device.public_key.is_none()
+        {
+            return Err(ServerError::Unauthorized);
+        }
+        let session = state
+            .storage
+            .create_session(CreateSession {
+                id: None,
+                user_id: user.id,
+                device_id: Some(device_id),
+                token_hash: token_hash(&random_token()),
+                auth_scheme: "signed".to_owned(),
+                expires_at,
+            })
+            .await?;
+        (session, None, "signed".to_owned(), None)
+    } else {
+        let token = random_token();
+        let session = state
+            .storage
+            .create_session(CreateSession {
+                id: None,
+                user_id: user.id,
+                device_id: None,
+                token_hash: token_hash(&token),
+                auth_scheme: "bearer".to_owned(),
+                expires_at,
+            })
+            .await?;
+        (session, Some(token), "bearer".to_owned(), None)
+    };
 
     Ok(Json(OpaqueLoginFinishResponse {
         user_id: user.id,
@@ -429,7 +460,7 @@ async fn list_devices(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<DeviceResponse>>, ServerError> {
-    let auth = authenticate_context(&state, &headers).await?;
+    let auth = authenticate_trusted_context(&state, &headers).await?;
     let devices = state.storage.list_devices_for_user(auth.user_id).await?;
     Ok(Json(devices.into_iter().map(device_response).collect()))
 }
@@ -456,7 +487,10 @@ async fn lookup_approval_code(
     let (user_id, _) = require_trusted_current_device(&state, &headers).await?;
     let pending = state
         .storage
-        .find_pending_device_by_approval_hash(user_id, &hash_secret(&request.approval_code))
+        .find_pending_device_by_approval_hash(
+            user_id,
+            &hmac_secret(&state, "device-approval", &request.approval_code),
+        )
         .await?;
     Ok(Json(pending_device_summary(pending)?))
 }
@@ -471,7 +505,10 @@ async fn approve_device(
     let (user_id, current_device_id) = require_trusted_current_device(&state, &headers).await?;
     let pending = state
         .storage
-        .find_pending_device_by_approval_hash(user_id, &hash_secret(&request.approval_code))
+        .find_pending_device_by_approval_hash(
+            user_id,
+            &hmac_secret(&state, "device-approval", &request.approval_code),
+        )
         .await?;
     if pending.id != device_id {
         return Err(ServerError::BadRequest("device id mismatch"));
@@ -503,7 +540,7 @@ async fn revoke_device(
     Path(device_id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Json<DeviceResponse>, ServerError> {
-    let auth = authenticate_context(&state, &headers).await?;
+    let auth = authenticate_trusted_context(&state, &headers).await?;
     let target = state.storage.find_device_by_id(device_id).await?;
     if target.user_id != auth.user_id {
         return Err(ServerError::Forbidden);
@@ -580,7 +617,7 @@ async fn start_recovery_challenge(
             id: Some(challenge_id),
             user_id: auth.user_id,
             device_id,
-            challenge_hash: hash_secret(&challenge),
+            challenge_hash: hmac_secret(&state, "device-recovery-challenge", &challenge),
             expires_at,
         })
         .await?;
@@ -608,7 +645,11 @@ async fn recover_trust(
             request.challenge_id,
             auth.user_id,
             device_id,
-            &hash_secret(&request.challenge_response),
+            &hmac_secret(
+                &state,
+                "device-recovery-challenge",
+                &request.challenge_response,
+            ),
         )
         .await?;
     let trusted = state.storage.mark_device_trusted(device_id).await?;
@@ -624,7 +665,9 @@ async fn create_org(
     Json(request): Json<CreateOrgRequest>,
 ) -> Result<Json<OrgResponse>, ServerError> {
     ensure_protocol(request.protocol_version)?;
-    let user_id = authenticate(&state, &headers).await?;
+    let user_id = authenticate_trusted_context(&state, &headers)
+        .await?
+        .user_id;
     let org = state
         .storage
         .create_org(CreateOrg {
@@ -652,7 +695,9 @@ async fn list_orgs(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<OrgResponse>>, ServerError> {
-    let user_id = authenticate(&state, &headers).await?;
+    let user_id = authenticate_trusted_context(&state, &headers)
+        .await?
+        .user_id;
     let orgs = state.storage.list_orgs_for_user(user_id).await?;
     Ok(Json(
         orgs.into_iter()
@@ -669,7 +714,9 @@ async fn get_org(
     headers: HeaderMap,
     Path(org_id): Path<Uuid>,
 ) -> Result<Json<OrgResponse>, ServerError> {
-    let user_id = authenticate(&state, &headers).await?;
+    let user_id = authenticate_trusted_context(&state, &headers)
+        .await?
+        .user_id;
     let member = state.storage.find_org_member(org_id, user_id).await?;
     if member.state != MemberState::Active {
         return Err(ServerError::Forbidden);
@@ -686,7 +733,9 @@ async fn list_org_members(
     headers: HeaderMap,
     Path(org_id): Path<Uuid>,
 ) -> Result<Json<Value>, ServerError> {
-    let user_id = authenticate(&state, &headers).await?;
+    let user_id = authenticate_trusted_context(&state, &headers)
+        .await?
+        .user_id;
     ensure_org_manager(&state, org_id, user_id).await?;
     let members = state.storage.list_org_members(org_id).await?;
     Ok(Json(json!(
@@ -704,7 +753,9 @@ async fn add_org_member(
     Json(request): Json<AddOrgMemberRequest>,
 ) -> Result<Json<Value>, ServerError> {
     ensure_protocol(request.protocol_version)?;
-    let user_id = authenticate(&state, &headers).await?;
+    let user_id = authenticate_trusted_context(&state, &headers)
+        .await?
+        .user_id;
     ensure_org_manager(&state, org_id, user_id).await?;
     let member = state
         .storage
@@ -766,7 +817,9 @@ async fn create_vault_inner(
     kind: VaultKind,
     initial_key_wrapping: Value,
 ) -> Result<Json<VaultResponse>, ServerError> {
-    let user_id = authenticate(&state, &headers).await?;
+    let user_id = authenticate_trusted_context(&state, &headers)
+        .await?
+        .user_id;
     if let Some(org_id) = org_id {
         ensure_org_vault_creator(&state, org_id, user_id).await?;
     }
@@ -810,7 +863,9 @@ async fn list_vaults(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<VaultResponse>>, ServerError> {
-    let user_id = authenticate(&state, &headers).await?;
+    let user_id = authenticate_trusted_context(&state, &headers)
+        .await?
+        .user_id;
     let vaults = state.storage.list_vaults_for_user(user_id).await?;
     Ok(Json(vaults.into_iter().map(vault_response).collect()))
 }
@@ -822,7 +877,9 @@ async fn add_vault_member(
     Json(request): Json<AddVaultMemberRequest>,
 ) -> Result<Json<Value>, ServerError> {
     ensure_protocol(request.protocol_version)?;
-    let user_id = authenticate(&state, &headers).await?;
+    let user_id = authenticate_trusted_context(&state, &headers)
+        .await?
+        .user_id;
     ensure_vault_admin(&state, vault_id, user_id).await?;
     let status = state.storage.rotation_status(vault_id).await?;
     let member = state
@@ -856,7 +913,9 @@ async fn remove_vault_member(
     headers: HeaderMap,
     Path((vault_id, removed_user_id)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode, ServerError> {
-    let user_id = authenticate(&state, &headers).await?;
+    let user_id = authenticate_trusted_context(&state, &headers)
+        .await?
+        .user_id;
     ensure_vault_admin(&state, vault_id, user_id).await?;
     state
         .storage
@@ -876,7 +935,9 @@ async fn create_item(
         return Err(ServerError::BadRequest("vault id mismatch"));
     }
 
-    let user_id = authenticate(&state, &headers).await?;
+    let user_id = authenticate_trusted_context(&state, &headers)
+        .await?
+        .user_id;
     ensure_vault_writer(&state, vault_id, user_id).await?;
 
     let revision = state
@@ -905,7 +966,9 @@ async fn update_item(
         return Err(ServerError::BadRequest("item path mismatch"));
     }
 
-    let user_id = authenticate(&state, &headers).await?;
+    let user_id = authenticate_trusted_context(&state, &headers)
+        .await?
+        .user_id;
     ensure_vault_writer(&state, vault_id, user_id).await?;
 
     let revision = state
@@ -929,14 +992,9 @@ async fn sync(
     Json(request): Json<SyncRequest>,
 ) -> Result<Json<SyncResponse>, ServerError> {
     ensure_protocol(request.protocol_version)?;
-    let auth = authenticate_context(&state, &headers).await?;
-    if let Some(device_id) = auth.device_id {
-        let device = state.storage.find_device_by_id(device_id).await?;
-        if device.user_id != auth.user_id || device.state != DeviceState::Trusted {
-            return Err(ServerError::Forbidden);
-        }
-    }
-    let user_id = auth.user_id;
+    let user_id = authenticate_trusted_context(&state, &headers)
+        .await?
+        .user_id;
     let mut vaults = Vec::with_capacity(request.vaults.len());
 
     for cursor in request.vaults {
@@ -980,7 +1038,9 @@ async fn sync_status(
     Json(request): Json<SyncStatusRequest>,
 ) -> Result<Json<SyncStatusResponse>, ServerError> {
     ensure_protocol(request.protocol_version)?;
-    let user_id = authenticate(&state, &headers).await?;
+    let user_id = authenticate_trusted_context(&state, &headers)
+        .await?
+        .user_id;
     let mut vaults = Vec::with_capacity(request.vaults.len());
 
     for cursor in request.vaults {
@@ -1012,7 +1072,9 @@ async fn rotation_status(
     headers: HeaderMap,
     Path(vault_id): Path<Uuid>,
 ) -> Result<Json<RotationStatusResponse>, ServerError> {
-    let user_id = authenticate(&state, &headers).await?;
+    let user_id = authenticate_trusted_context(&state, &headers)
+        .await?
+        .user_id;
     ensure_vault_member(&state, vault_id, user_id).await?;
     let status = state.storage.rotation_status(vault_id).await?;
     Ok(Json(RotationStatusResponse {
@@ -1029,7 +1091,9 @@ async fn rotate_key(
     Json(request): Json<RotateVaultKeyRequest>,
 ) -> Result<Json<RotationStatusResponse>, ServerError> {
     ensure_protocol(request.protocol_version)?;
-    let user_id = authenticate(&state, &headers).await?;
+    let user_id = authenticate_trusted_context(&state, &headers)
+        .await?
+        .user_id;
     ensure_vault_admin(&state, vault_id, user_id).await?;
     let to_generation = request.to_generation;
     let status = state

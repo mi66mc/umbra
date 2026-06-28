@@ -26,9 +26,10 @@ use umbra_protocol::{
     DeviceResponse, ItemRevisionResponse, OpaqueLoginFinishRequest, OpaqueLoginFinishResponse,
     OpaqueLoginStartRequest, OpaqueLoginStartResponse, OpaqueRegisterFinishRequest,
     OpaqueRegisterStartRequest, OpaqueRegisterStartResponse, OrgResponse, PROTOCOL_VERSION,
-    PendingDeviceRequest, PendingDeviceSummary, RecoverTrustRequest, RecoveryChallengeStartRequest,
-    RecoveryChallengeStartResponse, RegisterResponse, SyncRequest, SyncResponse, SyncStatusRequest,
-    SyncStatusResponse, UpdateItemRequest, VaultResponse, VaultStatusCursor, VaultSyncCursor,
+    PendingDeviceRequest, PendingDeviceSummary, RecoverTrustRequest, RecoverTrustResponse,
+    RecoveryChallengeStartRequest, RecoveryChallengeStartResponse, RegisterResponse, SyncRequest,
+    SyncResponse, SyncStatusRequest, SyncStatusResponse, UpdateItemRequest, VaultResponse,
+    VaultStatusCursor, VaultSyncCursor,
 };
 use umbra_storage::Storage;
 use uuid::Uuid;
@@ -104,7 +105,7 @@ async fn health_responds_without_database_query() {
 
 #[tokio::test]
 #[serial(postgres)]
-async fn opaque_login_token_can_create_org_and_personal_vault() {
+async fn opaque_legacy_bearer_cannot_access_account_apis() {
     let Some(storage) = fresh_test_storage().await else {
         return;
     };
@@ -114,7 +115,7 @@ async fn opaque_login_token_can_create_org_and_personal_vault() {
 
     let token = register_and_login(app.clone(), email, password).await;
 
-    let (status, org): (StatusCode, OrgResponse) = json_request(
+    let (status, _body): (StatusCode, serde_json::Value) = json_request(
         app.clone(),
         Method::POST,
         "/api/v1/orgs",
@@ -125,10 +126,9 @@ async fn opaque_login_token_can_create_org_and_personal_vault() {
         },
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(org.name, "BlackWire");
+    assert_eq!(status, StatusCode::FORBIDDEN);
 
-    let (status, vault): (StatusCode, VaultResponse) = json_request(
+    let (status, _body): (StatusCode, serde_json::Value) = json_request(
         app,
         Method::POST,
         "/api/v1/vaults",
@@ -142,11 +142,7 @@ async fn opaque_login_token_can_create_org_and_personal_vault() {
         },
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(vault.org_id, None);
-    assert_eq!(vault.vault_revision, 0);
-    assert!(vault.access_revision > 0);
-    assert_eq!(vault.current_key_generation, 1);
+    assert_eq!(status, StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]
@@ -156,14 +152,20 @@ async fn create_vault_returns_client_supplied_id() {
         return;
     };
     let app = router(test_state_with_storage(storage));
-    let token = register_and_login(app.clone(), "vault-id@example.com", b"vault id password").await;
+    let login = register_and_signed_login(
+        app.clone(),
+        "vault-id@example.com",
+        b"vault id password",
+        "vault-id",
+    )
+    .await;
     let requested_vault_id = Uuid::new_v4();
 
-    let (status, vault): (StatusCode, VaultResponse) = json_request(
+    let (status, vault): (StatusCode, VaultResponse) = signed_json_request(
         app,
         Method::POST,
         "/api/v1/vaults",
-        Some(&token),
+        login.auth("create-vault-client-id"),
         &CreateVaultRequest {
             protocol_version: PROTOCOL_VERSION,
             vault_id: Some(requested_vault_id),
@@ -188,15 +190,22 @@ async fn viewer_cannot_create_item() {
     };
     let app = router(test_state_with_storage(storage));
 
-    let owner_token = register_and_login(app.clone(), "owner@example.com", b"owner password").await;
-    let viewer_token =
-        register_and_login(app.clone(), "viewer@example.com", b"viewer password").await;
+    let owner =
+        register_and_signed_login(app.clone(), "owner@example.com", b"owner password", "owner")
+            .await;
+    let viewer = register_and_signed_login(
+        app.clone(),
+        "viewer@example.com",
+        b"viewer password",
+        "viewer",
+    )
+    .await;
 
-    let (_status, owner_vault): (StatusCode, VaultResponse) = json_request(
+    let (_status, owner_vault): (StatusCode, VaultResponse) = signed_json_request(
         app.clone(),
         Method::POST,
         "/api/v1/vaults",
-        Some(&owner_token),
+        owner.auth("owner-create-shared-vault"),
         &CreateVaultRequest {
             protocol_version: PROTOCOL_VERSION,
             vault_id: None,
@@ -208,11 +217,11 @@ async fn viewer_cannot_create_item() {
     .await;
 
     let viewer_user_id = login_user_id(app.clone(), "viewer@example.com", b"viewer password").await;
-    let (status, _body): (StatusCode, serde_json::Value) = json_request(
+    let (status, _body): (StatusCode, serde_json::Value) = signed_json_request(
         app.clone(),
         Method::POST,
         &format!("/api/v1/vaults/{}/members", owner_vault.vault_id),
-        Some(&owner_token),
+        owner.auth("owner-add-viewer"),
         &AddVaultMemberRequest {
             protocol_version: PROTOCOL_VERSION,
             user_id: viewer_user_id,
@@ -223,11 +232,11 @@ async fn viewer_cannot_create_item() {
     .await;
     assert_eq!(status, StatusCode::OK);
 
-    let (status, _body): (StatusCode, serde_json::Value) = json_request(
+    let (status, _body): (StatusCode, serde_json::Value) = signed_json_request(
         app,
         Method::POST,
         &format!("/api/v1/vaults/{}/items", owner_vault.vault_id),
-        Some(&viewer_token),
+        viewer.auth("viewer-create-item"),
         &CreateItemRequest {
             protocol_version: PROTOCOL_VERSION,
             vault_id: owner_vault.vault_id,
@@ -248,13 +257,15 @@ async fn owner_can_create_update_and_sync_item_revisions() {
         return;
     };
     let app = router(test_state_with_storage(storage));
-    let token = register_and_login(app.clone(), "items@example.com", b"items password").await;
+    let login =
+        register_and_signed_login(app.clone(), "items@example.com", b"items password", "items")
+            .await;
 
-    let (_status, vault): (StatusCode, VaultResponse) = json_request(
+    let (_status, vault): (StatusCode, VaultResponse) = signed_json_request(
         app.clone(),
         Method::POST,
         "/api/v1/vaults",
-        Some(&token),
+        login.auth("items-create-vault"),
         &CreateVaultRequest {
             protocol_version: PROTOCOL_VERSION,
             vault_id: None,
@@ -265,11 +276,11 @@ async fn owner_can_create_update_and_sync_item_revisions() {
     )
     .await;
 
-    let (status, created): (StatusCode, ItemRevisionResponse) = json_request(
+    let (status, created): (StatusCode, ItemRevisionResponse) = signed_json_request(
         app.clone(),
         Method::POST,
         &format!("/api/v1/vaults/{}/items", vault.vault_id),
-        Some(&token),
+        login.auth("items-create-item"),
         &CreateItemRequest {
             protocol_version: PROTOCOL_VERSION,
             vault_id: vault.vault_id,
@@ -283,14 +294,14 @@ async fn owner_can_create_update_and_sync_item_revisions() {
     assert_eq!(created.revision, 1);
     assert_eq!(created.vault_revision, 1);
 
-    let (status, updated): (StatusCode, ItemRevisionResponse) = json_request(
+    let (status, updated): (StatusCode, ItemRevisionResponse) = signed_json_request(
         app.clone(),
         Method::PUT,
         &format!(
             "/api/v1/vaults/{}/items/{}",
             vault.vault_id, created.item_id
         ),
-        Some(&token),
+        login.auth("items-update-item"),
         &UpdateItemRequest {
             protocol_version: PROTOCOL_VERSION,
             vault_id: vault.vault_id,
@@ -304,11 +315,11 @@ async fn owner_can_create_update_and_sync_item_revisions() {
     assert_eq!(updated.revision, 2);
     assert_eq!(updated.vault_revision, 2);
 
-    let (status, sync): (StatusCode, SyncResponse) = json_request(
+    let (status, sync): (StatusCode, SyncResponse) = signed_json_request(
         app,
         Method::POST,
         "/api/v1/sync",
-        Some(&token),
+        login.auth("items-sync"),
         &SyncRequest {
             protocol_version: PROTOCOL_VERSION,
             device_id: uuid::Uuid::new_v4(),
@@ -344,19 +355,26 @@ async fn sync_status_reports_item_changes() {
         return;
     };
     let app = router(test_state_with_storage(storage));
-    let token = register_and_login(app.clone(), "sync-status@example.com", b"sync status").await;
-    let non_member_token = register_and_login(
+    let login = register_and_signed_login(
+        app.clone(),
+        "sync-status@example.com",
+        b"sync status",
+        "sync-status",
+    )
+    .await;
+    let non_member = register_and_signed_login(
         app.clone(),
         "sync-status-other@example.com",
         b"sync status other",
+        "sync-status-other",
     )
     .await;
 
-    let (_status, vault): (StatusCode, VaultResponse) = json_request(
+    let (_status, vault): (StatusCode, VaultResponse) = signed_json_request(
         app.clone(),
         Method::POST,
         "/api/v1/vaults",
-        Some(&token),
+        login.auth("sync-status-create-vault"),
         &CreateVaultRequest {
             protocol_version: PROTOCOL_VERSION,
             vault_id: None,
@@ -367,11 +385,11 @@ async fn sync_status_reports_item_changes() {
     )
     .await;
 
-    let (status, created): (StatusCode, ItemRevisionResponse) = json_request(
+    let (status, created): (StatusCode, ItemRevisionResponse) = signed_json_request(
         app.clone(),
         Method::POST,
         &format!("/api/v1/vaults/{}/items", vault.vault_id),
-        Some(&token),
+        login.auth("sync-status-create-item"),
         &CreateItemRequest {
             protocol_version: PROTOCOL_VERSION,
             vault_id: vault.vault_id,
@@ -392,11 +410,11 @@ async fn sync_status_reports_item_changes() {
             known_access_revision: 0,
         }],
     };
-    let (status, sync_status): (StatusCode, SyncStatusResponse) = json_request(
+    let (status, sync_status): (StatusCode, SyncStatusResponse) = signed_json_request(
         app.clone(),
         Method::POST,
         "/api/v1/sync/status",
-        Some(&token),
+        login.auth("sync-status-first"),
         &status_request,
     )
     .await;
@@ -412,11 +430,11 @@ async fn sync_status_reports_item_changes() {
     assert!(sync_status.vaults[0].items_changed);
     assert!(sync_status.vaults[0].access_changed);
 
-    let (status, unchanged): (StatusCode, SyncStatusResponse) = json_request(
+    let (status, unchanged): (StatusCode, SyncStatusResponse) = signed_json_request(
         app.clone(),
         Method::POST,
         "/api/v1/sync/status",
-        Some(&token),
+        login.auth("sync-status-unchanged"),
         &SyncStatusRequest {
             protocol_version: PROTOCOL_VERSION,
             vaults: vec![VaultStatusCursor {
@@ -431,11 +449,11 @@ async fn sync_status_reports_item_changes() {
     assert!(!unchanged.vaults[0].items_changed);
     assert!(!unchanged.vaults[0].access_changed);
 
-    let (status, _body): (StatusCode, serde_json::Value) = json_request(
+    let (status, _body): (StatusCode, serde_json::Value) = signed_json_request(
         app,
         Method::POST,
         "/api/v1/sync/status",
-        Some(&non_member_token),
+        non_member.auth("sync-status-non-member"),
         &status_request,
     )
     .await;
@@ -449,13 +467,19 @@ async fn create_item_returns_client_supplied_id() {
         return;
     };
     let app = router(test_state_with_storage(storage));
-    let token = register_and_login(app.clone(), "item-id@example.com", b"item id password").await;
+    let login = register_and_signed_login(
+        app.clone(),
+        "item-id@example.com",
+        b"item id password",
+        "item-id",
+    )
+    .await;
 
-    let (_status, vault): (StatusCode, VaultResponse) = json_request(
+    let (_status, vault): (StatusCode, VaultResponse) = signed_json_request(
         app.clone(),
         Method::POST,
         "/api/v1/vaults",
-        Some(&token),
+        login.auth("item-id-create-vault"),
         &CreateVaultRequest {
             protocol_version: PROTOCOL_VERSION,
             vault_id: None,
@@ -467,11 +491,11 @@ async fn create_item_returns_client_supplied_id() {
     .await;
     let requested_item_id = Uuid::new_v4();
 
-    let (status, created): (StatusCode, ItemRevisionResponse) = json_request(
+    let (status, created): (StatusCode, ItemRevisionResponse) = signed_json_request(
         app,
         Method::POST,
         &format!("/api/v1/vaults/{}/items", vault.vault_id),
-        Some(&token),
+        login.auth("item-id-create-item"),
         &CreateItemRequest {
             protocol_version: PROTOCOL_VERSION,
             vault_id: vault.vault_id,
@@ -777,6 +801,81 @@ async fn pending_device_cannot_access_sync() {
 
 #[tokio::test]
 #[serial(postgres)]
+async fn pending_device_cannot_access_account_apis() {
+    let Some(storage) = fresh_test_storage().await else {
+        return;
+    };
+    let app = router(test_state_with_storage(storage));
+    let trusted = register_and_signed_login(
+        app.clone(),
+        "pending-account-apis@example.com",
+        b"pending account apis password",
+        "pending-account-apis-trusted",
+    )
+    .await;
+    let pending = login_pending_device_existing_user(
+        app.clone(),
+        "pending-account-apis@example.com",
+        b"pending account apis password",
+        "pending-account-apis-pending",
+    )
+    .await;
+
+    let (status, _body): (StatusCode, serde_json::Value) = json_request(
+        app.clone(),
+        Method::POST,
+        "/api/v1/orgs",
+        Some(&pending.session_token),
+        &CreateOrgRequest {
+            protocol_version: PROTOCOL_VERSION,
+            name: "Pending Org".to_owned(),
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let (status, _body): (StatusCode, serde_json::Value) = json_request(
+        app.clone(),
+        Method::POST,
+        "/api/v1/vaults",
+        Some(&pending.session_token),
+        &CreateVaultRequest {
+            protocol_version: PROTOCOL_VERSION,
+            vault_id: None,
+            name: "Pending Vault".to_owned(),
+            kind: VaultKind::Personal,
+            initial_key_wrapping: json!({"wrapped": true}),
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let (status, _body): (StatusCode, serde_json::Value) = json_request(
+        app.clone(),
+        Method::POST,
+        "/api/v1/sync/status",
+        Some(&pending.session_token),
+        &SyncStatusRequest {
+            protocol_version: PROTOCOL_VERSION,
+            vaults: vec![],
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let (status, _body): (StatusCode, serde_json::Value) = json_request(
+        app,
+        Method::POST,
+        &format!("/api/v1/devices/{}/revoke", trusted.device_id),
+        Some(&pending.session_token),
+        &json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+#[serial(postgres)]
 async fn trusted_device_approves_pending_device_and_pending_downloads_bootstrap() {
     let Some(storage) = fresh_test_storage().await else {
         return;
@@ -882,10 +981,7 @@ async fn recovery_trust_requires_valid_challenge_response() {
         },
     )
     .await;
-    assert!(matches!(
-        status,
-        StatusCode::NOT_FOUND | StatusCode::UNAUTHORIZED
-    ));
+    assert_eq!(status, StatusCode::NOT_FOUND);
 
     let (status, bootstrap): (StatusCode, DeviceBootstrapResponse) = json_request(
         app,
@@ -897,6 +993,120 @@ async fn recovery_trust_requires_valid_challenge_response() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(bootstrap.state, DeviceState::Pending);
+}
+
+#[tokio::test]
+#[serial(postgres)]
+async fn recovery_trust_accepts_valid_challenge_and_rejects_replay() {
+    let Some(storage) = fresh_test_storage().await else {
+        return;
+    };
+    let app = router(test_state_with_storage(storage));
+    let pending = register_and_pending_login(
+        app.clone(),
+        "recovery-valid@example.com",
+        b"recovery valid password",
+    )
+    .await;
+    let account_private_key = pending
+        .account_private_key
+        .as_ref()
+        .expect("test pending login includes account private key");
+
+    let (status, challenge): (StatusCode, RecoveryChallengeStartResponse) = json_request(
+        app.clone(),
+        Method::POST,
+        &format!("/api/v1/devices/{}/recovery-challenge", pending.device_id),
+        Some(&pending.session_token),
+        &RecoveryChallengeStartRequest {
+            protocol_version: PROTOCOL_VERSION,
+            device_id: pending.device_id,
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let envelope: umbra_crypto::RecoveryChallengeEnvelopeV1 =
+        serde_json::from_value(challenge.encrypted_challenge).unwrap();
+    let aad = umbra_crypto::AadV1::recovery_challenge(
+        pending.device_id.to_string(),
+        challenge.challenge_id.to_string(),
+    );
+    let plaintext =
+        umbra_crypto::decrypt_recovery_challenge(account_private_key, &aad, &envelope).unwrap();
+    let challenge_response = String::from_utf8(plaintext).unwrap();
+
+    let (status, recovered): (StatusCode, RecoverTrustResponse) = json_request(
+        app.clone(),
+        Method::POST,
+        &format!("/api/v1/devices/{}/recover-trust", pending.device_id),
+        Some(&pending.session_token),
+        &RecoverTrustRequest {
+            protocol_version: PROTOCOL_VERSION,
+            challenge_id: challenge.challenge_id,
+            challenge_response: challenge_response.clone(),
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(recovered.device_id, pending.device_id);
+    assert_eq!(recovered.state, DeviceState::Trusted);
+
+    let (status, _body): (StatusCode, serde_json::Value) = json_request(
+        app,
+        Method::POST,
+        &format!("/api/v1/devices/{}/recover-trust", pending.device_id),
+        Some(&pending.session_token),
+        &RecoverTrustRequest {
+            protocol_version: PROTOCOL_VERSION,
+            challenge_id: challenge.challenge_id,
+            challenge_response,
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+#[serial(postgres)]
+async fn recovery_challenge_rejects_device_mismatch() {
+    let Some(storage) = fresh_test_storage().await else {
+        return;
+    };
+    let app = router(test_state_with_storage(storage));
+    let pending = register_and_pending_login(
+        app.clone(),
+        "recovery-mismatch@example.com",
+        b"recovery mismatch password",
+    )
+    .await;
+    let other_device_id = Uuid::new_v4();
+
+    let (status, _body): (StatusCode, serde_json::Value) = json_request(
+        app.clone(),
+        Method::POST,
+        &format!("/api/v1/devices/{}/recovery-challenge", pending.device_id),
+        Some(&pending.session_token),
+        &RecoveryChallengeStartRequest {
+            protocol_version: PROTOCOL_VERSION,
+            device_id: other_device_id,
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, _body): (StatusCode, serde_json::Value) = json_request(
+        app,
+        Method::POST,
+        &format!("/api/v1/devices/{other_device_id}/recovery-challenge"),
+        Some(&pending.session_token),
+        &RecoveryChallengeStartRequest {
+            protocol_version: PROTOCOL_VERSION,
+            device_id: other_device_id,
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
 }
 
 async fn register_and_login(app: Router, email: &str, password: &[u8]) -> String {
@@ -1023,6 +1233,7 @@ struct PendingLogin {
     session_token: String,
     approval_code: String,
     bootstrap_public_key: String,
+    account_private_key: Option<umbra_crypto::UserPrivateKey>,
 }
 
 async fn register_and_signed_login(
@@ -1069,7 +1280,10 @@ async fn register_and_pending_login(app: Router, email: &str, password: &[u8]) -
     )
     .await;
 
-    login_pending_device_existing_user(app, email, password, "pending-login").await
+    let mut pending =
+        login_pending_device_existing_user(app, email, password, "pending-login").await;
+    pending.account_private_key = Some(account_keypair.private_key);
+    pending
 }
 
 async fn login_pending_device_existing_user(
@@ -1101,6 +1315,7 @@ async fn login_pending_device_existing_user(
             .expect("pending login returns a bearer token"),
         approval_code: pending.approval_code,
         bootstrap_public_key,
+        account_private_key: None,
     }
 }
 
