@@ -1,4 +1,7 @@
 mod convert;
+mod devices;
+mod sessions;
+mod users;
 
 use sqlx::{SqlitePool, sqlite::SqlitePoolOptions};
 

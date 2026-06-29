@@ -55,6 +55,69 @@ async fn sqlite_migrations_create_required_schema() {
 }
 
 #[tokio::test]
+async fn sqlite_users_devices_and_sessions_flow() {
+    let storage = crate::sqlite::SqliteStorage::connect("sqlite::memory:", 1)
+        .await
+        .unwrap();
+    umbra_migrations::run_sqlite(storage.pool()).await.unwrap();
+
+    let user = create_test_user_on(&storage, "sqlite-user@example.com").await;
+    let auth = storage
+        .upsert_user_auth(UpsertUserAuth {
+            user_id: user.id,
+            auth_method: "opaque".to_owned(),
+            auth_data: serde_json::json!({"server_setup": "opaque-record"}),
+        })
+        .await
+        .unwrap();
+    assert_eq!(auth.user_id, user.id);
+    assert_eq!(
+        storage.find_user_auth(user.id).await.unwrap().auth_method,
+        "opaque"
+    );
+
+    let device = storage
+        .create_device(CreateDevice {
+            id: None,
+            user_id: user.id,
+            name: "sqlite laptop".to_owned(),
+            public_key: Some("device-public-key".to_owned()),
+            fingerprint: "SHA256:sqlite".to_owned(),
+            state: DeviceState::Trusted,
+            approval_code_hash: None,
+            approval_expires_at: None,
+            bootstrap_public_key: None,
+        })
+        .await
+        .unwrap();
+
+    let session = storage
+        .create_session(CreateSession {
+            id: None,
+            user_id: user.id,
+            device_id: Some(device.id),
+            token_hash: "sqlite-token-hash".to_owned(),
+            auth_scheme: "signed".to_owned(),
+            expires_at: chrono::Utc::now() + chrono::Duration::minutes(10),
+        })
+        .await
+        .unwrap();
+
+    let loaded_session = storage.find_active_session_by_id(session.id).await.unwrap();
+    assert_eq!(loaded_session.device_id, Some(device.id));
+    assert_eq!(loaded_session.auth_scheme, "signed");
+
+    storage
+        .remember_session_nonce(session.id, "nonce-1")
+        .await
+        .unwrap();
+    assert!(matches!(
+        storage.remember_session_nonce(session.id, "nonce-1").await,
+        Err(StorageError::Conflict)
+    ));
+}
+
+#[tokio::test]
 #[serial(postgres)]
 async fn postgres_migrations_create_required_schema() {
     let Some(storage) = fresh_test_storage().await else {
@@ -526,6 +589,10 @@ async fn fresh_test_storage() -> Option<Storage> {
 }
 
 async fn create_test_user(storage: &Storage, email: &str) -> UserRecord {
+    create_test_user_on(storage, email).await
+}
+
+async fn create_test_user_on<S: StorageBackend + ?Sized>(storage: &S, email: &str) -> UserRecord {
     storage
         .create_user(CreateUser {
             id: None,

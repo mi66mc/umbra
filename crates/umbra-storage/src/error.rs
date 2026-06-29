@@ -10,6 +10,8 @@ pub enum StorageError {
     Forbidden,
     #[error("invalid database value for {field}: {value}")]
     InvalidDatabaseValue { field: &'static str, value: String },
+    #[error("operation is not supported by this storage backend: {0}")]
+    UnsupportedBackendOperation(&'static str),
 }
 
 pub(crate) fn map_sqlx_error(error: sqlx::Error) -> StorageError {
