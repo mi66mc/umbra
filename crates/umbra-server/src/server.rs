@@ -1,43 +1,90 @@
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
-use sqlx::postgres::PgPoolOptions;
 use tokio::{net::TcpListener, sync::Mutex};
 use tracing::{info, warn};
 use umbra_migrations::MigrationStatus;
-use umbra_storage::Storage;
+use umbra_storage::{PostgresStorage, SqliteStorage, StorageBackend};
 
-use crate::config::AppConfig;
+use crate::config::{AppConfig, DatabaseBackend};
 use crate::error::ServerError;
 use crate::http::router;
-use crate::state::AppState;
+use crate::state::{AppState, MigrationPool};
 use crate::util::opaque_server_setup_from_config;
 
-pub(crate) async fn connect_storage(config: &AppConfig) -> Result<Storage, ServerError> {
-    let pool = PgPoolOptions::new()
-        .max_connections(config.database.max_connections)
-        .connect(&config.database.url)
-        .await?;
-    Ok(Storage::from_pool(pool))
+pub(crate) enum ConnectedStorage {
+    Postgres(PostgresStorage),
+    Sqlite(SqliteStorage),
+}
+
+impl ConnectedStorage {
+    pub(crate) fn backend(self) -> Arc<dyn StorageBackend> {
+        match self {
+            ConnectedStorage::Postgres(storage) => Arc::new(storage),
+            ConnectedStorage::Sqlite(storage) => Arc::new(storage),
+        }
+    }
+
+    pub(crate) fn migration_pool(&self) -> MigrationPool {
+        match self {
+            ConnectedStorage::Postgres(storage) => MigrationPool::Postgres(storage.pool().clone()),
+            ConnectedStorage::Sqlite(storage) => MigrationPool::Sqlite(storage.pool().clone()),
+        }
+    }
+}
+
+pub(crate) async fn connect_storage(config: &AppConfig) -> Result<ConnectedStorage, ServerError> {
+    match config.database.backend {
+        DatabaseBackend::Postgres => Ok(ConnectedStorage::Postgres(
+            PostgresStorage::connect(&config.database.url, config.database.max_connections).await?,
+        )),
+        DatabaseBackend::Sqlite => Ok(ConnectedStorage::Sqlite(
+            SqliteStorage::connect(&config.database.url, config.database.max_connections).await?,
+        )),
+    }
+}
+
+pub(crate) async fn run_migrations(storage: &ConnectedStorage) -> Result<(), ServerError> {
+    match storage {
+        ConnectedStorage::Postgres(storage) => {
+            umbra_migrations::run_postgres(storage.pool()).await?
+        }
+        ConnectedStorage::Sqlite(storage) => umbra_migrations::run_sqlite(storage.pool()).await?,
+    }
+    Ok(())
+}
+
+pub(crate) async fn migration_status(
+    storage: &ConnectedStorage,
+) -> Result<MigrationStatus, ServerError> {
+    Ok(match storage {
+        ConnectedStorage::Postgres(storage) => {
+            umbra_migrations::status_postgres(storage.pool()).await?
+        }
+        ConnectedStorage::Sqlite(storage) => {
+            umbra_migrations::status_sqlite(storage.pool()).await?
+        }
+    })
 }
 
 pub(crate) async fn serve(config: AppConfig) -> Result<(), ServerError> {
     let storage = connect_storage(&config).await?;
     if config.migrations.auto_migrate {
-        umbra_migrations::run(storage.pool()).await?;
+        run_migrations(&storage).await?;
     }
 
     if config.migrations.require_latest
-        && umbra_migrations::status(storage.pool()).await? != MigrationStatus::Clean
+        && migration_status(&storage).await? != MigrationStatus::Clean
     {
         return Err(ServerError::MigrationsPending);
     }
 
     let opaque_setup = opaque_server_setup_from_config(&config)?;
-    let postgres_pool = storage.pool().clone();
+    let migration_pool = storage.migration_pool();
+    let storage = storage.backend();
     let state = AppState {
         config: config.clone(),
-        storage: Arc::new(storage),
-        postgres_pool: Some(postgres_pool),
+        storage,
+        migration_pool,
         opaque_server_setup: Arc::new(opaque_setup),
         pending_logins: Arc::new(Mutex::new(HashMap::new())),
     };
@@ -62,14 +109,14 @@ pub(crate) async fn serve(config: AppConfig) -> Result<(), ServerError> {
 
 pub(crate) async fn migrate(config: AppConfig) -> Result<(), ServerError> {
     let storage = connect_storage(&config).await?;
-    umbra_migrations::run(storage.pool()).await?;
+    run_migrations(&storage).await?;
     println!("migrations applied");
     Ok(())
 }
 
 pub(crate) async fn migrate_status(config: AppConfig) -> Result<(), ServerError> {
     let storage = connect_storage(&config).await?;
-    println!("{:?}", umbra_migrations::status(storage.pool()).await?);
+    println!("{:?}", migration_status(&storage).await?);
     Ok(())
 }
 
@@ -83,10 +130,7 @@ pub(crate) async fn doctor(config: AppConfig) -> Result<(), ServerError> {
 
     let storage = connect_storage(&config).await?;
     println!("database: ok");
-    println!(
-        "migrations: {:?}",
-        umbra_migrations::status(storage.pool()).await?
-    );
+    println!("migrations: {:?}", migration_status(&storage).await?);
     if config.auth.opaque.server_setup.is_some() {
         println!("opaque_server_setup: persistent");
     } else if config.auth.opaque.allow_ephemeral_setup {

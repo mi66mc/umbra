@@ -34,12 +34,13 @@ use umbra_protocol::{
 use umbra_storage::Storage;
 use uuid::Uuid;
 
-use crate::config::AppConfig;
+use crate::config::{AppConfig, DatabaseBackend};
 use crate::error::ServerError;
 use crate::http::{health, router};
 use crate::signed_auth::{
     AUTHENTICATED_DEVICE_HEADER, AUTHENTICATED_USER_HEADER, authenticated_user_from_headers,
 };
+use crate::state::MigrationPool;
 use crate::state::{AppState, OpaqueCipherSuite};
 use crate::util::{
     decode_b64, encode_b64, generate_opaque_server_setup_secret, opaque_server_setup_from_config,
@@ -117,6 +118,23 @@ fn database_backend_accepts_sqlite_from_toml() {
     );
     assert_eq!(config.database.url, "sqlite://./umbra-dev.db?mode=rwc");
     assert_eq!(config.database.max_connections, 5);
+}
+
+#[tokio::test]
+async fn sqlite_server_health_and_migration_status_work() {
+    let mut config = AppConfig::default();
+    config.database.backend = DatabaseBackend::Sqlite;
+    config.database.url = "sqlite::memory:".to_owned();
+    config.migrations.auto_migrate = true;
+    config.auth.opaque.allow_ephemeral_setup = true;
+
+    let storage = crate::server::connect_storage(&config).await.unwrap();
+    crate::server::run_migrations(&storage).await.unwrap();
+
+    assert_eq!(
+        crate::server::migration_status(&storage).await.unwrap(),
+        umbra_migrations::MigrationStatus::Clean
+    );
 }
 
 #[test]
@@ -1635,7 +1653,7 @@ fn test_state_with_storage(storage: Storage) -> AppState {
         opaque_server_setup: Arc::new(opaque_server_setup_from_config(&config).unwrap()),
         config,
         storage: Arc::new(storage),
-        postgres_pool: Some(postgres_pool),
+        migration_pool: MigrationPool::Postgres(postgres_pool),
         pending_logins: Arc::new(Mutex::new(HashMap::new())),
     }
 }

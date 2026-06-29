@@ -43,7 +43,7 @@ use crate::authz::{
 };
 use crate::error::ServerError;
 use crate::signed_auth::auth_middleware;
-use crate::state::{AppState, OpaqueCipherSuite, PendingLogin};
+use crate::state::{AppState, MigrationPool, OpaqueCipherSuite, PendingLogin};
 use crate::util::{decode_b64, encode_b64, ensure_protocol, random_token, token_hash};
 
 pub(crate) fn router(state: AppState) -> Router {
@@ -118,10 +118,11 @@ pub(crate) async fn health() -> Json<Value> {
 }
 
 async fn ready(State(state): State<AppState>) -> Result<Json<Value>, ServerError> {
-    let Some(pool) = state.postgres_pool.as_ref() else {
-        return Err(ServerError::MigrationsPending);
+    let status = match &state.migration_pool {
+        MigrationPool::Postgres(pool) => umbra_migrations::status_postgres(pool).await?,
+        MigrationPool::Sqlite(pool) => umbra_migrations::status_sqlite(pool).await?,
     };
-    let status = umbra_migrations::status(pool).await?;
+
     if status == MigrationStatus::Clean {
         Ok(Json(json!({ "status": "ready" })))
     } else {

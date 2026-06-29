@@ -15,9 +15,15 @@ use crate::config::AppConfig;
 pub(crate) struct AppState {
     pub(crate) config: AppConfig,
     pub(crate) storage: Arc<dyn StorageBackend>,
-    pub(crate) postgres_pool: Option<sqlx::PgPool>,
+    pub(crate) migration_pool: MigrationPool,
     pub(crate) opaque_server_setup: Arc<ServerSetup<OpaqueCipherSuite>>,
     pub(crate) pending_logins: Arc<Mutex<HashMap<Uuid, PendingLogin>>>,
+}
+
+#[derive(Clone)]
+pub(crate) enum MigrationPool {
+    Postgres(sqlx::PgPool),
+    Sqlite(sqlx::SqlitePool),
 }
 
 pub(crate) struct PendingLogin {
