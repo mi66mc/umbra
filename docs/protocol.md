@@ -22,9 +22,13 @@ POST /api/v1/auth/login/start
 POST /api/v1/auth/login/finish
 
 GET  /api/v1/devices
-POST /api/v1/devices
-POST /api/v1/devices/:id/trust
-POST /api/v1/devices/:id/revoke
+GET  /api/v1/devices/pending
+POST /api/v1/devices/approval-lookup
+POST /api/v1/devices/:device_id/approve
+POST /api/v1/devices/:device_id/revoke
+GET  /api/v1/devices/:device_id/bootstrap
+POST /api/v1/devices/:device_id/recovery-challenge
+POST /api/v1/devices/:device_id/recover-trust
 
 GET  /api/v1/orgs
 POST /api/v1/orgs
@@ -81,8 +85,36 @@ Login:
 3. client sends credential finalization to /login/finish
 4. server creates either:
    - a signed session when device_id is provided
+   - a limited pending-device bearer session when pending_device is provided
    - a legacy bearer session when device_id is omitted
 ```
+
+Known trusted devices receive signed sessions. Unknown devices can complete OPAQUE login with the account password, but they start as `pending` and cannot access vault, item, sync, organization, or device-management APIs.
+
+Pending device approval:
+
+```txt
+1. new device sends device signing public key, fingerprint, and bootstrap public key during login finish
+2. server stores devices.state = pending and returns an approval code
+3. trusted device looks up the approval code
+4. trusted device encrypts a device bootstrap bundle to the pending device bootstrap public key
+5. server stores the bootstrap bundle and marks the pending device trusted
+6. pending device downloads and decrypts the bootstrap bundle locally
+```
+
+The bootstrap bundle contains account crypto material already encrypted for client use: user secret key, KDF params, encrypted user private key, account public key, and optional default vault id. The server stores the encrypted bootstrap envelope as opaque JSON and cannot decrypt it.
+
+Recovery without another trusted device is challenge based:
+
+```txt
+1. pending device starts a recovery challenge
+2. server encrypts a random challenge to the account public key
+3. client decrypts it locally using the account private key
+4. client returns the challenge response
+5. server consumes the challenge once and marks the current pending device trusted
+```
+
+The current CLI recovery path requires the profile to already have enough local account crypto material to decrypt the challenge. A clean-device emergency-kit import flow is planned separately.
 
 The OPAQUE server setup must be persistent outside PostgreSQL. Generate it with:
 

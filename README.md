@@ -92,6 +92,45 @@ The CLI encrypts item plaintext locally before upload. The server receives only 
 
 The CLI uses signed HTTP sessions by default after `umbra login`. Normal CLI requests do not send a reusable bearer token. The server still stores only encrypted envelopes. The `--envelope-json` item escape hatch remains available for low-level protocol testing.
 
+## Multi-Device Flow
+
+The first device created by `umbra register` is trusted. A later device can prove the account password with OPAQUE, but it starts as pending until an existing trusted device approves it.
+
+On the new device:
+
+```bash
+umbra login --profile laptop-2 --new-device --device-name "Laptop 2"
+```
+
+The CLI prints an approval code. On an existing trusted device:
+
+```bash
+umbra device pending
+umbra device approve UMBRA-ABCD-1234
+```
+
+Then, back on the new device:
+
+```bash
+umbra device bootstrap
+umbra login --profile laptop-2
+```
+
+`device approve` encrypts a bootstrap bundle locally for the pending device. The server stores that encrypted bundle but cannot decrypt the user secret key, account private key, vault keys, or item data.
+
+Useful device commands:
+
+```bash
+umbra device list
+umbra device pending
+umbra device revoke <device-id>
+umbra device recover
+```
+
+`device recover` uses the protocol recovery challenge, but the current CLI expects the profile to already have enough local account crypto material to decrypt the challenge. A clean-machine emergency-kit import command is planned separately.
+
+Revoking a device stops future server access and active sessions for that device. It does not erase secrets already viewed or cached on that machine; rotate affected vault keys and real third-party secrets after device loss or compromise.
+
 Legacy bearer-token setup is still available for debugging:
 
 ```bash

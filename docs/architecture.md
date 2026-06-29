@@ -87,8 +87,36 @@ Miguel opens his copy with his private key. Ana opens her copy with her private 
 The user secret key is not a daily password. It is a high-entropy account secret generated on registration.
 
 - Existing trusted device: user enters password; CLI reads the secret key from local secure storage/cache.
-- New device: user enters password and imports/types the secret key once.
-- After registration: the device may store the secret key locally, protected by OS keychain or encrypted local cache.
+- New device with another trusted device available: user enters password, the device starts as pending, and a trusted device encrypts a bootstrap bundle for it.
+- New device with no trusted device available: user enters password and uses an emergency-kit recovery flow. The clean-device import UX is future work; the protocol already supports challenge recovery when account crypto material is locally available.
+- After registration or bootstrap: the device may store the secret key locally, protected by OS keychain or encrypted local cache.
+
+## Device Trust
+
+OPAQUE proves account-password knowledge. It does not make an unknown device trusted by itself.
+
+Device states:
+
+```txt
+pending  -> authenticated with password, limited to bootstrap/recovery
+trusted  -> allowed to receive signed sessions and use normal APIs
+revoked  -> denied future server access
+```
+
+First registration creates a trusted device. Later devices use this flow:
+
+```txt
+1. new device runs OPAQUE login with --new-device
+2. server creates devices.state = pending and returns an approval code
+3. trusted device looks up the approval code
+4. trusted device encrypts account bootstrap material to the pending device bootstrap public key
+5. server marks the pending device trusted and stores the encrypted bootstrap bundle
+6. pending device downloads and decrypts the bundle locally
+```
+
+The bootstrap bundle is zero-knowledge from the server perspective. It is encrypted client-side to the pending device's bootstrap public key and includes the account material needed for local decrypt operations.
+
+Revoking a device stops future sync/API access and revokes that device's active sessions. It does not erase local cache or secrets already viewed on that device. Vault key rotation and real secret rotation are still required after suspected compromise.
 
 ## Sharing Flow
 
