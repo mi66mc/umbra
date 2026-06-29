@@ -29,6 +29,32 @@ fn enum_string_conversions_roundtrip() {
 }
 
 #[tokio::test]
+async fn sqlite_migrations_create_required_schema() {
+    let storage = crate::sqlite::SqliteStorage::connect("sqlite::memory:", 1)
+        .await
+        .unwrap();
+
+    umbra_migrations::run_sqlite(storage.pool()).await.unwrap();
+
+    let users_exists: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'users'",
+    )
+    .fetch_one(storage.pool())
+    .await
+    .unwrap();
+
+    let devices_exists: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'devices'",
+    )
+    .fetch_one(storage.pool())
+    .await
+    .unwrap();
+
+    assert_eq!(users_exists, 1);
+    assert_eq!(devices_exists, 1);
+}
+
+#[tokio::test]
 #[serial(postgres)]
 async fn postgres_migrations_create_required_schema() {
     let Some(storage) = fresh_test_storage().await else {
