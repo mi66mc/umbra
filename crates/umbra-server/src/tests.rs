@@ -1630,10 +1630,12 @@ where
 fn test_state_with_storage(storage: Storage) -> AppState {
     let mut config = AppConfig::default();
     config.auth.opaque.server_setup = Some(generate_opaque_server_setup_secret());
+    let postgres_pool = storage.pool().clone();
     AppState {
         opaque_server_setup: Arc::new(opaque_server_setup_from_config(&config).unwrap()),
         config,
-        storage,
+        storage: Arc::new(storage),
+        postgres_pool: Some(postgres_pool),
         pending_logins: Arc::new(Mutex::new(HashMap::new())),
     }
 }

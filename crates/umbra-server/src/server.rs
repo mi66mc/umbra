@@ -33,9 +33,11 @@ pub(crate) async fn serve(config: AppConfig) -> Result<(), ServerError> {
     }
 
     let opaque_setup = opaque_server_setup_from_config(&config)?;
+    let postgres_pool = storage.pool().clone();
     let state = AppState {
         config: config.clone(),
-        storage,
+        storage: Arc::new(storage),
+        postgres_pool: Some(postgres_pool),
         opaque_server_setup: Arc::new(opaque_setup),
         pending_logins: Arc::new(Mutex::new(HashMap::new())),
     };

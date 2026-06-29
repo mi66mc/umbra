@@ -1,4 +1,5 @@
 mod audit;
+mod backend;
 mod convert;
 mod devices;
 mod error;
@@ -14,6 +15,7 @@ mod tests;
 
 use sqlx::{PgPool, postgres::PgPoolOptions};
 
+pub use backend::StorageBackend;
 pub use error::StorageError;
 pub use models::*;
 

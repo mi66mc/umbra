@@ -6,7 +6,7 @@ use opaque_ke::{ServerLogin, ServerSetup};
 use sha2::Sha512;
 use tokio::sync::Mutex;
 use umbra_core::UserId;
-use umbra_storage::Storage;
+use umbra_storage::StorageBackend;
 use uuid::Uuid;
 
 use crate::config::AppConfig;
@@ -14,7 +14,8 @@ use crate::config::AppConfig;
 #[derive(Clone)]
 pub(crate) struct AppState {
     pub(crate) config: AppConfig,
-    pub(crate) storage: Storage,
+    pub(crate) storage: Arc<dyn StorageBackend>,
+    pub(crate) postgres_pool: Option<sqlx::PgPool>,
     pub(crate) opaque_server_setup: Arc<ServerSetup<OpaqueCipherSuite>>,
     pub(crate) pending_logins: Arc<Mutex<HashMap<Uuid, PendingLogin>>>,
 }

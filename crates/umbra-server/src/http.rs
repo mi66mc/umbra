@@ -118,7 +118,10 @@ pub(crate) async fn health() -> Json<Value> {
 }
 
 async fn ready(State(state): State<AppState>) -> Result<Json<Value>, ServerError> {
-    let status = umbra_migrations::status(state.storage.pool()).await?;
+    let Some(pool) = state.postgres_pool.as_ref() else {
+        return Err(ServerError::MigrationsPending);
+    };
+    let status = umbra_migrations::status(pool).await?;
     if status == MigrationStatus::Clean {
         Ok(Json(json!({ "status": "ready" })))
     } else {
