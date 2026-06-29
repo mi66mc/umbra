@@ -19,7 +19,7 @@ use clap::{Parser, Subcommand};
 use opaque_ke::argon2::Argon2;
 use opaque_ke::ciphersuite::CipherSuite;
 use sha2::Sha512;
-use umbra_core::{ItemId, ItemKind, RevisionId, VaultId};
+use umbra_core::{DeviceId, ItemId, ItemKind, RevisionId, VaultId};
 
 use crate::commands::parse_item_kind;
 use crate::config::{CliConfig, load_config};
@@ -54,6 +54,10 @@ pub enum Command {
         profile: Option<String>,
         #[arg(long)]
         email: Option<String>,
+        #[arg(long)]
+        new_device: bool,
+        #[arg(long)]
+        device_name: Option<String>,
     },
     Unlock {
         #[arg(long)]
@@ -77,6 +81,8 @@ pub enum Command {
     Vault(VaultCommand),
     #[command(subcommand)]
     Item(ItemCommand),
+    #[command(subcommand)]
+    Device(DeviceCommand),
     #[command(subcommand)]
     Secret(SecretCommand),
     #[command(subcommand, alias = "s")]
@@ -177,6 +183,30 @@ pub enum ItemCommand {
         expected_revision: RevisionId,
         #[arg(long)]
         envelope_json: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DeviceCommand {
+    List,
+    Pending,
+    Approve {
+        approval_code: String,
+        #[arg(long)]
+        device_id: Option<DeviceId>,
+        #[arg(long)]
+        bootstrap_bundle_json: Option<String>,
+    },
+    Revoke {
+        device_id: DeviceId,
+    },
+    Bootstrap {
+        #[arg(long)]
+        device_id: Option<DeviceId>,
+    },
+    Recover {
+        #[arg(long)]
+        device_id: Option<DeviceId>,
     },
 }
 

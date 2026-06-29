@@ -2,8 +2,8 @@ use clap::Parser;
 
 use crate::config::{CliConfig, ProfileConfig};
 use crate::{
-    AuthCommand, CacheCommand, Cli, Command, ItemCommand, ProfileCommand, SecretCommand,
-    TokenCommand, VaultCommand,
+    AuthCommand, CacheCommand, Cli, Command, DeviceCommand, ItemCommand, ProfileCommand,
+    SecretCommand, TokenCommand, VaultCommand,
 };
 
 #[test]
@@ -91,6 +91,24 @@ fn parses_register_and_login_commands() {
 
     let login = Cli::parse_from(["umbra", "login", "--profile", "personal"]);
     assert!(matches!(login.command, Command::Login { .. }));
+
+    let new_device_login = Cli::parse_from([
+        "umbra",
+        "login",
+        "--profile",
+        "personal",
+        "--new-device",
+        "--device-name",
+        "workstation",
+    ]);
+    assert!(matches!(
+        new_device_login.command,
+        Command::Login {
+            new_device: true,
+            device_name: Some(name),
+            ..
+        } if name == "workstation"
+    ));
 }
 
 #[test]
@@ -610,6 +628,72 @@ fn parses_cache_status_command() {
     let cli = Cli::parse_from(["umbra", "cache", "status"]);
 
     assert!(matches!(cli.command, Command::Cache(CacheCommand::Status)));
+}
+
+#[test]
+fn parses_device_commands() {
+    let cli = Cli::parse_from(["umbra", "device", "list"]);
+    assert!(matches!(cli.command, Command::Device(DeviceCommand::List)));
+
+    let cli = Cli::parse_from(["umbra", "device", "pending"]);
+    assert!(matches!(
+        cli.command,
+        Command::Device(DeviceCommand::Pending)
+    ));
+
+    let cli = Cli::parse_from([
+        "umbra",
+        "device",
+        "approve",
+        "UMBRA-ABCD-1234",
+        "--device-id",
+        "00000000-0000-0000-0000-000000000001",
+        "--bootstrap-bundle-json",
+        r#"{"bundle":true}"#,
+    ]);
+    assert!(matches!(
+        cli.command,
+        Command::Device(DeviceCommand::Approve {
+            approval_code,
+            device_id: Some(_),
+            bootstrap_bundle_json: Some(bundle),
+        }) if approval_code == "UMBRA-ABCD-1234" && bundle == r#"{"bundle":true}"#
+    ));
+
+    let cli = Cli::parse_from([
+        "umbra",
+        "device",
+        "revoke",
+        "00000000-0000-0000-0000-000000000001",
+    ]);
+    assert!(matches!(
+        cli.command,
+        Command::Device(DeviceCommand::Revoke { .. })
+    ));
+
+    let cli = Cli::parse_from([
+        "umbra",
+        "device",
+        "bootstrap",
+        "--device-id",
+        "00000000-0000-0000-0000-000000000001",
+    ]);
+    assert!(matches!(
+        cli.command,
+        Command::Device(DeviceCommand::Bootstrap { device_id: Some(_) })
+    ));
+
+    let cli = Cli::parse_from([
+        "umbra",
+        "device",
+        "recover",
+        "--device-id",
+        "00000000-0000-0000-0000-000000000001",
+    ]);
+    assert!(matches!(
+        cli.command,
+        Command::Device(DeviceCommand::Recover { device_id: Some(_) })
+    ));
 }
 
 #[test]

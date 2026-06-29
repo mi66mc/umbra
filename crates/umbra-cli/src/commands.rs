@@ -21,8 +21,8 @@ use crate::http::{PublicHttpClient, UmbraHttpClient};
 use crate::keys::DeviceSigningKey;
 use crate::output::{OutputMode, print_json};
 use crate::{
-    AuthCommand, CacheCommand, Command, ItemCommand, ProfileCommand, SecretCommand, SyncCommand,
-    TokenCommand, VaultCommand,
+    AuthCommand, CacheCommand, Command, DeviceCommand, ItemCommand, ProfileCommand, SecretCommand,
+    SyncCommand, TokenCommand, VaultCommand,
 };
 
 trait OutputModeExt {
@@ -106,7 +106,15 @@ pub async fn run(
             println!("registered profile: {profile}");
             Ok(())
         }
-        Command::Login { profile, email } => {
+        Command::Login {
+            profile,
+            email,
+            new_device,
+            device_name,
+        } => {
+            if new_device || device_name.is_some() {
+                return Err(CliError::Input("new device login is not implemented yet"));
+            }
             if let Some(profile) = profile {
                 set_active_profile(&mut config, profile);
             }
@@ -243,6 +251,14 @@ pub async fn run(
             save_config(&config)?;
             println!("active profile: {name}");
             Ok(())
+        }
+        Command::Device(DeviceCommand::List)
+        | Command::Device(DeviceCommand::Pending)
+        | Command::Device(DeviceCommand::Approve { .. })
+        | Command::Device(DeviceCommand::Revoke { .. })
+        | Command::Device(DeviceCommand::Bootstrap { .. })
+        | Command::Device(DeviceCommand::Recover { .. }) => {
+            Err(CliError::Input("device commands are not implemented yet"))
         }
         Command::Vault(VaultCommand::List) => {
             let profile = active_profile(&config)?;
