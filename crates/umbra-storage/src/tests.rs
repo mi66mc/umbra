@@ -118,6 +118,65 @@ async fn sqlite_users_devices_and_sessions_flow() {
 }
 
 #[tokio::test]
+async fn sqlite_vault_item_and_rotation_flow() {
+    let storage = crate::sqlite::SqliteStorage::connect("sqlite::memory:", 1)
+        .await
+        .unwrap();
+    umbra_migrations::run_sqlite(storage.pool()).await.unwrap();
+
+    let user = create_test_user_on(&storage, "sqlite-vault@example.com").await;
+    let vault = storage
+        .create_vault(CreateVault {
+            id: None,
+            org_id: None,
+            name: "SQLite Personal".to_owned(),
+            kind: VaultKind::Personal,
+            created_by: Some(user.id),
+            crypto_policy: serde_json::json!({"min_envelope_version": 1}),
+        })
+        .await
+        .unwrap();
+
+    storage
+        .upsert_vault_member(UpsertVaultMember {
+            vault_id: vault.id,
+            user_id: user.id,
+            role: VaultRole::Owner,
+            state: MemberState::Active,
+        })
+        .await
+        .unwrap();
+
+    let revision = storage
+        .create_encrypted_item(CreateEncryptedItem {
+            item_id: None,
+            revision_id: None,
+            vault_id: vault.id,
+            kind: ItemKind::Login,
+            author_user_id: Some(user.id),
+            envelope: serde_json::json!({"ciphertext": "encrypted"}),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(revision.revision, 1);
+    assert_eq!(
+        storage
+            .list_item_revisions_since(vault.id, 0)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        storage
+            .has_active_vault_membership(vault.id, user.id)
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
 #[serial(postgres)]
 async fn postgres_migrations_create_required_schema() {
     let Some(storage) = fresh_test_storage().await else {

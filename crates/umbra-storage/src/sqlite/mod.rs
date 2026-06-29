@@ -1,7 +1,11 @@
+mod audit;
 mod convert;
 mod devices;
+mod items;
+mod orgs;
 mod sessions;
 mod users;
+mod vaults;
 
 use sqlx::{SqlitePool, sqlite::SqlitePoolOptions};
 

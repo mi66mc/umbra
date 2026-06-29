@@ -549,195 +549,155 @@ impl StorageBackend for crate::sqlite::SqliteStorage {
         crate::sqlite::SqliteStorage::revoke_sessions_for_device(self, device_id).await
     }
 
-    async fn create_org(&self, _input: CreateOrg) -> Result<OrgRecord, StorageError> {
-        Err(StorageError::UnsupportedBackendOperation(
-            "sqlite create_org",
-        ))
+    async fn create_org(&self, input: CreateOrg) -> Result<OrgRecord, StorageError> {
+        crate::sqlite::SqliteStorage::create_org(self, input).await
     }
 
-    async fn find_org_by_id(&self, _org_id: OrgId) -> Result<OrgRecord, StorageError> {
-        Err(StorageError::UnsupportedBackendOperation(
-            "sqlite find_org_by_id",
-        ))
+    async fn find_org_by_id(&self, org_id: OrgId) -> Result<OrgRecord, StorageError> {
+        crate::sqlite::SqliteStorage::find_org_by_id(self, org_id).await
     }
 
-    async fn list_orgs_for_user(&self, _user_id: UserId) -> Result<Vec<OrgRecord>, StorageError> {
-        Err(StorageError::UnsupportedBackendOperation(
-            "sqlite list_orgs_for_user",
-        ))
+    async fn list_orgs_for_user(&self, user_id: UserId) -> Result<Vec<OrgRecord>, StorageError> {
+        crate::sqlite::SqliteStorage::list_orgs_for_user(self, user_id).await
     }
 
     async fn upsert_org_member(
         &self,
-        _input: UpsertOrgMember,
+        input: UpsertOrgMember,
     ) -> Result<OrgMemberRecord, StorageError> {
-        Err(StorageError::UnsupportedBackendOperation(
-            "sqlite upsert_org_member",
-        ))
+        crate::sqlite::SqliteStorage::upsert_org_member(self, input).await
     }
 
-    async fn list_org_members(&self, _org_id: OrgId) -> Result<Vec<OrgMemberRecord>, StorageError> {
-        Err(StorageError::UnsupportedBackendOperation(
-            "sqlite list_org_members",
-        ))
+    async fn list_org_members(&self, org_id: OrgId) -> Result<Vec<OrgMemberRecord>, StorageError> {
+        crate::sqlite::SqliteStorage::list_org_members(self, org_id).await
     }
 
     async fn find_org_member(
         &self,
-        _org_id: OrgId,
-        _user_id: UserId,
+        org_id: OrgId,
+        user_id: UserId,
     ) -> Result<OrgMemberRecord, StorageError> {
-        Err(StorageError::UnsupportedBackendOperation(
-            "sqlite find_org_member",
-        ))
+        crate::sqlite::SqliteStorage::find_org_member(self, org_id, user_id).await
     }
 
-    async fn create_vault(&self, _input: CreateVault) -> Result<VaultRecord, StorageError> {
-        Err(StorageError::UnsupportedBackendOperation(
-            "sqlite create_vault",
-        ))
+    async fn create_vault(&self, input: CreateVault) -> Result<VaultRecord, StorageError> {
+        crate::sqlite::SqliteStorage::create_vault(self, input).await
     }
 
-    async fn find_vault_by_id(&self, _vault_id: VaultId) -> Result<VaultRecord, StorageError> {
-        Err(StorageError::UnsupportedBackendOperation(
-            "sqlite find_vault_by_id",
-        ))
+    async fn find_vault_by_id(&self, vault_id: VaultId) -> Result<VaultRecord, StorageError> {
+        crate::sqlite::SqliteStorage::find_vault_by_id(self, vault_id).await
     }
 
     async fn list_vaults_for_user(
         &self,
-        _user_id: UserId,
+        user_id: UserId,
     ) -> Result<Vec<VaultRecord>, StorageError> {
-        Err(StorageError::UnsupportedBackendOperation(
-            "sqlite list_vaults_for_user",
-        ))
+        crate::sqlite::SqliteStorage::list_vaults_for_user(self, user_id).await
     }
 
     async fn upsert_vault_member(
         &self,
-        _input: UpsertVaultMember,
+        input: UpsertVaultMember,
     ) -> Result<VaultMemberRecord, StorageError> {
-        Err(StorageError::UnsupportedBackendOperation(
-            "sqlite upsert_vault_member",
-        ))
+        crate::sqlite::SqliteStorage::upsert_vault_member(self, input).await
     }
 
     async fn list_vault_members(
         &self,
-        _vault_id: VaultId,
+        vault_id: VaultId,
     ) -> Result<Vec<VaultMemberRecord>, StorageError> {
-        Err(StorageError::UnsupportedBackendOperation(
-            "sqlite list_vault_members",
-        ))
+        crate::sqlite::SqliteStorage::list_vault_members(self, vault_id).await
     }
 
     async fn has_active_vault_membership(
         &self,
-        _vault_id: VaultId,
-        _user_id: UserId,
+        vault_id: VaultId,
+        user_id: UserId,
     ) -> Result<bool, StorageError> {
-        Err(StorageError::UnsupportedBackendOperation(
-            "sqlite has_active_vault_membership",
-        ))
+        crate::sqlite::SqliteStorage::has_active_vault_membership(self, vault_id, user_id).await
     }
 
     async fn create_vault_key_wrapping(
         &self,
-        _input: CreateVaultKeyWrapping,
+        input: CreateVaultKeyWrapping,
     ) -> Result<VaultKeyWrappingRecord, StorageError> {
-        Err(StorageError::UnsupportedBackendOperation(
-            "sqlite create_vault_key_wrapping",
-        ))
+        crate::sqlite::SqliteStorage::create_vault_key_wrapping(self, input).await
     }
 
     async fn list_key_wrappings_for_user_vault(
         &self,
-        _user_id: UserId,
-        _vault_id: VaultId,
+        user_id: UserId,
+        vault_id: VaultId,
     ) -> Result<Vec<VaultKeyWrappingRecord>, StorageError> {
-        Err(StorageError::UnsupportedBackendOperation(
-            "sqlite list_key_wrappings_for_user_vault",
-        ))
+        crate::sqlite::SqliteStorage::list_key_wrappings_for_user_vault(self, user_id, vault_id)
+            .await
     }
 
     async fn remove_vault_member(
         &self,
-        _vault_id: VaultId,
-        _user_id: UserId,
+        vault_id: VaultId,
+        user_id: UserId,
     ) -> Result<(), StorageError> {
-        Err(StorageError::UnsupportedBackendOperation(
-            "sqlite remove_vault_member",
-        ))
+        crate::sqlite::SqliteStorage::remove_vault_member(self, vault_id, user_id).await
     }
 
-    async fn revoke_key_wrapping(&self, _wrapping_id: Uuid) -> Result<(), StorageError> {
-        Err(StorageError::UnsupportedBackendOperation(
-            "sqlite revoke_key_wrapping",
-        ))
+    async fn revoke_key_wrapping(&self, wrapping_id: Uuid) -> Result<(), StorageError> {
+        crate::sqlite::SqliteStorage::revoke_key_wrapping(self, wrapping_id).await
     }
 
     async fn rotation_status(
         &self,
-        _vault_id: VaultId,
+        vault_id: VaultId,
     ) -> Result<RotationStatusRecord, StorageError> {
-        Err(StorageError::UnsupportedBackendOperation(
-            "sqlite rotation_status",
-        ))
+        crate::sqlite::SqliteStorage::rotation_status(self, vault_id).await
     }
 
     async fn vault_sync_status(
         &self,
-        _vault_id: VaultId,
-        _user_id: UserId,
+        vault_id: VaultId,
+        user_id: UserId,
     ) -> Result<VaultSyncStatusRecord, StorageError> {
-        Err(StorageError::UnsupportedBackendOperation(
-            "sqlite vault_sync_status",
-        ))
+        crate::sqlite::SqliteStorage::vault_sync_status(self, vault_id, user_id).await
     }
 
     async fn finish_vault_key_rotation(
         &self,
-        _input: FinishVaultKeyRotation,
+        input: FinishVaultKeyRotation,
     ) -> Result<RotationStatusRecord, StorageError> {
-        Err(StorageError::UnsupportedBackendOperation(
-            "sqlite finish_vault_key_rotation",
-        ))
+        crate::sqlite::SqliteStorage::finish_vault_key_rotation(self, input).await
     }
 
     async fn create_item_revision(
         &self,
-        _input: CreateItemRevision,
+        input: CreateItemRevision,
     ) -> Result<ItemRevisionRecord, StorageError> {
-        Err(StorageError::UnsupportedBackendOperation(
-            "sqlite create_item_revision",
-        ))
+        crate::sqlite::SqliteStorage::create_item_revision(self, input).await
     }
 
     async fn create_encrypted_item(
         &self,
-        _input: CreateEncryptedItem,
+        input: CreateEncryptedItem,
     ) -> Result<ItemRevisionRecord, StorageError> {
-        Err(StorageError::UnsupportedBackendOperation(
-            "sqlite create_encrypted_item",
-        ))
+        crate::sqlite::SqliteStorage::create_encrypted_item(self, input).await
     }
 
     async fn list_item_revisions_since(
         &self,
-        _vault_id: VaultId,
-        _since_vault_revision: i64,
+        vault_id: VaultId,
+        since_vault_revision: i64,
     ) -> Result<Vec<ItemRevisionRecord>, StorageError> {
-        Err(StorageError::UnsupportedBackendOperation(
-            "sqlite list_item_revisions_since",
-        ))
+        crate::sqlite::SqliteStorage::list_item_revisions_since(
+            self,
+            vault_id,
+            since_vault_revision,
+        )
+        .await
     }
 
     async fn append_audit_log(
         &self,
-        _input: AppendAuditLog,
+        input: AppendAuditLog,
     ) -> Result<AuditLogRecord, StorageError> {
-        Err(StorageError::UnsupportedBackendOperation(
-            "sqlite append_audit_log",
-        ))
+        crate::sqlite::SqliteStorage::append_audit_log(self, input).await
     }
 }
