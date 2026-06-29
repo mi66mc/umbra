@@ -73,6 +73,53 @@ fn dev_config_can_use_ephemeral_opaque_setup_when_explicitly_allowed() {
 }
 
 #[test]
+fn database_backend_defaults_to_postgres() {
+    let config = AppConfig::default();
+
+    assert_eq!(
+        config.database.backend,
+        crate::config::DatabaseBackend::Postgres
+    );
+    assert_eq!(
+        config.database.url,
+        "postgres://umbra:umbra@localhost:5432/umbra"
+    );
+}
+
+#[test]
+fn database_backend_accepts_sqlite_from_toml() {
+    let config: AppConfig = toml::from_str(
+        r#"
+        [server]
+        bind = "127.0.0.1:8080"
+
+        [database]
+        backend = "sqlite"
+        url = "sqlite://./umbra-dev.db?mode=rwc"
+        max_connections = 5
+
+        [migrations]
+        auto_migrate = true
+        require_latest = true
+
+        [security]
+        session_ttl_minutes = 60
+
+        [auth.opaque]
+        allow_ephemeral_setup = true
+        "#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        config.database.backend,
+        crate::config::DatabaseBackend::Sqlite
+    );
+    assert_eq!(config.database.url, "sqlite://./umbra-dev.db?mode=rwc");
+    assert_eq!(config.database.max_connections, 5);
+}
+
+#[test]
 fn authenticated_user_context_reads_optional_device_header() {
     let user_id = Uuid::new_v4();
     let device_id = Uuid::new_v4();

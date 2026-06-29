@@ -20,8 +20,16 @@ pub(crate) struct ServerSettings {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct DatabaseSettings {
+    pub(crate) backend: DatabaseBackend,
     pub(crate) url: String,
     pub(crate) max_connections: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum DatabaseBackend {
+    Postgres,
+    Sqlite,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,6 +62,7 @@ impl Default for AppConfig {
                 public_url: None,
             },
             database: DatabaseSettings {
+                backend: DatabaseBackend::Postgres,
                 url: "postgres://umbra:umbra@localhost:5432/umbra".to_owned(),
                 max_connections: 10,
             },
@@ -78,6 +87,7 @@ pub(crate) fn load_config(path: Option<&str>) -> Result<AppConfig, ServerError> 
     let defaults = AppConfig::default();
     let mut builder = Config::builder()
         .set_default("server.bind", defaults.server.bind)?
+        .set_default("database.backend", "postgres")?
         .set_default("database.url", defaults.database.url)?
         .set_default(
             "database.max_connections",
