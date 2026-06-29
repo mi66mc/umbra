@@ -12,9 +12,21 @@ The server stores users, devices, vault metadata, memberships, encrypted envelop
 - Vault keys are random per vault and wrapped for authorized users/devices.
 - User passwords unlock encrypted user private keys, not vaults directly.
 - Client-side crypto and client-side encrypted data migrations.
-- Server-side PostgreSQL schema migrations.
+- Server-side schema migrations for PostgreSQL and SQLite.
 
 ## Development
+
+Fast local server without Postgres:
+
+```bash
+$env:UMBRA__DATABASE__BACKEND="sqlite"
+$env:UMBRA__DATABASE__URL="sqlite://./umbra-dev.db?mode=rwc"
+$env:UMBRA__MIGRATIONS__AUTO_MIGRATE="true"
+$env:UMBRA__AUTH__OPAQUE__ALLOW_EPHEMERAL_SETUP="true"
+cargo run -p umbra-server -- serve
+```
+
+PostgreSQL development and integration tests:
 
 ```bash
 docker compose up -d postgres

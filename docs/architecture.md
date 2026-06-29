@@ -8,14 +8,14 @@ The first implementation targets:
 
 - Remote mode only.
 - CLI first.
-- PostgreSQL-backed server.
+- PostgreSQL-backed server by default, with SQLite available for local development and lightweight self-host testing.
 - Separate Rust packages for CLI and server.
 - JSON crypto envelopes initially.
 - Shared vaults through per-recipient vault key wrappings.
 - Organizations for team grouping, with vault access still granted per vault.
 - OPAQUE-based password authentication DTOs and initial server flow.
 
-Local offline vaults, web UI, browser extension, desktop, mobile, SQLite, WebAuthn, and HPKE are future work.
+Local offline vaults, web UI, browser extension, desktop, mobile, WebAuthn, and HPKE are future work.
 
 ## Workspace
 
@@ -29,6 +29,24 @@ crates/
   umbra-server/      HTTP server and admin commands
   umbra-cli/         user CLI, binary name `umbra`
 ```
+
+## Server Database Backends
+
+The server selects its database with:
+
+```txt
+database.backend = "postgres" | "sqlite"
+database.url = "..."
+```
+
+PostgreSQL is the production default. SQLite uses the same storage trait and separate SQL migrations so developers can run `umbra-server` without starting a container:
+
+```txt
+UMBRA__DATABASE__BACKEND=sqlite
+UMBRA__DATABASE__URL=sqlite://./umbra-dev.db?mode=rwc
+```
+
+The trust model is unchanged across backends: both store encrypted envelopes, key wrappings, metadata, sessions, and revisions only.
 
 ## Trust Boundary
 

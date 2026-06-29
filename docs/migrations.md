@@ -4,7 +4,7 @@ Umbra separates migration types by trust boundary.
 
 ## Database Migrations
 
-Database migrations run on the server and change PostgreSQL schema:
+Database migrations run on the server and change database schema. PostgreSQL remains the production default; SQLite is supported for local development and small self-host installs that do not want a Postgres container.
 
 - users
 - user_auth
@@ -20,10 +20,16 @@ Database migrations run on the server and change PostgreSQL schema:
 - invites
 - sessions
 
-Initial migration path:
+PostgreSQL migration path:
 
 ```txt
 crates/umbra-migrations/migrations/000001_initial_schema.sql
+```
+
+SQLite migration path:
+
+```txt
+crates/umbra-migrations/sqlite/000001_initial_schema.sql
 ```
 
 The schema stores encrypted envelopes and metadata only. It must not add columns for plaintext passwords, API keys, SSH keys, notes, card numbers, vault keys, or item plaintext.
@@ -39,7 +45,7 @@ item_revisions.vault_revision
 
 `vault_revision` is incremented when an encrypted item revision is written. This supports "changes since vault revision N" sync without requiring a global server revision in the MVP.
 
-Encrypted JSON is stored as `jsonb`:
+PostgreSQL encrypted JSON is stored as `jsonb`:
 
 ```txt
 users.encrypted_private_key
@@ -48,6 +54,8 @@ vault_key_wrappings.envelope
 item_revisions.envelope
 audit_logs.metadata
 ```
+
+SQLite stores UUIDs, timestamps, and JSON envelopes as text. The server chooses the correct migration runner from `database.backend`.
 
 Production default:
 
@@ -61,9 +69,17 @@ Self-host/dev may opt in:
 auto_migrate = true
 ```
 
+SQLite dev example:
+
+```txt
+UMBRA__DATABASE__BACKEND=sqlite
+UMBRA__DATABASE__URL=sqlite://./umbra-dev.db?mode=rwc
+UMBRA__MIGRATIONS__AUTO_MIGRATE=true
+```
+
 ## Test Database
 
-Integration tests use a separate PostgreSQL database:
+PostgreSQL integration tests use a separate database:
 
 ```txt
 UMBRA_TEST_DATABASE_URL=postgres://umbra:umbra@localhost:5432/umbra_test
