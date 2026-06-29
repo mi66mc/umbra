@@ -4,9 +4,9 @@ use uuid::Uuid;
 use crate::convert::*;
 use crate::error::map_sqlx_error;
 use crate::models::*;
-use crate::{Storage, StorageError};
+use crate::{PostgresStorage, StorageError};
 
-impl Storage {
+impl PostgresStorage {
     pub async fn create_org(&self, input: CreateOrg) -> Result<OrgRecord, StorageError> {
         let id = input.id.unwrap_or_else(Uuid::new_v4);
         let row = sqlx::query(

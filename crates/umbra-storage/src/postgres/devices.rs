@@ -4,11 +4,11 @@ use uuid::Uuid;
 use crate::convert::*;
 use crate::error::{ensure_rows_affected, map_sqlx_error};
 use crate::models::*;
-use crate::{Storage, StorageError};
+use crate::{PostgresStorage, StorageError};
 
 const DEVICE_COLUMNS: &str = "id, user_id, name, public_key, fingerprint, state, approval_code_hash, approval_expires_at, bootstrap_public_key, bootstrap_bundle, created_at, trusted_at, last_seen_at, revoked_at";
 
-impl Storage {
+impl PostgresStorage {
     pub async fn create_device(&self, input: CreateDevice) -> Result<DeviceRecord, StorageError> {
         let id = input.id.unwrap_or_else(Uuid::new_v4);
         let row = sqlx::query(&format!(

@@ -484,7 +484,7 @@ async fn fresh_test_storage() -> Option<Storage> {
         eprintln!("skipping postgres test: UMBRA_TEST_DATABASE_URL is not set");
         return None;
     };
-    let storage = Storage::connect(&database_url).await.unwrap();
+    let storage = Storage::connect(&database_url, 10).await.unwrap();
 
     sqlx::query("DROP SCHEMA public CASCADE")
         .execute(storage.pool())

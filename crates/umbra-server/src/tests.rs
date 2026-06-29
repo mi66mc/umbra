@@ -1645,7 +1645,7 @@ async fn test_storage_without_migrations() -> Option<Storage> {
         eprintln!("skipping postgres test: UMBRA_TEST_DATABASE_URL is not set");
         return None;
     };
-    Some(Storage::connect(&database_url).await.unwrap())
+    Some(Storage::connect(&database_url, 10).await.unwrap())
 }
 
 async fn fresh_test_storage() -> Option<Storage> {

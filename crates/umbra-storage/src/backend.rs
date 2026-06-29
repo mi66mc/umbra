@@ -5,9 +5,10 @@ use crate::{
     AppendAuditLog, ApprovePendingDevice, AuditLogRecord, CreateDevice, CreateEncryptedItem,
     CreateItemRevision, CreateOrg, CreateRecoveryChallenge, CreateSession, CreateUser, CreateVault,
     CreateVaultKeyWrapping, DeviceRecord, FinishVaultKeyRotation, ItemRevisionRecord,
-    OrgMemberRecord, OrgRecord, RecoveryChallengeRecord, RotationStatusRecord, SessionRecord,
-    Storage, StorageError, UpsertOrgMember, UpsertUserAuth, UpsertVaultMember, UserAuthRecord,
-    UserRecord, VaultKeyWrappingRecord, VaultMemberRecord, VaultRecord, VaultSyncStatusRecord,
+    OrgMemberRecord, OrgRecord, PostgresStorage, RecoveryChallengeRecord, RotationStatusRecord,
+    SessionRecord, StorageError, UpsertOrgMember, UpsertUserAuth, UpsertVaultMember,
+    UserAuthRecord, UserRecord, VaultKeyWrappingRecord, VaultMemberRecord, VaultRecord,
+    VaultSyncStatusRecord,
 };
 use umbra_core::{DeviceId, OrgId, UserId, VaultId};
 
@@ -148,50 +149,50 @@ pub trait StorageBackend: Send + Sync {
 }
 
 #[async_trait]
-impl StorageBackend for Storage {
+impl StorageBackend for PostgresStorage {
     async fn create_user(&self, input: CreateUser) -> Result<UserRecord, StorageError> {
-        Storage::create_user(self, input).await
+        PostgresStorage::create_user(self, input).await
     }
 
     async fn find_user_by_email(&self, email: &str) -> Result<UserRecord, StorageError> {
-        Storage::find_user_by_email(self, email).await
+        PostgresStorage::find_user_by_email(self, email).await
     }
 
     async fn find_user_by_id(&self, user_id: UserId) -> Result<UserRecord, StorageError> {
-        Storage::find_user_by_id(self, user_id).await
+        PostgresStorage::find_user_by_id(self, user_id).await
     }
 
     async fn upsert_user_auth(
         &self,
         input: UpsertUserAuth,
     ) -> Result<UserAuthRecord, StorageError> {
-        Storage::upsert_user_auth(self, input).await
+        PostgresStorage::upsert_user_auth(self, input).await
     }
 
     async fn find_user_auth(&self, user_id: UserId) -> Result<UserAuthRecord, StorageError> {
-        Storage::find_user_auth(self, user_id).await
+        PostgresStorage::find_user_auth(self, user_id).await
     }
 
     async fn create_device(&self, input: CreateDevice) -> Result<DeviceRecord, StorageError> {
-        Storage::create_device(self, input).await
+        PostgresStorage::create_device(self, input).await
     }
 
     async fn list_devices_for_user(
         &self,
         user_id: UserId,
     ) -> Result<Vec<DeviceRecord>, StorageError> {
-        Storage::list_devices_for_user(self, user_id).await
+        PostgresStorage::list_devices_for_user(self, user_id).await
     }
 
     async fn find_device_by_id(&self, device_id: DeviceId) -> Result<DeviceRecord, StorageError> {
-        Storage::find_device_by_id(self, device_id).await
+        PostgresStorage::find_device_by_id(self, device_id).await
     }
 
     async fn list_pending_devices_for_user(
         &self,
         user_id: UserId,
     ) -> Result<Vec<DeviceRecord>, StorageError> {
-        Storage::list_pending_devices_for_user(self, user_id).await
+        PostgresStorage::list_pending_devices_for_user(self, user_id).await
     }
 
     async fn find_pending_device_by_approval_hash(
@@ -199,29 +200,30 @@ impl StorageBackend for Storage {
         user_id: UserId,
         approval_code_hash: &str,
     ) -> Result<DeviceRecord, StorageError> {
-        Storage::find_pending_device_by_approval_hash(self, user_id, approval_code_hash).await
+        PostgresStorage::find_pending_device_by_approval_hash(self, user_id, approval_code_hash)
+            .await
     }
 
     async fn approve_pending_device(
         &self,
         input: ApprovePendingDevice,
     ) -> Result<DeviceRecord, StorageError> {
-        Storage::approve_pending_device(self, input).await
+        PostgresStorage::approve_pending_device(self, input).await
     }
 
     async fn mark_device_trusted(&self, device_id: DeviceId) -> Result<DeviceRecord, StorageError> {
-        Storage::mark_device_trusted(self, device_id).await
+        PostgresStorage::mark_device_trusted(self, device_id).await
     }
 
     async fn revoke_device(&self, device_id: DeviceId) -> Result<(), StorageError> {
-        Storage::revoke_device(self, device_id).await
+        PostgresStorage::revoke_device(self, device_id).await
     }
 
     async fn create_recovery_challenge(
         &self,
         input: CreateRecoveryChallenge,
     ) -> Result<RecoveryChallengeRecord, StorageError> {
-        Storage::create_recovery_challenge(self, input).await
+        PostgresStorage::create_recovery_challenge(self, input).await
     }
 
     async fn consume_recovery_challenge(
@@ -231,26 +233,32 @@ impl StorageBackend for Storage {
         device_id: DeviceId,
         challenge_hash: &str,
     ) -> Result<RecoveryChallengeRecord, StorageError> {
-        Storage::consume_recovery_challenge(self, challenge_id, user_id, device_id, challenge_hash)
-            .await
+        PostgresStorage::consume_recovery_challenge(
+            self,
+            challenge_id,
+            user_id,
+            device_id,
+            challenge_hash,
+        )
+        .await
     }
 
     async fn create_session(&self, input: CreateSession) -> Result<SessionRecord, StorageError> {
-        Storage::create_session(self, input).await
+        PostgresStorage::create_session(self, input).await
     }
 
     async fn find_active_session_by_hash(
         &self,
         token_hash: &str,
     ) -> Result<SessionRecord, StorageError> {
-        Storage::find_active_session_by_hash(self, token_hash).await
+        PostgresStorage::find_active_session_by_hash(self, token_hash).await
     }
 
     async fn find_active_session_by_id(
         &self,
         session_id: Uuid,
     ) -> Result<SessionRecord, StorageError> {
-        Storage::find_active_session_by_id(self, session_id).await
+        PostgresStorage::find_active_session_by_id(self, session_id).await
     }
 
     async fn remember_session_nonce(
@@ -258,34 +266,34 @@ impl StorageBackend for Storage {
         session_id: Uuid,
         nonce: &str,
     ) -> Result<(), StorageError> {
-        Storage::remember_session_nonce(self, session_id, nonce).await
+        PostgresStorage::remember_session_nonce(self, session_id, nonce).await
     }
 
     async fn revoke_sessions_for_device(&self, device_id: Uuid) -> Result<u64, StorageError> {
-        Storage::revoke_sessions_for_device(self, device_id).await
+        PostgresStorage::revoke_sessions_for_device(self, device_id).await
     }
 
     async fn create_org(&self, input: CreateOrg) -> Result<OrgRecord, StorageError> {
-        Storage::create_org(self, input).await
+        PostgresStorage::create_org(self, input).await
     }
 
     async fn find_org_by_id(&self, org_id: OrgId) -> Result<OrgRecord, StorageError> {
-        Storage::find_org_by_id(self, org_id).await
+        PostgresStorage::find_org_by_id(self, org_id).await
     }
 
     async fn list_orgs_for_user(&self, user_id: UserId) -> Result<Vec<OrgRecord>, StorageError> {
-        Storage::list_orgs_for_user(self, user_id).await
+        PostgresStorage::list_orgs_for_user(self, user_id).await
     }
 
     async fn upsert_org_member(
         &self,
         input: UpsertOrgMember,
     ) -> Result<OrgMemberRecord, StorageError> {
-        Storage::upsert_org_member(self, input).await
+        PostgresStorage::upsert_org_member(self, input).await
     }
 
     async fn list_org_members(&self, org_id: OrgId) -> Result<Vec<OrgMemberRecord>, StorageError> {
-        Storage::list_org_members(self, org_id).await
+        PostgresStorage::list_org_members(self, org_id).await
     }
 
     async fn find_org_member(
@@ -293,36 +301,36 @@ impl StorageBackend for Storage {
         org_id: OrgId,
         user_id: UserId,
     ) -> Result<OrgMemberRecord, StorageError> {
-        Storage::find_org_member(self, org_id, user_id).await
+        PostgresStorage::find_org_member(self, org_id, user_id).await
     }
 
     async fn create_vault(&self, input: CreateVault) -> Result<VaultRecord, StorageError> {
-        Storage::create_vault(self, input).await
+        PostgresStorage::create_vault(self, input).await
     }
 
     async fn find_vault_by_id(&self, vault_id: VaultId) -> Result<VaultRecord, StorageError> {
-        Storage::find_vault_by_id(self, vault_id).await
+        PostgresStorage::find_vault_by_id(self, vault_id).await
     }
 
     async fn list_vaults_for_user(
         &self,
         user_id: UserId,
     ) -> Result<Vec<VaultRecord>, StorageError> {
-        Storage::list_vaults_for_user(self, user_id).await
+        PostgresStorage::list_vaults_for_user(self, user_id).await
     }
 
     async fn upsert_vault_member(
         &self,
         input: UpsertVaultMember,
     ) -> Result<VaultMemberRecord, StorageError> {
-        Storage::upsert_vault_member(self, input).await
+        PostgresStorage::upsert_vault_member(self, input).await
     }
 
     async fn list_vault_members(
         &self,
         vault_id: VaultId,
     ) -> Result<Vec<VaultMemberRecord>, StorageError> {
-        Storage::list_vault_members(self, vault_id).await
+        PostgresStorage::list_vault_members(self, vault_id).await
     }
 
     async fn has_active_vault_membership(
@@ -330,14 +338,14 @@ impl StorageBackend for Storage {
         vault_id: VaultId,
         user_id: UserId,
     ) -> Result<bool, StorageError> {
-        Storage::has_active_vault_membership(self, vault_id, user_id).await
+        PostgresStorage::has_active_vault_membership(self, vault_id, user_id).await
     }
 
     async fn create_vault_key_wrapping(
         &self,
         input: CreateVaultKeyWrapping,
     ) -> Result<VaultKeyWrappingRecord, StorageError> {
-        Storage::create_vault_key_wrapping(self, input).await
+        PostgresStorage::create_vault_key_wrapping(self, input).await
     }
 
     async fn list_key_wrappings_for_user_vault(
@@ -345,7 +353,7 @@ impl StorageBackend for Storage {
         user_id: UserId,
         vault_id: VaultId,
     ) -> Result<Vec<VaultKeyWrappingRecord>, StorageError> {
-        Storage::list_key_wrappings_for_user_vault(self, user_id, vault_id).await
+        PostgresStorage::list_key_wrappings_for_user_vault(self, user_id, vault_id).await
     }
 
     async fn remove_vault_member(
@@ -353,18 +361,18 @@ impl StorageBackend for Storage {
         vault_id: VaultId,
         user_id: UserId,
     ) -> Result<(), StorageError> {
-        Storage::remove_vault_member(self, vault_id, user_id).await
+        PostgresStorage::remove_vault_member(self, vault_id, user_id).await
     }
 
     async fn revoke_key_wrapping(&self, wrapping_id: Uuid) -> Result<(), StorageError> {
-        Storage::revoke_key_wrapping(self, wrapping_id).await
+        PostgresStorage::revoke_key_wrapping(self, wrapping_id).await
     }
 
     async fn rotation_status(
         &self,
         vault_id: VaultId,
     ) -> Result<RotationStatusRecord, StorageError> {
-        Storage::rotation_status(self, vault_id).await
+        PostgresStorage::rotation_status(self, vault_id).await
     }
 
     async fn vault_sync_status(
@@ -372,28 +380,28 @@ impl StorageBackend for Storage {
         vault_id: VaultId,
         user_id: UserId,
     ) -> Result<VaultSyncStatusRecord, StorageError> {
-        Storage::vault_sync_status(self, vault_id, user_id).await
+        PostgresStorage::vault_sync_status(self, vault_id, user_id).await
     }
 
     async fn finish_vault_key_rotation(
         &self,
         input: FinishVaultKeyRotation,
     ) -> Result<RotationStatusRecord, StorageError> {
-        Storage::finish_vault_key_rotation(self, input).await
+        PostgresStorage::finish_vault_key_rotation(self, input).await
     }
 
     async fn create_item_revision(
         &self,
         input: CreateItemRevision,
     ) -> Result<ItemRevisionRecord, StorageError> {
-        Storage::create_item_revision(self, input).await
+        PostgresStorage::create_item_revision(self, input).await
     }
 
     async fn create_encrypted_item(
         &self,
         input: CreateEncryptedItem,
     ) -> Result<ItemRevisionRecord, StorageError> {
-        Storage::create_encrypted_item(self, input).await
+        PostgresStorage::create_encrypted_item(self, input).await
     }
 
     async fn list_item_revisions_since(
@@ -401,13 +409,13 @@ impl StorageBackend for Storage {
         vault_id: VaultId,
         since_vault_revision: i64,
     ) -> Result<Vec<ItemRevisionRecord>, StorageError> {
-        Storage::list_item_revisions_since(self, vault_id, since_vault_revision).await
+        PostgresStorage::list_item_revisions_since(self, vault_id, since_vault_revision).await
     }
 
     async fn append_audit_log(
         &self,
         input: AppendAuditLog,
     ) -> Result<AuditLogRecord, StorageError> {
-        Storage::append_audit_log(self, input).await
+        PostgresStorage::append_audit_log(self, input).await
     }
 }
