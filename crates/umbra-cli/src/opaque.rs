@@ -6,7 +6,8 @@ use opaque_ke::{
 use umbra_protocol::{
     DeviceRegisterRequest, OpaqueLoginFinishRequest, OpaqueLoginFinishResponse,
     OpaqueLoginStartRequest, OpaqueLoginStartResponse, OpaqueRegisterFinishRequest,
-    OpaqueRegisterStartRequest, OpaqueRegisterStartResponse, PROTOCOL_VERSION, RegisterResponse,
+    OpaqueRegisterStartRequest, OpaqueRegisterStartResponse, PROTOCOL_VERSION,
+    PendingDeviceRequest, RegisterResponse,
 };
 
 use crate::OpaqueCipherSuite;
@@ -81,6 +82,40 @@ pub async fn login(
     password: &[u8],
     device_id: uuid::Uuid,
 ) -> Result<OpaqueLoginFinishResponse, CliError> {
+    login_finish(client, email, password, Some(device_id), None).await
+}
+
+pub async fn login_pending_device(
+    client: &PublicHttpClient,
+    email: &str,
+    password: &[u8],
+    device_name: String,
+    device_key: &DeviceSigningKey,
+    bootstrap_public_key: String,
+) -> Result<OpaqueLoginFinishResponse, CliError> {
+    login_finish(
+        client,
+        email,
+        password,
+        None,
+        Some(PendingDeviceRequest {
+            protocol_version: PROTOCOL_VERSION,
+            name: device_name,
+            public_key: device_key.public_key_base64url(),
+            fingerprint: device_key.fingerprint(),
+            bootstrap_public_key,
+        }),
+    )
+    .await
+}
+
+async fn login_finish(
+    client: &PublicHttpClient,
+    email: &str,
+    password: &[u8],
+    device_id: Option<uuid::Uuid>,
+    pending_device: Option<PendingDeviceRequest>,
+) -> Result<OpaqueLoginFinishResponse, CliError> {
     let login_start = ClientLogin::<OpaqueCipherSuite>::start(&mut OsRng, password)
         .map_err(|_| CliError::Opaque("login start failed"))?;
     let start_response: OpaqueLoginStartResponse = client
@@ -113,8 +148,8 @@ pub async fn login(
             &OpaqueLoginFinishRequest {
                 protocol_version: PROTOCOL_VERSION,
                 login_id: start_response.login_id,
-                device_id: Some(device_id),
-                pending_device: None,
+                device_id,
+                pending_device,
                 credential_finalization: encode_b64(login_finish.message.serialize().as_slice()),
             },
         )

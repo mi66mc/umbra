@@ -43,6 +43,10 @@ pub struct ProfileConfig {
     #[serde(default)]
     pub legacy_session_token: Option<String>,
     #[serde(default)]
+    pub pending_bootstrap_private_key: Option<String>,
+    #[serde(default)]
+    pub pending_approval_code: Option<String>,
+    #[serde(default)]
     pub default_vault_id: Option<Uuid>,
 }
 
@@ -76,6 +80,14 @@ impl fmt::Debug for ProfileConfig {
             .field("kdf_params", &self.kdf_params)
             .field("user_secret_key", &user_secret_key)
             .field("legacy_session_token", &self.legacy_session_token)
+            .field(
+                "pending_bootstrap_private_key",
+                &self
+                    .pending_bootstrap_private_key
+                    .as_ref()
+                    .map(|_| "[redacted]"),
+            )
+            .field("pending_approval_code", &self.pending_approval_code)
             .field("default_vault_id", &self.default_vault_id)
             .finish()
     }
@@ -108,6 +120,8 @@ impl Default for ProfileConfig {
             kdf_params: None,
             user_secret_key: None,
             legacy_session_token: None,
+            pending_bootstrap_private_key: None,
+            pending_approval_code: None,
             default_vault_id: None,
         }
     }

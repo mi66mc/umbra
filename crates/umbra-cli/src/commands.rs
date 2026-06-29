@@ -4,12 +4,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use umbra_core::{ItemKind, ItemPlaintextV1, VaultId, VaultKind};
 use umbra_crypto::{
-    AadV1, CryptoEnvelopeV1, MasterPassword, UserPublicKey, VaultKey, VaultKeyWrappingEnvelopeV1,
-    decrypt_item, encrypt_item, generate_vault_key, unwrap_vault_key, wrap_vault_key_for_user,
+    AadV1, CryptoEnvelopeV1, DeviceBootstrapEnvelopeV1, MasterPassword, UserPrivateKey,
+    UserPublicKey, VaultKey, VaultKeyWrappingEnvelopeV1, decrypt_device_bootstrap_bundle,
+    decrypt_item, encrypt_item, generate_user_keypair, generate_vault_key, unwrap_vault_key,
+    wrap_vault_key_for_user,
 };
 use umbra_protocol::{
-    CreateItemRequest, CreateVaultRequest, ItemRevisionResponse, PROTOCOL_VERSION, SyncRequest,
-    SyncResponse, UpdateItemRequest, VaultResponse, VaultSyncCursor,
+    CreateItemRequest, CreateVaultRequest, DeviceBootstrapResponse, ItemRevisionResponse,
+    PROTOCOL_VERSION, SyncRequest, SyncResponse, UpdateItemRequest, VaultResponse, VaultSyncCursor,
 };
 use uuid::Uuid;
 
@@ -112,9 +114,6 @@ pub async fn run(
             new_device,
             device_name,
         } => {
-            if new_device || device_name.is_some() {
-                return Err(CliError::Input("new device login is not implemented yet"));
-            }
             if let Some(profile) = profile {
                 set_active_profile(&mut config, profile);
             }
@@ -125,21 +124,66 @@ pub async fn run(
                     .with_prompt("Email")
                     .interact_text()?,
             };
-            let device_id = profile_snapshot.device_id.ok_or(CliError::Input(
-                "profile has no device id; run `umbra register` first",
-            ))?;
             let password = rpassword::prompt_password("Master password: ")?;
             let client = PublicHttpClient::new(&profile_snapshot.server_url)?;
-            let response =
-                crate::opaque::login(&client, &email, password.as_bytes(), device_id).await?;
-            let profile_config = active_profile_mut(&mut config);
-            profile_config.email = Some(email);
-            profile_config.user_id = Some(response.user_id);
-            profile_config.session_id = Some(response.session_id);
-            profile_config.legacy_session_token = response.session_token;
-            save_config(&config)?;
-            println!("logged in: {}", config.active_profile);
-            Ok(())
+            if new_device {
+                let device_name = match device_name {
+                    Some(name) => name,
+                    None => dialoguer::Input::<String>::new()
+                        .with_prompt("Device name")
+                        .default("CLI device".to_owned())
+                        .interact_text()?,
+                };
+                let device_key = DeviceSigningKey::generate();
+                let bootstrap_keypair = generate_user_keypair();
+                let response = crate::opaque::login_pending_device(
+                    &client,
+                    &email,
+                    password.as_bytes(),
+                    device_name,
+                    &device_key,
+                    bootstrap_keypair.public_key.to_base64url(),
+                )
+                .await?;
+                let pending = response.pending_device.ok_or(CliError::Input(
+                    "server did not return pending device details",
+                ))?;
+                let profile_config = active_profile_mut(&mut config);
+                profile_config.email = Some(email);
+                profile_config.user_id = Some(response.user_id);
+                profile_config.device_id = Some(pending.device_id);
+                profile_config.session_id = None;
+                profile_config.device_private_key = Some(device_key.to_base64url());
+                profile_config.legacy_session_token = response.session_token;
+                profile_config.pending_bootstrap_private_key =
+                    Some(bootstrap_keypair.private_key.to_base64url());
+                profile_config.pending_approval_code = Some(pending.approval_code.clone());
+                save_config(&config)?;
+                if output.is_json() {
+                    print_json(&pending)
+                } else {
+                    println!("pending device: {}", pending.device_id);
+                    println!("approval code: {}", pending.approval_code);
+                    println!("expires at: {}", pending.expires_at);
+                    Ok(())
+                }
+            } else {
+                let device_id = profile_snapshot.device_id.ok_or(CliError::Input(
+                    "profile has no device id; run `umbra register` first",
+                ))?;
+                let response =
+                    crate::opaque::login(&client, &email, password.as_bytes(), device_id).await?;
+                let profile_config = active_profile_mut(&mut config);
+                profile_config.email = Some(email);
+                profile_config.user_id = Some(response.user_id);
+                profile_config.session_id = Some(response.session_id);
+                profile_config.legacy_session_token = response.session_token;
+                profile_config.pending_bootstrap_private_key = None;
+                profile_config.pending_approval_code = None;
+                save_config(&config)?;
+                println!("logged in: {}", config.active_profile);
+                Ok(())
+            }
         }
         Command::Unlock {
             vault_id,
@@ -252,11 +296,50 @@ pub async fn run(
             println!("active profile: {name}");
             Ok(())
         }
+        Command::Device(DeviceCommand::Bootstrap { device_id }) => {
+            let profile = active_profile_mut(&mut config);
+            let device_id = device_id
+                .or(profile.device_id)
+                .ok_or(CliError::Input("profile has no pending device id"))?;
+            let bootstrap_private_key = profile
+                .pending_bootstrap_private_key
+                .as_deref()
+                .ok_or(CliError::Input("profile has no pending bootstrap key"))?;
+            let client = UmbraHttpClient::new(profile)?;
+            let response: DeviceBootstrapResponse = client
+                .get(&format!("/api/v1/devices/{device_id}/bootstrap"))
+                .await?;
+            let Some(bundle_value) = response.bootstrap_bundle.as_ref() else {
+                return Err(CliError::Input("device has no bootstrap bundle yet"));
+            };
+            let envelope: DeviceBootstrapEnvelopeV1 = serde_json::from_value(bundle_value.clone())?;
+            let private_key = UserPrivateKey::from_base64url(bootstrap_private_key)?;
+            let aad = AadV1::device_bootstrap(device_id.to_string());
+            let bundle = decrypt_device_bootstrap_bundle(&private_key, &aad, &envelope)?;
+            profile.kdf_params = Some(bundle.kdf_params);
+            profile.encrypted_user_private_key =
+                Some(serde_json::to_value(bundle.encrypted_user_private_key)?);
+            profile.client_public_key = Some(bundle.account_public_key);
+            profile.user_secret_key = Some(bundle.user_secret_key);
+            profile.default_vault_id = bundle
+                .default_vault_id
+                .map(|id| Uuid::parse_str(&id))
+                .transpose()
+                .map_err(|_| CliError::Input("invalid default vault id in bootstrap bundle"))?;
+            profile.pending_bootstrap_private_key = None;
+            profile.pending_approval_code = None;
+            save_config(&config)?;
+            if output.is_json() {
+                print_json(&response)
+            } else {
+                println!("device bootstrapped: {device_id}");
+                Ok(())
+            }
+        }
         Command::Device(DeviceCommand::List)
         | Command::Device(DeviceCommand::Pending)
         | Command::Device(DeviceCommand::Approve { .. })
         | Command::Device(DeviceCommand::Revoke { .. })
-        | Command::Device(DeviceCommand::Bootstrap { .. })
         | Command::Device(DeviceCommand::Recover { .. }) => {
             Err(CliError::Input("device commands are not implemented yet"))
         }

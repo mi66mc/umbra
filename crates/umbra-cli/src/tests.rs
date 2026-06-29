@@ -557,6 +557,8 @@ fn config_roundtrips_toml() {
             umbra_crypto::Salt::from_bytes([1u8; 16]).to_base64url(),
         )),
         user_secret_key: Some("secret-key".to_owned()),
+        pending_bootstrap_private_key: Some("bootstrap-private".to_owned()),
+        pending_approval_code: Some("UMBRA-ABCD-1234".to_owned()),
         ..ProfileConfig::default()
     };
     config.profiles.insert("personal".to_owned(), profile);
@@ -587,17 +589,27 @@ fn config_roundtrips_toml() {
     let kdf_params = profile.kdf_params.as_ref().unwrap();
     assert_eq!(kdf_params.profile, umbra_crypto::KdfProfile::Balanced);
     assert_eq!(profile.user_secret_key.as_deref(), Some("secret-key"));
+    assert_eq!(
+        profile.pending_bootstrap_private_key.as_deref(),
+        Some("bootstrap-private")
+    );
+    assert_eq!(
+        profile.pending_approval_code.as_deref(),
+        Some("UMBRA-ABCD-1234")
+    );
 }
 
 #[test]
-fn debug_redacts_user_secret_key() {
+fn debug_redacts_local_secret_keys() {
     let profile = ProfileConfig {
         user_secret_key: Some("super-secret-key".to_owned()),
+        pending_bootstrap_private_key: Some("bootstrap-private-key".to_owned()),
         ..ProfileConfig::default()
     };
     let debug = format!("{profile:?}");
 
     assert!(!debug.contains("super-secret-key"));
+    assert!(!debug.contains("bootstrap-private-key"));
     assert!(debug.contains("[redacted]"));
 
     let mut config = CliConfig::default();
@@ -605,6 +617,7 @@ fn debug_redacts_user_secret_key() {
     let debug = format!("{config:?}");
 
     assert!(!debug.contains("super-secret-key"));
+    assert!(!debug.contains("bootstrap-private-key"));
     assert!(debug.contains("[redacted]"));
 }
 
