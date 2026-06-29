@@ -4,14 +4,18 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use umbra_core::{ItemKind, ItemPlaintextV1, VaultId, VaultKind};
 use umbra_crypto::{
-    AadV1, CryptoEnvelopeV1, DeviceBootstrapEnvelopeV1, MasterPassword, UserPrivateKey,
-    UserPublicKey, VaultKey, VaultKeyWrappingEnvelopeV1, decrypt_device_bootstrap_bundle,
-    decrypt_item, encrypt_item, generate_user_keypair, generate_vault_key, unwrap_vault_key,
-    wrap_vault_key_for_user,
+    AadV1, CryptoEnvelopeV1, DeviceBootstrapBundleV1, DeviceBootstrapEnvelopeV1, MasterPassword,
+    RecoveryChallengeEnvelopeV1, UserPrivateKey, UserPublicKey, VaultKey,
+    VaultKeyWrappingEnvelopeV1, decrypt_device_bootstrap_bundle, decrypt_item,
+    decrypt_recovery_challenge, encrypt_device_bootstrap_bundle, encrypt_item,
+    generate_user_keypair, generate_vault_key, unwrap_vault_key, wrap_vault_key_for_user,
 };
 use umbra_protocol::{
-    CreateItemRequest, CreateVaultRequest, DeviceBootstrapResponse, ItemRevisionResponse,
-    PROTOCOL_VERSION, SyncRequest, SyncResponse, UpdateItemRequest, VaultResponse, VaultSyncCursor,
+    ApprovalLookupRequest, ApproveDeviceRequest, CreateItemRequest, CreateVaultRequest,
+    DeviceBootstrapResponse, DeviceResponse, ItemRevisionResponse, PROTOCOL_VERSION,
+    PendingDeviceSummary, RecoverTrustRequest, RecoverTrustResponse, RecoveryChallengeStartRequest,
+    RecoveryChallengeStartResponse, SyncRequest, SyncResponse, UpdateItemRequest, VaultResponse,
+    VaultSyncCursor,
 };
 use uuid::Uuid;
 
@@ -296,6 +300,85 @@ pub async fn run(
             println!("active profile: {name}");
             Ok(())
         }
+        Command::Device(DeviceCommand::List) => {
+            let profile = active_profile(&config)?;
+            require_login(profile)?;
+            let client = UmbraHttpClient::new(profile)?;
+            let devices: Vec<DeviceResponse> = client.get("/api/v1/devices").await?;
+            render_devices(output, &devices)
+        }
+        Command::Device(DeviceCommand::Pending) => {
+            let profile = active_profile(&config)?;
+            require_login(profile)?;
+            let client = UmbraHttpClient::new(profile)?;
+            let devices: Vec<PendingDeviceSummary> = client.get("/api/v1/devices/pending").await?;
+            render_pending_devices(output, &devices)
+        }
+        Command::Device(DeviceCommand::Approve {
+            approval_code,
+            device_id,
+            bootstrap_bundle_json,
+        }) => {
+            let profile = active_profile(&config)?;
+            require_login(profile)?;
+            let client = UmbraHttpClient::new(profile)?;
+            let pending: PendingDeviceSummary = client
+                .post(
+                    "/api/v1/devices/approval-lookup",
+                    &ApprovalLookupRequest {
+                        protocol_version: PROTOCOL_VERSION,
+                        approval_code: approval_code.clone(),
+                    },
+                )
+                .await?;
+            if let Some(device_id) = device_id
+                && device_id != pending.device_id
+            {
+                return Err(CliError::Input("approval code belongs to another device"));
+            }
+            let bootstrap_bundle = if let Some(raw) = bootstrap_bundle_json {
+                serde_json::from_str(&raw)?
+            } else {
+                let recipient = UserPublicKey::from_base64url(&pending.bootstrap_public_key)?;
+                let bundle = device_bootstrap_bundle_from_profile(profile)?;
+                let envelope = encrypt_device_bootstrap_bundle(
+                    &recipient,
+                    AadV1::device_bootstrap(pending.device_id.to_string()),
+                    &bundle,
+                )?;
+                serde_json::to_value(envelope)?
+            };
+            let approved: DeviceResponse = client
+                .post(
+                    &format!("/api/v1/devices/{}/approve", pending.device_id),
+                    &ApproveDeviceRequest {
+                        protocol_version: PROTOCOL_VERSION,
+                        approval_code,
+                        bootstrap_bundle,
+                    },
+                )
+                .await?;
+            if output.is_json() {
+                print_json(&approved)
+            } else {
+                println!("approved device: {}", approved.device_id);
+                Ok(())
+            }
+        }
+        Command::Device(DeviceCommand::Revoke { device_id }) => {
+            let profile = active_profile(&config)?;
+            require_login(profile)?;
+            let client = UmbraHttpClient::new(profile)?;
+            let revoked: DeviceResponse = client
+                .post(&format!("/api/v1/devices/{device_id}/revoke"), &Value::Null)
+                .await?;
+            if output.is_json() {
+                print_json(&revoked)
+            } else {
+                println!("revoked device: {}", revoked.device_id);
+                Ok(())
+            }
+        }
         Command::Device(DeviceCommand::Bootstrap { device_id }) => {
             let profile = active_profile_mut(&mut config);
             let device_id = device_id
@@ -336,12 +419,53 @@ pub async fn run(
                 Ok(())
             }
         }
-        Command::Device(DeviceCommand::List)
-        | Command::Device(DeviceCommand::Pending)
-        | Command::Device(DeviceCommand::Approve { .. })
-        | Command::Device(DeviceCommand::Revoke { .. })
-        | Command::Device(DeviceCommand::Recover { .. }) => {
-            Err(CliError::Input("device commands are not implemented yet"))
+        Command::Device(DeviceCommand::Recover { device_id }) => {
+            let profile = active_profile_mut(&mut config);
+            let device_id = device_id
+                .or(profile.device_id)
+                .ok_or(CliError::Input("profile has no pending device id"))?;
+            let client = UmbraHttpClient::new(profile)?;
+            let challenge: RecoveryChallengeStartResponse = client
+                .post(
+                    &format!("/api/v1/devices/{device_id}/recovery-challenge"),
+                    &RecoveryChallengeStartRequest {
+                        protocol_version: PROTOCOL_VERSION,
+                        device_id,
+                    },
+                )
+                .await?;
+            let password = rpassword::prompt_password("Master password: ")?;
+            let unlocked = crate::crypto_state::load_unlocked_profile(
+                profile,
+                &MasterPassword::new(password.into_bytes()),
+            )?;
+            let envelope: RecoveryChallengeEnvelopeV1 =
+                serde_json::from_value(challenge.encrypted_challenge)?;
+            let aad = AadV1::recovery_challenge(
+                device_id.to_string(),
+                challenge.challenge_id.to_string(),
+            );
+            let plaintext = decrypt_recovery_challenge(&unlocked.private_key, &aad, &envelope)?;
+            let challenge_response =
+                String::from_utf8(plaintext).map_err(|_| CliError::Input("invalid challenge"))?;
+            let recovered: RecoverTrustResponse = client
+                .post(
+                    &format!("/api/v1/devices/{device_id}/recover-trust"),
+                    &RecoverTrustRequest {
+                        protocol_version: PROTOCOL_VERSION,
+                        challenge_id: challenge.challenge_id,
+                        challenge_response,
+                    },
+                )
+                .await?;
+            profile.pending_approval_code = None;
+            save_config(&config)?;
+            if output.is_json() {
+                print_json(&recovered)
+            } else {
+                println!("recovered device trust: {}", recovered.device_id);
+                Ok(())
+            }
         }
         Command::Vault(VaultCommand::List) => {
             let profile = active_profile(&config)?;
@@ -953,6 +1077,92 @@ fn profile_public_key(profile: &crate::config::ProfileConfig) -> Result<UserPubl
     Ok(UserPublicKey::from_base64url(public_key)?)
 }
 
+fn device_bootstrap_bundle_from_profile(
+    profile: &crate::config::ProfileConfig,
+) -> Result<DeviceBootstrapBundleV1, CliError> {
+    let user_secret_key = profile
+        .user_secret_key
+        .clone()
+        .ok_or(CliError::MissingCryptoMaterial)?;
+    let kdf_params = profile
+        .kdf_params
+        .clone()
+        .ok_or(CliError::MissingCryptoMaterial)?;
+    let encrypted_user_private_key = profile
+        .encrypted_user_private_key
+        .clone()
+        .ok_or(CliError::MissingCryptoMaterial)
+        .and_then(|value| serde_json::from_value(value).map_err(CliError::from))?;
+    let account_public_key = profile
+        .client_public_key
+        .clone()
+        .ok_or(CliError::MissingCryptoMaterial)?;
+
+    Ok(DeviceBootstrapBundleV1 {
+        version: 1,
+        user_secret_key,
+        kdf_params,
+        encrypted_user_private_key,
+        account_public_key,
+        default_vault_id: profile.default_vault_id.map(|id| id.to_string()),
+    })
+}
+
+fn render_devices(output: OutputMode, devices: &[DeviceResponse]) -> Result<(), CliError> {
+    if output.is_json() {
+        return print_json(devices);
+    }
+
+    let rows = devices
+        .iter()
+        .map(|device| {
+            vec![
+                device.name.clone(),
+                device.device_id.to_string(),
+                format!("{:?}", device.state).to_ascii_lowercase(),
+                device.fingerprint.clone(),
+                device.trusted_at.clone().unwrap_or_else(|| "-".to_owned()),
+                device.revoked_at.clone().unwrap_or_else(|| "-".to_owned()),
+            ]
+        })
+        .collect::<Vec<_>>();
+    crate::output::print_table(
+        &[
+            "name",
+            "device_id",
+            "state",
+            "fingerprint",
+            "trusted",
+            "revoked",
+        ],
+        &rows,
+    );
+    Ok(())
+}
+
+fn render_pending_devices(
+    output: OutputMode,
+    devices: &[PendingDeviceSummary],
+) -> Result<(), CliError> {
+    if output.is_json() {
+        return print_json(devices);
+    }
+
+    let rows = devices
+        .iter()
+        .map(|device| {
+            vec![
+                device.name.clone(),
+                device.device_id.to_string(),
+                device.fingerprint.clone(),
+                device.approval_expires_at.clone(),
+            ]
+        })
+        .collect::<Vec<_>>();
+    crate::output::print_table(&["name", "device_id", "fingerprint", "expires"], &rows);
+    Ok(())
+}
+
 fn render_vaults(output: OutputMode, vaults: &[VaultResponse]) -> Result<(), CliError> {
     if output.is_json() {
         return print_json(&vaults);
@@ -1506,6 +1716,38 @@ mod tests {
     }
 
     #[test]
+    fn device_bootstrap_bundle_reads_profile_crypto_material() {
+        let account_crypto = crate::crypto_state::NewAccountCrypto::generate(&MasterPassword::new(
+            "correct horse battery staple",
+        ))
+        .unwrap();
+        let default_vault_id = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+        let profile = crate::config::ProfileConfig {
+            client_public_key: Some(account_crypto.public_key.to_base64url()),
+            encrypted_user_private_key: Some(
+                serde_json::to_value(account_crypto.encrypted_private_key).unwrap(),
+            ),
+            kdf_params: Some(account_crypto.kdf_params.clone()),
+            user_secret_key: Some(account_crypto.user_secret_key.to_base64url()),
+            default_vault_id: Some(default_vault_id),
+            ..crate::config::ProfileConfig::default()
+        };
+
+        let bundle = device_bootstrap_bundle_from_profile(&profile).unwrap();
+
+        assert_eq!(bundle.version, 1);
+        assert_eq!(
+            bundle.account_public_key,
+            account_crypto.public_key.to_base64url()
+        );
+        let expected_default_vault_id = default_vault_id.to_string();
+        assert_eq!(
+            bundle.default_vault_id.as_deref(),
+            Some(expected_default_vault_id.as_str())
+        );
+    }
+
+    #[test]
     fn vault_kind_label_uses_cli_names() {
         assert_eq!(vault_kind_label(VaultKind::Personal), "personal");
         assert_eq!(vault_kind_label(VaultKind::Shared), "shared");
@@ -1528,6 +1770,23 @@ mod tests {
 
         assert!(render_vault_created(OutputMode::Json, &vault).is_ok());
         assert!(render_vault_created(OutputMode::Human, &vault).is_ok());
+    }
+
+    #[test]
+    fn render_devices_accepts_json_and_human_modes() {
+        let devices = vec![DeviceResponse {
+            device_id: Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap(),
+            name: "Laptop".to_owned(),
+            public_key: Some("device-public-key".to_owned()),
+            fingerprint: "SHA256:test".to_owned(),
+            state: umbra_core::DeviceState::Trusted,
+            created_at: "2026-01-01T00:00:00Z".to_owned(),
+            trusted_at: Some("2026-01-01T00:00:00Z".to_owned()),
+            revoked_at: None,
+        }];
+
+        assert!(render_devices(OutputMode::Json, &devices).is_ok());
+        assert!(render_devices(OutputMode::Human, &devices).is_ok());
     }
 
     #[test]

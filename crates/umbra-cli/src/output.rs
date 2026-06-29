@@ -14,7 +14,7 @@ impl OutputMode {
     }
 }
 
-pub fn print_json<T: Serialize>(value: &T) -> Result<(), CliError> {
+pub fn print_json<T: Serialize + ?Sized>(value: &T) -> Result<(), CliError> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
 }
