@@ -436,15 +436,18 @@ pub async fn run(
             device_id,
             emergency_kit,
         }) => {
-            if emergency_kit.is_some() {
-                return Err(CliError::Input(
-                    "emergency kit recovery is not implemented yet",
-                ));
-            }
             let profile = active_profile_mut(&mut config);
             let device_id = device_id
                 .or(profile.device_id)
                 .ok_or(CliError::Input("profile has no pending device id"))?;
+            let emergency_kit = match emergency_kit {
+                Some(path) => read_emergency_kit(&path)?,
+                None => {
+                    return Err(CliError::Input(
+                        "pass --emergency-kit <path> for clean-device recovery",
+                    ));
+                }
+            };
             let client = UmbraHttpClient::new(profile)?;
             let challenge: RecoveryChallengeStartResponse = client
                 .post(
@@ -456,9 +459,11 @@ pub async fn run(
                 )
                 .await?;
             let password = rpassword::prompt_password("Master password: ")?;
-            let unlocked = crate::crypto_state::load_unlocked_profile(
+            let master_password = MasterPassword::new(password.into_bytes());
+            let unlocked = crate::crypto_state::unlock_profile_with_emergency_kit(
                 profile,
-                &MasterPassword::new(password.into_bytes()),
+                &master_password,
+                &emergency_kit,
             )?;
             let envelope: RecoveryChallengeEnvelopeV1 =
                 serde_json::from_value(challenge.encrypted_challenge)?;
@@ -479,7 +484,7 @@ pub async fn run(
                     },
                 )
                 .await?;
-            profile.pending_approval_code = None;
+            apply_recovered_emergency_kit_material(profile, &emergency_kit)?;
             save_config(&config)?;
             if output.is_json() {
                 print_json(&recovered)
@@ -1113,6 +1118,30 @@ fn emergency_kit_json_from_profile(
 ) -> Result<String, CliError> {
     let kit = crate::crypto_state::EmergencyKitV1::from_profile(profile)?;
     serde_json::to_string_pretty(&kit).map_err(CliError::from)
+}
+
+fn read_emergency_kit(
+    path: &std::path::Path,
+) -> Result<crate::crypto_state::EmergencyKitV1, CliError> {
+    let raw = std::fs::read_to_string(path)?;
+    serde_json::from_str(&raw).map_err(CliError::from)
+}
+
+fn apply_recovered_emergency_kit_material(
+    profile: &mut crate::config::ProfileConfig,
+    kit: &crate::crypto_state::EmergencyKitV1,
+) -> Result<(), CliError> {
+    if kit.version != 1 {
+        return Err(CliError::Input("unsupported emergency kit version"));
+    }
+
+    profile.client_public_key = Some(kit.account_public_key.clone());
+    profile.user_secret_key = Some(kit.user_secret_key.clone());
+    profile.kdf_params = Some(kit.kdf_params.clone());
+    profile.pending_approval_code = None;
+    profile.legacy_session_token = None;
+    profile.session_id = None;
+    Ok(())
 }
 
 fn device_bootstrap_bundle_from_profile(
@@ -1878,14 +1907,53 @@ mod tests {
         assert!(!kit.contains("private_key"));
     }
 
+    #[test]
+    fn apply_recovered_emergency_kit_material_saves_profile_crypto() {
+        let account_crypto = crate::crypto_state::NewAccountCrypto::generate(&MasterPassword::new(
+            "correct horse battery staple",
+        ))
+        .unwrap();
+        let kit = crate::crypto_state::EmergencyKitV1::from_account_crypto(None, &account_crypto);
+        let mut profile = crate::config::ProfileConfig {
+            pending_approval_code: Some("UMBRA-ABCD-1234".to_owned()),
+            legacy_session_token: Some("pending-bearer".to_owned()),
+            session_id: Some(uuid::Uuid::new_v4()),
+            encrypted_user_private_key: Some(
+                serde_json::to_value(account_crypto.encrypted_private_key.clone()).unwrap(),
+            ),
+            ..crate::config::ProfileConfig::default()
+        };
+
+        apply_recovered_emergency_kit_material(&mut profile, &kit).unwrap();
+
+        assert_eq!(
+            profile.client_public_key.as_deref(),
+            Some(account_crypto.public_key.to_base64url().as_str())
+        );
+        assert_eq!(
+            profile.user_secret_key.as_deref(),
+            Some(account_crypto.user_secret_key.to_base64url().as_str())
+        );
+        assert_eq!(
+            profile.kdf_params.as_ref(),
+            Some(&account_crypto.kdf_params)
+        );
+        assert_eq!(profile.pending_approval_code, None);
+        assert_eq!(profile.legacy_session_token, None);
+        assert_eq!(profile.session_id, None);
+    }
+
     #[tokio::test]
-    async fn device_recover_rejects_emergency_kit_until_implemented() {
+    async fn device_recover_requires_emergency_kit() {
+        let mut config = CliConfig::default();
+        active_profile_mut(&mut config).device_id = Some(uuid::Uuid::new_v4());
+
         let result = run(
             Command::Device(DeviceCommand::Recover {
                 device_id: None,
-                emergency_kit: Some("umbra-emergency-kit.json".into()),
+                emergency_kit: None,
             }),
-            CliConfig::default(),
+            config,
             OutputMode::Human,
         )
         .await;
@@ -1893,7 +1961,7 @@ mod tests {
         assert!(matches!(
             result,
             Err(CliError::Input(
-                "emergency kit recovery is not implemented yet"
+                "pass --emergency-kit <path> for clean-device recovery"
             ))
         ));
     }
