@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use serde::{Deserialize, Serialize};
 use umbra_crypto::{
     AadV1, Argon2idParams, CryptoEnvelopeV1, MasterPassword, Salt, UserKeypair, UserPrivateKey,
     UserPublicKey, UserSecretKey, decrypt_user_private_key, derive_account_kek,
@@ -21,6 +22,54 @@ pub(crate) struct NewAccountCrypto {
 pub(crate) struct UnlockedAccountCrypto {
     pub(crate) public_key: UserPublicKey,
     pub(crate) private_key: UserPrivateKey,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct EmergencyKitV1 {
+    pub(crate) version: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) email: Option<String>,
+    pub(crate) account_public_key: String,
+    pub(crate) user_secret_key: String,
+    pub(crate) kdf_params: Argon2idParams,
+}
+
+impl EmergencyKitV1 {
+    pub(crate) fn from_account_crypto(
+        email: Option<String>,
+        account_crypto: &NewAccountCrypto,
+    ) -> Self {
+        Self {
+            version: 1,
+            email,
+            account_public_key: account_crypto.public_key.to_base64url(),
+            user_secret_key: account_crypto.user_secret_key.to_base64url(),
+            kdf_params: account_crypto.kdf_params.clone(),
+        }
+    }
+
+    pub(crate) fn from_profile(profile: &ProfileConfig) -> Result<Self, CliError> {
+        let account_public_key = profile
+            .client_public_key
+            .clone()
+            .ok_or(CliError::MissingCryptoMaterial)?;
+        let user_secret_key = profile
+            .user_secret_key
+            .clone()
+            .ok_or(CliError::MissingCryptoMaterial)?;
+        let kdf_params = profile
+            .kdf_params
+            .clone()
+            .ok_or(CliError::MissingCryptoMaterial)?;
+
+        Ok(Self {
+            version: 1,
+            email: profile.email.clone(),
+            account_public_key,
+            user_secret_key,
+            kdf_params,
+        })
+    }
 }
 
 impl NewAccountCrypto {
@@ -95,6 +144,33 @@ pub(crate) fn load_unlocked_profile(
     account_crypto.unlock(password)
 }
 
+pub(crate) fn unlock_profile_with_emergency_kit(
+    profile: &ProfileConfig,
+    password: &MasterPassword,
+    emergency_kit: &EmergencyKitV1,
+) -> Result<UnlockedAccountCrypto, CliError> {
+    if emergency_kit.version != 1 {
+        return Err(CliError::Input("unsupported emergency kit version"));
+    }
+
+    let public_key = UserPublicKey::from_base64url(&emergency_kit.account_public_key)?;
+    let user_secret_key = UserSecretKey::from_base64url(&emergency_kit.user_secret_key)?;
+    let encrypted_private_key = profile
+        .encrypted_user_private_key
+        .clone()
+        .ok_or(CliError::MissingCryptoMaterial)
+        .and_then(|value| serde_json::from_value(value).map_err(CliError::from))?;
+
+    let account_crypto = NewAccountCrypto {
+        public_key,
+        user_secret_key,
+        kdf_params: emergency_kit.kdf_params.clone(),
+        encrypted_private_key,
+    };
+
+    account_crypto.unlock(password)
+}
+
 pub(crate) fn keypair_from_unlocked(unlocked: &UnlockedAccountCrypto) -> UserKeypair {
     UserKeypair {
         public_key: unlocked.public_key,
@@ -128,5 +204,71 @@ mod tests {
         let account_crypto = NewAccountCrypto::generate(&password).unwrap();
 
         assert!(account_crypto.unlock(&wrong_password).is_err());
+    }
+
+    #[test]
+    fn emergency_kit_roundtrips_without_private_key_material() {
+        let password = MasterPassword::new("correct horse battery staple");
+        let account_crypto = NewAccountCrypto::generate(&password).unwrap();
+
+        let kit = EmergencyKitV1::from_account_crypto(
+            Some("miguel@example.com".to_owned()),
+            &account_crypto,
+        );
+        let encoded = serde_json::to_string_pretty(&kit).unwrap();
+
+        assert!(encoded.contains("\"version\": 1"));
+        assert!(encoded.contains("miguel@example.com"));
+        assert!(encoded.contains(&account_crypto.public_key.to_base64url()));
+        assert!(encoded.contains(&account_crypto.user_secret_key.to_base64url()));
+        assert!(!encoded.contains("encrypted_private_key"));
+        assert!(!encoded.contains("private_key"));
+
+        let decoded: EmergencyKitV1 = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, kit);
+    }
+
+    #[test]
+    fn unlock_profile_with_emergency_kit_works_without_profile_secret_key() {
+        let password = MasterPassword::new("correct horse battery staple");
+        let account_crypto = NewAccountCrypto::generate(&password).unwrap();
+        let kit = EmergencyKitV1::from_account_crypto(None, &account_crypto);
+        let clean_profile = ProfileConfig {
+            encrypted_user_private_key: Some(
+                serde_json::to_value(account_crypto.encrypted_private_key.clone()).unwrap(),
+            ),
+            user_secret_key: None,
+            kdf_params: None,
+            client_public_key: None,
+            ..ProfileConfig::default()
+        };
+
+        let unlocked = unlock_profile_with_emergency_kit(&clean_profile, &password, &kit).unwrap();
+
+        assert_eq!(unlocked.public_key, account_crypto.public_key);
+        assert_eq!(
+            unlocked.private_key.to_base64url(),
+            account_crypto
+                .unlock(&password)
+                .unwrap()
+                .private_key
+                .to_base64url()
+        );
+    }
+
+    #[test]
+    fn unlock_profile_with_emergency_kit_rejects_wrong_password() {
+        let password = MasterPassword::new("correct horse battery staple");
+        let wrong_password = MasterPassword::new("wrong horse battery staple");
+        let account_crypto = NewAccountCrypto::generate(&password).unwrap();
+        let kit = EmergencyKitV1::from_account_crypto(None, &account_crypto);
+        let clean_profile = ProfileConfig {
+            encrypted_user_private_key: Some(
+                serde_json::to_value(account_crypto.encrypted_private_key.clone()).unwrap(),
+            ),
+            ..ProfileConfig::default()
+        };
+
+        assert!(unlock_profile_with_emergency_kit(&clean_profile, &wrong_password, &kit).is_err());
     }
 }
