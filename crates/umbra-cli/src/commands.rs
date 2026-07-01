@@ -282,6 +282,9 @@ pub async fn run(
             let status = cache.status()?;
             render_cache_status(output, &status)
         }
+        Command::EmergencyKit(_) => Err(CliError::Input(
+            "emergency kit commands are not implemented yet",
+        )),
         Command::Profile(ProfileCommand::List) => {
             for (name, profile) in &config.profiles {
                 let marker = if name == &config.active_profile {
@@ -419,7 +422,7 @@ pub async fn run(
                 Ok(())
             }
         }
-        Command::Device(DeviceCommand::Recover { device_id }) => {
+        Command::Device(DeviceCommand::Recover { device_id, .. }) => {
             let profile = active_profile_mut(&mut config);
             let device_id = device_id
                 .or(profile.device_id)

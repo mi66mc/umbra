@@ -19,6 +19,7 @@ use clap::{Parser, Subcommand};
 use opaque_ke::argon2::Argon2;
 use opaque_ke::ciphersuite::CipherSuite;
 use sha2::Sha512;
+use std::path::PathBuf;
 use umbra_core::{DeviceId, ItemId, ItemKind, RevisionId, VaultId};
 
 use crate::commands::parse_item_kind;
@@ -76,6 +77,8 @@ pub enum Command {
     #[command(subcommand)]
     Cache(CacheCommand),
     #[command(subcommand)]
+    EmergencyKit(EmergencyKitCommand),
+    #[command(subcommand)]
     Profile(ProfileCommand),
     #[command(subcommand)]
     Vault(VaultCommand),
@@ -106,6 +109,14 @@ pub enum ProfileCommand {
 #[derive(Debug, Subcommand)]
 pub enum CacheCommand {
     Status,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum EmergencyKitCommand {
+    Export {
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -207,6 +218,8 @@ pub enum DeviceCommand {
     Recover {
         #[arg(long)]
         device_id: Option<DeviceId>,
+        #[arg(long)]
+        emergency_kit: Option<PathBuf>,
     },
 }
 

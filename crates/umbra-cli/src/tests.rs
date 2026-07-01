@@ -644,6 +644,26 @@ fn parses_cache_status_command() {
 }
 
 #[test]
+fn parses_emergency_kit_export_command() {
+    let cli = Cli::parse_from([
+        "umbra",
+        "emergency-kit",
+        "export",
+        "--output",
+        "umbra-emergency-kit.json",
+    ]);
+
+    let Command::EmergencyKit(crate::EmergencyKitCommand::Export { output }) = cli.command else {
+        panic!("expected emergency-kit export command");
+    };
+
+    assert_eq!(
+        output.as_deref(),
+        Some(std::path::Path::new("umbra-emergency-kit.json"))
+    );
+}
+
+#[test]
 fn parses_device_commands() {
     let cli = Cli::parse_from(["umbra", "device", "list"]);
     assert!(matches!(cli.command, Command::Device(DeviceCommand::List)));
@@ -705,7 +725,27 @@ fn parses_device_commands() {
     ]);
     assert!(matches!(
         cli.command,
-        Command::Device(DeviceCommand::Recover { device_id: Some(_) })
+        Command::Device(DeviceCommand::Recover {
+            device_id: Some(_),
+            ..
+        })
+    ));
+
+    let cli = Cli::parse_from([
+        "umbra",
+        "device",
+        "recover",
+        "--device-id",
+        "00000000-0000-0000-0000-000000000001",
+        "--emergency-kit",
+        "umbra-emergency-kit.json",
+    ]);
+    assert!(matches!(
+        cli.command,
+        Command::Device(DeviceCommand::Recover {
+            device_id: Some(_),
+            emergency_kit: Some(path),
+        }) if path == std::path::PathBuf::from("umbra-emergency-kit.json")
     ));
 }
 
