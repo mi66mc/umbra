@@ -422,7 +422,15 @@ pub async fn run(
                 Ok(())
             }
         }
-        Command::Device(DeviceCommand::Recover { device_id, .. }) => {
+        Command::Device(DeviceCommand::Recover {
+            device_id,
+            emergency_kit,
+        }) => {
+            if emergency_kit.is_some() {
+                return Err(CliError::Input(
+                    "emergency kit recovery is not implemented yet",
+                ));
+            }
             let profile = active_profile_mut(&mut config);
             let device_id = device_id
                 .or(profile.device_id)
@@ -1714,6 +1722,26 @@ mod tests {
             profile_public_key(&profile),
             Err(CliError::Input(
                 "profile has no account public key; run `umbra register` for this profile"
+            ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn device_recover_rejects_emergency_kit_until_implemented() {
+        let result = run(
+            Command::Device(DeviceCommand::Recover {
+                device_id: None,
+                emergency_kit: Some("umbra-emergency-kit.json".into()),
+            }),
+            CliConfig::default(),
+            OutputMode::Human,
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(CliError::Input(
+                "emergency kit recovery is not implemented yet"
             ))
         ));
     }
