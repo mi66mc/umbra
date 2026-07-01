@@ -24,7 +24,7 @@ pub(crate) struct UnlockedAccountCrypto {
     pub(crate) private_key: UserPrivateKey,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct EmergencyKitV1 {
     pub(crate) version: u16,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -32,6 +32,19 @@ pub(crate) struct EmergencyKitV1 {
     pub(crate) account_public_key: String,
     pub(crate) user_secret_key: String,
     pub(crate) kdf_params: Argon2idParams,
+}
+
+impl std::fmt::Debug for EmergencyKitV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("EmergencyKitV1")
+            .field("version", &self.version)
+            .field("email", &self.email)
+            .field("account_public_key", &self.account_public_key)
+            .field("user_secret_key", &"[redacted]")
+            .field("kdf_params", &self.kdf_params)
+            .finish()
+    }
 }
 
 impl EmergencyKitV1 {
@@ -226,6 +239,18 @@ mod tests {
 
         let decoded: EmergencyKitV1 = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, kit);
+    }
+
+    #[test]
+    fn emergency_kit_debug_redacts_user_secret_key() {
+        let password = MasterPassword::new("correct horse battery staple");
+        let account_crypto = NewAccountCrypto::generate(&password).unwrap();
+        let kit = EmergencyKitV1::from_account_crypto(None, &account_crypto);
+
+        let debug = format!("{kit:?}");
+
+        assert!(!debug.contains(&account_crypto.user_secret_key.to_base64url()));
+        assert!(debug.contains("[redacted]"));
     }
 
     #[test]
