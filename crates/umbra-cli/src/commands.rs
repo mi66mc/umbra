@@ -1793,10 +1793,87 @@ mod tests {
         };
 
         let kit = emergency_kit_json_from_profile(&profile).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&kit).unwrap();
 
+        assert_emergency_kit_json(
+            &parsed,
+            "miguel@example.com",
+            &account_crypto.public_key.to_base64url(),
+            &account_crypto.user_secret_key.to_base64url(),
+        );
         assert!(kit.contains("miguel@example.com"));
         assert!(kit.contains(&account_crypto.public_key.to_base64url()));
         assert!(kit.contains(&account_crypto.user_secret_key.to_base64url()));
+        assert!(!kit.contains("encrypted_private_key"));
+        assert!(!kit.contains("private_key"));
+    }
+
+    #[tokio::test]
+    async fn emergency_kit_export_command_writes_active_profile_kit() {
+        let inactive_crypto = crate::crypto_state::NewAccountCrypto::generate(
+            &MasterPassword::new("inactive profile password"),
+        )
+        .unwrap();
+        let active_crypto = crate::crypto_state::NewAccountCrypto::generate(&MasterPassword::new(
+            "active profile password",
+        ))
+        .unwrap();
+        let mut profiles = BTreeMap::new();
+        profiles.insert(
+            "default".to_owned(),
+            crate::config::ProfileConfig {
+                email: Some("default@example.com".to_owned()),
+                client_public_key: Some(inactive_crypto.public_key.to_base64url()),
+                encrypted_user_private_key: Some(
+                    serde_json::to_value(inactive_crypto.encrypted_private_key).unwrap(),
+                ),
+                kdf_params: Some(inactive_crypto.kdf_params),
+                user_secret_key: Some(inactive_crypto.user_secret_key.to_base64url()),
+                ..crate::config::ProfileConfig::default()
+            },
+        );
+        profiles.insert(
+            "work".to_owned(),
+            crate::config::ProfileConfig {
+                email: Some("work@example.com".to_owned()),
+                client_public_key: Some(active_crypto.public_key.to_base64url()),
+                encrypted_user_private_key: Some(
+                    serde_json::to_value(active_crypto.encrypted_private_key).unwrap(),
+                ),
+                kdf_params: Some(active_crypto.kdf_params.clone()),
+                user_secret_key: Some(active_crypto.user_secret_key.to_base64url()),
+                ..crate::config::ProfileConfig::default()
+            },
+        );
+        let config = CliConfig {
+            active_profile: "work".to_owned(),
+            profiles,
+            server_url: None,
+            session_token: None,
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("umbra-emergency-kit.json");
+
+        run(
+            Command::EmergencyKit(EmergencyKitCommand::Export {
+                output: Some(output.clone()),
+            }),
+            config,
+            OutputMode::Human,
+        )
+        .await
+        .unwrap();
+
+        let kit = std::fs::read_to_string(output).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&kit).unwrap();
+        assert_emergency_kit_json(
+            &parsed,
+            "work@example.com",
+            &active_crypto.public_key.to_base64url(),
+            &active_crypto.user_secret_key.to_base64url(),
+        );
+        assert!(!kit.contains("default@example.com"));
+        assert!(!kit.contains(&inactive_crypto.public_key.to_base64url()));
         assert!(!kit.contains("encrypted_private_key"));
         assert!(!kit.contains("private_key"));
     }
@@ -1819,6 +1896,56 @@ mod tests {
                 "emergency kit recovery is not implemented yet"
             ))
         ));
+    }
+
+    fn assert_emergency_kit_json(
+        parsed: &serde_json::Value,
+        email: &str,
+        account_public_key: &str,
+        user_secret_key: &str,
+    ) {
+        let object = parsed.as_object().unwrap();
+        let keys = object
+            .keys()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert_eq!(
+            keys,
+            std::collections::BTreeSet::from([
+                "account_public_key",
+                "email",
+                "kdf_params",
+                "user_secret_key",
+                "version"
+            ])
+        );
+        assert_eq!(
+            object.get("version").and_then(serde_json::Value::as_u64),
+            Some(1)
+        );
+        assert_eq!(
+            object.get("email").and_then(serde_json::Value::as_str),
+            Some(email)
+        );
+        assert_eq!(
+            object
+                .get("account_public_key")
+                .and_then(serde_json::Value::as_str),
+            Some(account_public_key)
+        );
+        assert_eq!(
+            object
+                .get("user_secret_key")
+                .and_then(serde_json::Value::as_str),
+            Some(user_secret_key)
+        );
+        assert!(
+            object
+                .get("kdf_params")
+                .and_then(serde_json::Value::as_object)
+                .is_some()
+        );
     }
 
     #[test]
