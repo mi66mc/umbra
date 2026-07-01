@@ -159,6 +159,7 @@ pub async fn run(
                 profile_config.session_id = None;
                 profile_config.device_private_key = Some(device_key.to_base64url());
                 profile_config.legacy_session_token = response.session_token;
+                save_pending_login_crypto_material(profile_config, response.encrypted_private_key);
                 profile_config.pending_bootstrap_private_key =
                     Some(bootstrap_keypair.private_key.to_base64url());
                 profile_config.pending_approval_code = Some(pending.approval_code.clone());
@@ -989,6 +990,16 @@ fn require_login(profile: &crate::config::ProfileConfig) -> Result<(), CliError>
     }
 }
 
+fn save_pending_login_crypto_material(
+    profile: &mut crate::config::ProfileConfig,
+    encrypted_private_key: serde_json::Value,
+) {
+    profile.encrypted_user_private_key = Some(encrypted_private_key);
+    profile.client_public_key = None;
+    profile.kdf_params = None;
+    profile.user_secret_key = None;
+}
+
 fn resolve_vault_id(
     profile: &crate::config::ProfileConfig,
     cache: &crate::cache::LocalCache,
@@ -1724,6 +1735,28 @@ mod tests {
                 "profile has no account public key; run `umbra register` for this profile"
             ))
         ));
+    }
+
+    #[test]
+    fn save_pending_login_crypto_material_stores_encrypted_private_key() {
+        let mut profile = crate::config::ProfileConfig::default();
+        let encrypted_private_key = serde_json::json!({
+            "version": 1,
+            "suite": "UMBRA_XCHACHA20POLY1305_HKDFSHA256_V1",
+            "nonce": "nonce",
+            "aad": "aad",
+            "ciphertext": "ciphertext"
+        });
+
+        save_pending_login_crypto_material(&mut profile, encrypted_private_key.clone());
+
+        assert_eq!(
+            profile.encrypted_user_private_key.as_ref(),
+            Some(&encrypted_private_key)
+        );
+        assert_eq!(profile.user_secret_key, None);
+        assert_eq!(profile.kdf_params, None);
+        assert_eq!(profile.client_public_key, None);
     }
 
     #[tokio::test]
