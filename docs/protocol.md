@@ -109,12 +109,12 @@ Recovery without another trusted device is challenge based:
 ```txt
 1. pending device starts a recovery challenge
 2. server encrypts a random challenge to the account public key
-3. client decrypts it locally using the account private key
+3. client reconstructs the account private key locally from the pending encrypted private key, emergency kit, and master password
 4. client returns the challenge response
 5. server consumes the challenge once and marks the current pending device trusted
 ```
 
-The current CLI recovery path requires the profile to already have enough local account crypto material to decrypt the challenge. A clean-device emergency-kit import flow is planned separately.
+The CLI clean-device recovery path gets account public key, KDF params, and user secret key from the emergency kit, while the encrypted user private key comes from the OPAQUE login response. The challenge is decrypted locally and the plaintext challenge response is sent to `recover-trust`. After recovery succeeds, the CLI clears the pending bearer/session so the device performs a normal trusted login.
 
 The OPAQUE server setup must be persistent outside PostgreSQL. Generate it with:
 

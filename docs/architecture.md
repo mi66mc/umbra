@@ -106,7 +106,7 @@ The user secret key is not a daily password. It is a high-entropy account secret
 
 - Existing trusted device: user enters password; CLI reads the secret key from local secure storage/cache.
 - New device with another trusted device available: user enters password, the device starts as pending, and a trusted device encrypts a bootstrap bundle for it.
-- New device with no trusted device available: user enters password and uses an emergency-kit recovery flow. The clean-device import UX is future work; the protocol already supports challenge recovery when account crypto material is locally available.
+- New device with no trusted device available: user enters password, imports the emergency kit, decrypts the server-provided encrypted user private key locally, and completes a recovery challenge.
 - After registration or bootstrap: the device may store the secret key locally, protected by OS keychain or encrypted local cache.
 
 ## Device Trust
@@ -133,6 +133,8 @@ First registration creates a trusted device. Later devices use this flow:
 ```
 
 The bootstrap bundle is zero-knowledge from the server perspective. It is encrypted client-side to the pending device's bootstrap public key and includes the account material needed for local decrypt operations.
+
+When no trusted device is available, clean-device recovery uses the emergency kit. The pending login stores only the server-provided encrypted user private key envelope. `device recover --emergency-kit <path>` combines that envelope with the emergency kit and master password locally, decrypts the server challenge, and saves account crypto material only after the server marks the device trusted.
 
 Revoking a device stops future sync/API access and revokes that device's active sessions. It does not erase local cache or secrets already viewed on that device. Vault key rotation and real secret rotation are still required after suspected compromise.
 

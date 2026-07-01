@@ -162,7 +162,7 @@ The CLI registration flow currently generates:
 - Argon2id KDF params per profile;
 - an encrypted user private key envelope.
 
-The profile stores the public key, encrypted private key envelope, KDF params, and user secret key. This is acceptable for the current developer MVP, but before a production release the `UserSecretKey` should be shown as an emergency kit and protected by OS keychain or equivalent local secret storage instead of plain TOML.
+The CLI can export an emergency kit containing `user_secret_key`, KDF params, and the account public key. The emergency kit must be stored offline. The normal profile may still cache account crypto material for developer-MVP usability, but clean-device recovery uses the emergency kit path instead of relying on a previous local profile.
 
 Vault creation generates a random `VaultKey` and wraps it for the user's public key. Item creation serializes `ItemPlaintextV1`, encrypts it with a key derived from the vault key and item AAD, and uploads only the envelope.
 

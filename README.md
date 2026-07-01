@@ -136,10 +136,21 @@ Useful device commands:
 umbra device list
 umbra device pending
 umbra device revoke <device-id>
-umbra device recover
+umbra emergency-kit export --output umbra-emergency-kit.json
+umbra device recover --emergency-kit umbra-emergency-kit.json
 ```
 
-`device recover` uses the protocol recovery challenge, but the current CLI expects the profile to already have enough local account crypto material to decrypt the challenge. A clean-machine emergency-kit import command is planned separately.
+`emergency-kit export` must be run from an already trusted profile. The kit contains the account public key, KDF params, and user secret key. It does not contain the master password, plaintext user private key, vault keys, item plaintext, or session tokens.
+
+Clean-machine recovery when no trusted device is available:
+
+```bash
+umbra login --profile recovered --email miguel@example.com --new-device --device-name "Recovered laptop"
+umbra device recover --emergency-kit umbra-emergency-kit.json
+umbra login --profile recovered
+```
+
+The first login creates a pending device and stores the encrypted user private key envelope returned by the server. `device recover` combines that envelope with the emergency kit and master password locally, answers the server recovery challenge, clears the pending bearer/session, and requires a normal login after trust succeeds. Anyone with both the emergency kit and master password can recover the account, so store the kit offline.
 
 Revoking a device stops future server access and active sessions for that device. It does not erase secrets already viewed or cached on that machine; rotate affected vault keys and real third-party secrets after device loss or compromise.
 
