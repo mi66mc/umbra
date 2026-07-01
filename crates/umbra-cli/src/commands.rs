@@ -27,8 +27,8 @@ use crate::http::{PublicHttpClient, UmbraHttpClient};
 use crate::keys::DeviceSigningKey;
 use crate::output::{OutputMode, print_json};
 use crate::{
-    AuthCommand, CacheCommand, Command, DeviceCommand, ItemCommand, ProfileCommand, SecretCommand,
-    SyncCommand, TokenCommand, VaultCommand,
+    AuthCommand, CacheCommand, Command, DeviceCommand, EmergencyKitCommand, ItemCommand,
+    ProfileCommand, SecretCommand, SyncCommand, TokenCommand, VaultCommand,
 };
 
 trait OutputModeExt {
@@ -283,9 +283,18 @@ pub async fn run(
             let status = cache.status()?;
             render_cache_status(output, &status)
         }
-        Command::EmergencyKit(_) => Err(CliError::Input(
-            "emergency kit commands are not implemented yet",
-        )),
+        Command::EmergencyKit(EmergencyKitCommand::Export { output }) => {
+            let profile = active_profile(&config)?;
+            let encoded = emergency_kit_json_from_profile(profile)?;
+            if let Some(path) = output {
+                std::fs::write(&path, encoded)?;
+                println!("emergency kit written: {}", path.display());
+                Ok(())
+            } else {
+                println!("{encoded}");
+                Ok(())
+            }
+        }
         Command::Profile(ProfileCommand::List) => {
             for (name, profile) in &config.profiles {
                 let marker = if name == &config.active_profile {
@@ -1099,6 +1108,13 @@ fn profile_public_key(profile: &crate::config::ProfileConfig) -> Result<UserPubl
     Ok(UserPublicKey::from_base64url(public_key)?)
 }
 
+fn emergency_kit_json_from_profile(
+    profile: &crate::config::ProfileConfig,
+) -> Result<String, CliError> {
+    let kit = crate::crypto_state::EmergencyKitV1::from_profile(profile)?;
+    serde_json::to_string_pretty(&kit).map_err(CliError::from)
+}
+
 fn device_bootstrap_bundle_from_profile(
     profile: &crate::config::ProfileConfig,
 ) -> Result<DeviceBootstrapBundleV1, CliError> {
@@ -1757,6 +1773,32 @@ mod tests {
         assert_eq!(profile.user_secret_key, None);
         assert_eq!(profile.kdf_params, None);
         assert_eq!(profile.client_public_key, None);
+    }
+
+    #[test]
+    fn emergency_kit_from_profile_omits_encrypted_private_key() {
+        let account_crypto = crate::crypto_state::NewAccountCrypto::generate(&MasterPassword::new(
+            "correct horse battery staple",
+        ))
+        .unwrap();
+        let profile = crate::config::ProfileConfig {
+            email: Some("miguel@example.com".to_owned()),
+            client_public_key: Some(account_crypto.public_key.to_base64url()),
+            encrypted_user_private_key: Some(
+                serde_json::to_value(account_crypto.encrypted_private_key).unwrap(),
+            ),
+            kdf_params: Some(account_crypto.kdf_params.clone()),
+            user_secret_key: Some(account_crypto.user_secret_key.to_base64url()),
+            ..crate::config::ProfileConfig::default()
+        };
+
+        let kit = emergency_kit_json_from_profile(&profile).unwrap();
+
+        assert!(kit.contains("miguel@example.com"));
+        assert!(kit.contains(&account_crypto.public_key.to_base64url()));
+        assert!(kit.contains(&account_crypto.user_secret_key.to_base64url()));
+        assert!(!kit.contains("encrypted_private_key"));
+        assert!(!kit.contains("private_key"));
     }
 
     #[tokio::test]
