@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use umbra_core::{
-    DeviceId, DeviceState, ItemId, ItemKind, OrgId, OrgRole, RevisionId, UserId, VaultId,
-    VaultKind, VaultRole,
+    DeviceId, DeviceState, ItemId, ItemKind, MemberState, OrgId, OrgRole, RevisionId, UserId,
+    VaultId, VaultKind, VaultRole,
 };
 
 pub const PROTOCOL_VERSION: u16 = 1;
@@ -215,6 +215,35 @@ pub struct CreateOrgRequest {
 pub struct OrgResponse {
     pub org_id: OrgId,
     pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserLookupRequest {
+    pub protocol_version: u16,
+    pub email: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserLookupResponse {
+    pub user_id: UserId,
+    pub email: String,
+    pub public_key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrgMemberResponse {
+    pub org_id: OrgId,
+    pub user_id: UserId,
+    pub role: OrgRole,
+    pub state: MemberState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VaultMemberResponse {
+    pub vault_id: VaultId,
+    pub user_id: UserId,
+    pub role: VaultRole,
+    pub state: MemberState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -537,5 +566,39 @@ mod tests {
         let decoded: SyncStatusResponse = serde_json::from_str(&encoded).unwrap();
 
         assert_eq!(decoded, response);
+    }
+
+    #[test]
+    fn membership_protocol_types_roundtrip() {
+        use serde_json::json;
+
+        let lookup = UserLookupResponse {
+            user_id: Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap(),
+            email: "ana@example.com".to_owned(),
+            public_key: "ana-public-key".to_owned(),
+        };
+        let encoded = serde_json::to_value(&lookup).unwrap();
+        assert_eq!(encoded["email"], json!("ana@example.com"));
+        assert_eq!(encoded["public_key"], json!("ana-public-key"));
+
+        let org_member = OrgMemberResponse {
+            org_id: Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap(),
+            user_id: lookup.user_id,
+            role: OrgRole::Admin,
+            state: MemberState::Active,
+        };
+        let encoded = serde_json::to_value(&org_member).unwrap();
+        assert_eq!(encoded["role"], json!("admin"));
+        assert_eq!(encoded["state"], json!("active"));
+
+        let vault_member = VaultMemberResponse {
+            vault_id: Uuid::parse_str("00000000-0000-0000-0000-000000000003").unwrap(),
+            user_id: lookup.user_id,
+            role: VaultRole::Viewer,
+            state: MemberState::Active,
+        };
+        let encoded = serde_json::to_value(&vault_member).unwrap();
+        assert_eq!(encoded["role"], json!("viewer"));
+        assert_eq!(encoded["state"], json!("active"));
     }
 }
