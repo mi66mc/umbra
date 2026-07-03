@@ -30,6 +30,8 @@ GET  /api/v1/devices/:device_id/bootstrap
 POST /api/v1/devices/:device_id/recovery-challenge
 POST /api/v1/devices/:device_id/recover-trust
 
+POST /api/v1/users/lookup
+
 GET  /api/v1/orgs
 POST /api/v1/orgs
 GET  /api/v1/orgs/:org_id
@@ -63,6 +65,24 @@ POST /api/v1/sync/status
 ```
 
 The server currently implements the OPAQUE register/login flow, organization creation/listing/member management, personal vault creation, organization vault creation, direct vault member grants, member removal, rotation status, rotation completion, encrypted item creation/update, and revision sync.
+
+### User Lookup
+
+```http
+POST /api/v1/users/lookup
+```
+
+This trusted endpoint returns `user_id`, email, and account public key for an existing user. It exists so a client can encrypt a vault-key wrapping to that user's public key without exposing the vault key to the server.
+
+### Vault Members
+
+```http
+GET /api/v1/vaults/:vault_id/members
+POST /api/v1/vaults/:vault_id/members
+DELETE /api/v1/vaults/:vault_id/members/:user_id
+```
+
+`POST` requires `vault_key_wrapping`. The wrapping is produced client-side with the target account public key. The server stores the wrapping and enforces membership/role checks, but cannot decrypt it.
 
 ## Auth Flow
 

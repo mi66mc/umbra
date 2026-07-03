@@ -154,6 +154,25 @@ The first login creates a pending device and stores the encrypted user private k
 
 Revoking a device stops future server access and active sessions for that device. It does not erase secrets already viewed or cached on that machine; rotate affected vault keys and real third-party secrets after device loss or compromise.
 
+## Organizations And Shared Vaults
+
+Personal vaults do not need an organization. Use an organization when a team needs shared ownership and org-scoped vaults.
+
+```bash
+umbra org create BlackWire
+umbra org list
+umbra org add-member <org-id> --email ana@example.com --role admin
+umbra org members <org-id>
+
+umbra vault create Platform --org-id <org-id>
+umbra vault add-member --vault Platform --email ana@example.com --role editor
+umbra vault members --vault Platform
+```
+
+`vault add-member` resolves the target user's account public key, unwraps the vault key locally, wraps the vault key to that public key, and sends only the encrypted wrapping to the server. The server never receives the vault key in plaintext.
+
+Removing a vault member stops future sync for that user and revokes their active wrapping, but it does not erase secrets already seen. Rotate the vault key and real third-party secrets after sensitive removals.
+
 Legacy bearer-token setup is still available for debugging:
 
 ```bash

@@ -152,6 +152,8 @@ Revoking a device stops future sync/API access and revokes that device's active 
 
 An accepted invite without a key wrapping is not enough to decrypt a vault. Access becomes cryptographically usable only after a wrapping exists.
 
+The first CLI sharing flow is direct membership, not email invites. The owner/admin runs `vault add-member --email <email> --role <role>`. The CLI asks the server for the target user's account public key, unwraps the current vault key locally, creates a new `user_public_key` wrapping for the target user, and uploads that encrypted wrapping with the membership change. A user can have personal vaults with `org_id = null`; organizations are only needed for team ownership and org-scoped vaults.
+
 ## Item Model
 
 Vault items must support simple and complex secrets. The encrypted plaintext schema is client-owned and versioned. Initial item kinds include:
