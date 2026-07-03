@@ -13,12 +13,13 @@ use umbra_crypto::{
     generate_user_keypair, generate_vault_key, unwrap_vault_key, wrap_vault_key_for_user,
 };
 use umbra_protocol::{
-    AddOrgMemberRequest, ApprovalLookupRequest, ApproveDeviceRequest, CreateItemRequest,
-    CreateOrgRequest, CreateOrgVaultRequest, CreateVaultRequest, DeviceBootstrapResponse,
-    DeviceResponse, ItemRevisionResponse, OrgMemberResponse, OrgResponse, PROTOCOL_VERSION,
-    PendingDeviceSummary, RecoverTrustRequest, RecoverTrustResponse, RecoveryChallengeStartRequest,
-    RecoveryChallengeStartResponse, SyncRequest, SyncResponse, UpdateItemRequest,
-    UserLookupRequest, UserLookupResponse, VaultResponse, VaultSyncCursor,
+    AddOrgMemberRequest, AddVaultMemberRequest, ApprovalLookupRequest, ApproveDeviceRequest,
+    CreateItemRequest, CreateOrgRequest, CreateOrgVaultRequest, CreateVaultRequest,
+    DeviceBootstrapResponse, DeviceResponse, ItemRevisionResponse, OrgMemberResponse, OrgResponse,
+    PROTOCOL_VERSION, PendingDeviceSummary, RecoverTrustRequest, RecoverTrustResponse,
+    RecoveryChallengeStartRequest, RecoveryChallengeStartResponse, SyncRequest, SyncResponse,
+    UpdateItemRequest, UserLookupRequest, UserLookupResponse, VaultMemberResponse, VaultResponse,
+    VaultSyncCursor,
 };
 use uuid::Uuid;
 
@@ -638,11 +639,93 @@ pub async fn run(
             .await?;
             render_vault_created(output, &vault)
         }
-        Command::Vault(VaultCommand::Members { .. })
-        | Command::Vault(VaultCommand::AddMember { .. })
-        | Command::Vault(VaultCommand::RemoveMember { .. }) => Err(CliError::Input(
-            "vault member commands are not implemented yet",
-        )),
+        Command::Vault(VaultCommand::Members { vault_id, vault }) => {
+            let profile = active_profile(&config)?;
+            require_login(profile)?;
+            let cache = crate::cache::LocalCache::open(&config.active_profile)?;
+            let vault_id =
+                resolve_vault_id_for_output(profile, &cache, vault_id, vault.as_deref(), output)?;
+            let client = UmbraHttpClient::new(profile)?;
+            let members: Vec<VaultMemberResponse> = client
+                .get(&format!("/api/v1/vaults/{vault_id}/members"))
+                .await?;
+            render_vault_members(output, &members)
+        }
+        Command::Vault(VaultCommand::AddMember {
+            vault_id,
+            vault,
+            email,
+            user_id,
+            role,
+        }) => {
+            let profile = active_profile(&config)?;
+            require_login(profile)?;
+            let cache = crate::cache::LocalCache::open(&config.active_profile)?;
+            let vault_id =
+                resolve_vault_id_for_output(profile, &cache, vault_id, vault.as_deref(), output)?;
+            let client = UmbraHttpClient::new(profile)?;
+            let looked_up = match email.as_deref() {
+                Some(email) => Some(lookup_user_by_email(&client, email).await?),
+                None => None,
+            };
+            let target_user_id = resolve_target_user_id(
+                user_id,
+                looked_up.as_ref().map(|user| user.user_id),
+                email.as_deref(),
+            )?;
+            let target_public_key = match looked_up {
+                Some(user) => UserPublicKey::from_base64url(&user.public_key)?,
+                None => {
+                    return Err(CliError::Input(
+                        "vault add-member requires --email so the CLI can fetch the target public key",
+                    ));
+                }
+            };
+            let vault_key = unlock_vault_key(&config.active_profile, profile, &cache, vault_id)?;
+            let vault_key_wrapping =
+                wrap_vault_key_for_member(&target_public_key, &vault_key, vault_id)?;
+            let member: VaultMemberResponse = client
+                .post(
+                    &format!("/api/v1/vaults/{vault_id}/members"),
+                    &AddVaultMemberRequest {
+                        protocol_version: PROTOCOL_VERSION,
+                        user_id: target_user_id,
+                        role,
+                        vault_key_wrapping,
+                    },
+                )
+                .await?;
+            render_vault_member_added(output, &member)
+        }
+        Command::Vault(VaultCommand::RemoveMember {
+            vault_id,
+            vault,
+            user_id,
+        }) => {
+            let profile = active_profile(&config)?;
+            require_login(profile)?;
+            let cache = crate::cache::LocalCache::open(&config.active_profile)?;
+            let vault_id =
+                resolve_vault_id_for_output(profile, &cache, vault_id, vault.as_deref(), output)?;
+            let client = UmbraHttpClient::new(profile)?;
+            client
+                .delete(&format!("/api/v1/vaults/{vault_id}/members/{user_id}"))
+                .await?;
+            if output.is_json() {
+                print_json(&serde_json::json!({
+                    "vault_id": vault_id,
+                    "user_id": user_id,
+                    "removed": true
+                }))
+            } else {
+                crate::output::print_kv(&[
+                    ("vault_id", vault_id.to_string()),
+                    ("removed user", user_id.to_string()),
+                    ("key rotation needed", "yes".to_owned()),
+                ]);
+                Ok(())
+            }
+        }
         Command::Item(ItemCommand::List {
             vault_id,
             vault,
@@ -1501,6 +1584,43 @@ fn render_org_member_added(output: OutputMode, member: &OrgMemberResponse) -> Re
     Ok(())
 }
 
+fn render_vault_members(
+    output: OutputMode,
+    members: &[VaultMemberResponse],
+) -> Result<(), CliError> {
+    if output.is_json() {
+        return print_json(members);
+    }
+    let rows = members
+        .iter()
+        .map(|member| {
+            vec![
+                member.user_id.to_string(),
+                vault_role_label(member.role).to_owned(),
+                member_state_label(member.state).to_owned(),
+            ]
+        })
+        .collect::<Vec<_>>();
+    crate::output::print_table(&["user_id", "role", "state"], &rows);
+    Ok(())
+}
+
+fn render_vault_member_added(
+    output: OutputMode,
+    member: &VaultMemberResponse,
+) -> Result<(), CliError> {
+    if output.is_json() {
+        return print_json(member);
+    }
+    crate::output::print_kv(&[
+        ("vault_id", member.vault_id.to_string()),
+        ("user_id", member.user_id.to_string()),
+        ("role", vault_role_label(member.role).to_owned()),
+        ("state", member_state_label(member.state).to_owned()),
+    ]);
+    Ok(())
+}
+
 fn render_cache_status(
     output: OutputMode,
     status: &crate::cache::CacheStatus,
@@ -1800,6 +1920,16 @@ fn unlock_vault_key(
     unwrap_vault_key(&unlocked.private_key, &aad, &envelope).map_err(CliError::from)
 }
 
+fn wrap_vault_key_for_member(
+    recipient_public_key: &UserPublicKey,
+    vault_key: &VaultKey,
+    vault_id: VaultId,
+) -> Result<Value, CliError> {
+    let aad = AadV1::vault_key_wrapping(vault_id.to_string());
+    let wrapping = wrap_vault_key_for_user(recipient_public_key, vault_key, aad)?;
+    serde_json::to_value(wrapping).map_err(CliError::from)
+}
+
 fn encrypt_item_plaintext(
     vault_id: VaultId,
     item_id: Uuid,
@@ -2038,6 +2168,20 @@ mod tests {
             vault_create_path(Some(org_id)),
             "/api/v1/orgs/00000000-0000-0000-0000-000000000001/vaults"
         );
+    }
+
+    #[test]
+    fn member_vault_key_wrapping_roundtrips_for_target_user() {
+        let target = generate_user_keypair();
+        let vault_key = generate_vault_key();
+        let vault_id = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+
+        let wrapping = wrap_vault_key_for_member(&target.public_key, &vault_key, vault_id).unwrap();
+        let envelope: VaultKeyWrappingEnvelopeV1 = serde_json::from_value(wrapping).unwrap();
+        let aad = AadV1::vault_key_wrapping(vault_id.to_string());
+        let opened = unwrap_vault_key(&target.private_key, &aad, &envelope).unwrap();
+
+        assert_eq!(opened, vault_key);
     }
 
     #[test]

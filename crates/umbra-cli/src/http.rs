@@ -93,10 +93,24 @@ impl UmbraHttpClient {
             .await
     }
 
+    pub async fn delete(&self, path: &str) -> Result<(), CliError> {
+        let request = self.signed_request(Method::DELETE, path, Vec::new())?;
+        send_empty(request).await
+    }
+
     async fn send<R>(&self, method: Method, path: &str, body: Vec<u8>) -> Result<R, CliError>
     where
         R: DeserializeOwned,
     {
+        send_json(self.signed_request(method, path, body)?).await
+    }
+
+    fn signed_request(
+        &self,
+        method: Method,
+        path: &str,
+        body: Vec<u8>,
+    ) -> Result<reqwest::RequestBuilder, CliError> {
         let mut request = self
             .inner
             .request(method.clone(), format!("{}{}", self.base_url, path));
@@ -135,7 +149,7 @@ impl UmbraHttpClient {
             return Err(CliError::NotLoggedIn);
         }
 
-        send_json(request).await
+        Ok(request)
     }
 }
 
@@ -166,4 +180,15 @@ where
     }
 
     Ok(serde_json::from_str(&body)?)
+}
+
+async fn send_empty(request: reqwest::RequestBuilder) -> Result<(), CliError> {
+    let response = request.send().await?;
+    let status = response.status();
+    let body = response.text().await?;
+    if !status.is_success() {
+        return Err(CliError::ServerStatus { status, body });
+    }
+
+    Ok(())
 }
