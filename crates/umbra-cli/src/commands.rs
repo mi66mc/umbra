@@ -14,9 +14,9 @@ use umbra_crypto::{
 };
 use umbra_protocol::{
     AddOrgMemberRequest, ApprovalLookupRequest, ApproveDeviceRequest, CreateItemRequest,
-    CreateOrgRequest, CreateVaultRequest, DeviceBootstrapResponse, DeviceResponse,
-    ItemRevisionResponse, OrgMemberResponse, OrgResponse, PROTOCOL_VERSION, PendingDeviceSummary,
-    RecoverTrustRequest, RecoverTrustResponse, RecoveryChallengeStartRequest,
+    CreateOrgRequest, CreateOrgVaultRequest, CreateVaultRequest, DeviceBootstrapResponse,
+    DeviceResponse, ItemRevisionResponse, OrgMemberResponse, OrgResponse, PROTOCOL_VERSION,
+    PendingDeviceSummary, RecoverTrustRequest, RecoverTrustResponse, RecoveryChallengeStartRequest,
     RecoveryChallengeStartResponse, SyncRequest, SyncResponse, UpdateItemRequest,
     UserLookupRequest, UserLookupResponse, VaultResponse, VaultSyncCursor,
 };
@@ -566,7 +566,7 @@ pub async fn run(
         }
         Command::Vault(VaultCommand::Create {
             name,
-            org_id: _,
+            org_id,
             wrapping_json,
         }) => {
             let profile = active_profile(&config)?;
@@ -577,6 +577,11 @@ pub async fn run(
                 None => dialoguer::Input::<String>::new()
                     .with_prompt("Vault name")
                     .interact_text()?,
+            };
+            let kind = if org_id.is_some() {
+                VaultKind::Org
+            } else {
+                VaultKind::Personal
             };
             let requested_vault_id = Uuid::new_v4();
             let initial_key_wrapping = match wrapping_json {
@@ -589,18 +594,33 @@ pub async fn run(
                     serde_json::to_value(wrapping)?
                 }
             };
-            let vault: VaultResponse = client
-                .post(
-                    "/api/v1/vaults",
-                    &CreateVaultRequest {
-                        protocol_version: PROTOCOL_VERSION,
-                        vault_id: Some(requested_vault_id),
-                        name,
-                        kind: VaultKind::Personal,
-                        initial_key_wrapping,
-                    },
-                )
-                .await?;
+            let vault: VaultResponse = if let Some(org_id) = org_id {
+                client
+                    .post(
+                        &vault_create_path(Some(org_id)),
+                        &CreateOrgVaultRequest {
+                            protocol_version: PROTOCOL_VERSION,
+                            vault_id: Some(requested_vault_id),
+                            name,
+                            kind,
+                            initial_key_wrapping,
+                        },
+                    )
+                    .await?
+            } else {
+                client
+                    .post(
+                        &vault_create_path(None),
+                        &CreateVaultRequest {
+                            protocol_version: PROTOCOL_VERSION,
+                            vault_id: Some(requested_vault_id),
+                            name,
+                            kind,
+                            initial_key_wrapping,
+                        },
+                    )
+                    .await?
+            };
             let mut cache = crate::cache::LocalCache::open(&config.active_profile)?;
             cache.upsert_vault(&vault)?;
             let profile_config = active_profile_mut(&mut config);
@@ -1141,6 +1161,13 @@ fn resolve_vault_id_for_output(
                 .ok_or(CliError::Input("vault selection cancelled"))
         }
         Err(error) => Err(error),
+    }
+}
+
+fn vault_create_path(org_id: Option<uuid::Uuid>) -> String {
+    match org_id {
+        Some(org_id) => format!("/api/v1/orgs/{org_id}/vaults"),
+        None => "/api/v1/vaults".to_owned(),
     }
 }
 
@@ -2001,6 +2028,16 @@ mod tests {
             resolve_target_user_id(None, None, None),
             Err(CliError::Input(_))
         ));
+    }
+
+    #[test]
+    fn vault_create_path_uses_org_endpoint_when_org_id_is_present() {
+        let org_id = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+        assert_eq!(vault_create_path(None), "/api/v1/vaults");
+        assert_eq!(
+            vault_create_path(Some(org_id)),
+            "/api/v1/orgs/00000000-0000-0000-0000-000000000001/vaults"
+        );
     }
 
     #[test]
