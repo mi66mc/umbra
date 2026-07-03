@@ -2,7 +2,9 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use umbra_core::{ItemKind, ItemPlaintextV1, VaultId, VaultKind};
+use umbra_core::{
+    ItemKind, ItemPlaintextV1, MemberState, OrgRole, UserId, VaultId, VaultKind, VaultRole,
+};
 use umbra_crypto::{
     AadV1, CryptoEnvelopeV1, DeviceBootstrapBundleV1, DeviceBootstrapEnvelopeV1, MasterPassword,
     RecoveryChallengeEnvelopeV1, UserPrivateKey, UserPublicKey, VaultKey,
@@ -11,11 +13,12 @@ use umbra_crypto::{
     generate_user_keypair, generate_vault_key, unwrap_vault_key, wrap_vault_key_for_user,
 };
 use umbra_protocol::{
-    ApprovalLookupRequest, ApproveDeviceRequest, CreateItemRequest, CreateVaultRequest,
-    DeviceBootstrapResponse, DeviceResponse, ItemRevisionResponse, PROTOCOL_VERSION,
-    PendingDeviceSummary, RecoverTrustRequest, RecoverTrustResponse, RecoveryChallengeStartRequest,
-    RecoveryChallengeStartResponse, SyncRequest, SyncResponse, UpdateItemRequest, VaultResponse,
-    VaultSyncCursor,
+    AddOrgMemberRequest, ApprovalLookupRequest, ApproveDeviceRequest, CreateItemRequest,
+    CreateOrgRequest, CreateVaultRequest, DeviceBootstrapResponse, DeviceResponse,
+    ItemRevisionResponse, OrgMemberResponse, OrgResponse, PROTOCOL_VERSION, PendingDeviceSummary,
+    RecoverTrustRequest, RecoverTrustResponse, RecoveryChallengeStartRequest,
+    RecoveryChallengeStartResponse, SyncRequest, SyncResponse, UpdateItemRequest,
+    UserLookupRequest, UserLookupResponse, VaultResponse, VaultSyncCursor,
 };
 use uuid::Uuid;
 
@@ -493,11 +496,62 @@ pub async fn run(
                 Ok(())
             }
         }
-        Command::Org(OrgCommand::List)
-        | Command::Org(OrgCommand::Create { .. })
-        | Command::Org(OrgCommand::Members { .. })
-        | Command::Org(OrgCommand::AddMember { .. }) => {
-            Err(CliError::Input("org commands are not implemented yet"))
+        Command::Org(OrgCommand::List) => {
+            let profile = active_profile(&config)?;
+            require_login(profile)?;
+            let client = UmbraHttpClient::new(profile)?;
+            let orgs: Vec<OrgResponse> = client.get("/api/v1/orgs").await?;
+            render_orgs(output, &orgs)
+        }
+        Command::Org(OrgCommand::Create { name }) => {
+            let profile = active_profile(&config)?;
+            require_login(profile)?;
+            let client = UmbraHttpClient::new(profile)?;
+            let org: OrgResponse = client
+                .post(
+                    "/api/v1/orgs",
+                    &CreateOrgRequest {
+                        protocol_version: PROTOCOL_VERSION,
+                        name,
+                    },
+                )
+                .await?;
+            render_org_created(output, &org)
+        }
+        Command::Org(OrgCommand::Members { org_id }) => {
+            let profile = active_profile(&config)?;
+            require_login(profile)?;
+            let client = UmbraHttpClient::new(profile)?;
+            let members: Vec<OrgMemberResponse> = client
+                .get(&format!("/api/v1/orgs/{org_id}/members"))
+                .await?;
+            render_org_members(output, &members)
+        }
+        Command::Org(OrgCommand::AddMember {
+            org_id,
+            email,
+            user_id,
+            role,
+        }) => {
+            let profile = active_profile(&config)?;
+            require_login(profile)?;
+            let client = UmbraHttpClient::new(profile)?;
+            let looked_up = match email.as_deref() {
+                Some(email) => Some(lookup_user_by_email(&client, email).await?.user_id),
+                None => None,
+            };
+            let target_user_id = resolve_target_user_id(user_id, looked_up, email.as_deref())?;
+            let member: OrgMemberResponse = client
+                .post(
+                    &format!("/api/v1/orgs/{org_id}/members"),
+                    &AddOrgMemberRequest {
+                        protocol_version: PROTOCOL_VERSION,
+                        user_id: target_user_id,
+                        role,
+                    },
+                )
+                .await?;
+            render_org_member_added(output, &member)
         }
         Command::Vault(VaultCommand::List) => {
             let profile = active_profile(&config)?;
@@ -1139,6 +1193,21 @@ fn read_emergency_kit(
     serde_json::from_str(&raw).map_err(CliError::from)
 }
 
+async fn lookup_user_by_email(
+    client: &UmbraHttpClient,
+    email: &str,
+) -> Result<UserLookupResponse, CliError> {
+    client
+        .post(
+            "/api/v1/users/lookup",
+            &UserLookupRequest {
+                protocol_version: PROTOCOL_VERSION,
+                email: email.to_owned(),
+            },
+        )
+        .await
+}
+
 fn apply_recovered_emergency_kit_material(
     profile: &mut crate::config::ProfileConfig,
     kit: &crate::crypto_state::EmergencyKitV1,
@@ -1310,6 +1379,99 @@ fn vault_kind_label(kind: VaultKind) -> &'static str {
         VaultKind::Project => "project",
         VaultKind::Org => "org",
     }
+}
+
+fn org_role_label(role: OrgRole) -> &'static str {
+    match role {
+        OrgRole::Owner => "owner",
+        OrgRole::Admin => "admin",
+        OrgRole::Member => "member",
+    }
+}
+
+fn vault_role_label(role: VaultRole) -> &'static str {
+    match role {
+        VaultRole::Owner => "owner",
+        VaultRole::Admin => "admin",
+        VaultRole::Editor => "editor",
+        VaultRole::Viewer => "viewer",
+    }
+}
+
+fn member_state_label(state: MemberState) -> &'static str {
+    match state {
+        MemberState::Active => "active",
+        MemberState::Invited => "invited",
+        MemberState::Removed => "removed",
+    }
+}
+
+fn resolve_target_user_id(
+    explicit_user_id: Option<UserId>,
+    lookup_user_id: Option<UserId>,
+    email: Option<&str>,
+) -> Result<UserId, CliError> {
+    match (explicit_user_id, lookup_user_id, email) {
+        (Some(user_id), None, None) => Ok(user_id),
+        (None, Some(user_id), Some(_)) => Ok(user_id),
+        (None, None, Some(_)) => Err(CliError::Input("user lookup did not return a user id")),
+        (None, None, None) => Err(CliError::Input("pass --email or --user-id")),
+        _ => Err(CliError::Input("pass only one of --email or --user-id")),
+    }
+}
+
+fn render_orgs(output: OutputMode, orgs: &[OrgResponse]) -> Result<(), CliError> {
+    if output.is_json() {
+        return print_json(orgs);
+    }
+    let rows = orgs
+        .iter()
+        .map(|org| vec![org.name.clone(), org.org_id.to_string()])
+        .collect::<Vec<_>>();
+    crate::output::print_table(&["name", "org_id"], &rows);
+    Ok(())
+}
+
+fn render_org_created(output: OutputMode, org: &OrgResponse) -> Result<(), CliError> {
+    if output.is_json() {
+        return print_json(org);
+    }
+    crate::output::print_kv(&[
+        ("created org", org.name.clone()),
+        ("id", org.org_id.to_string()),
+    ]);
+    Ok(())
+}
+
+fn render_org_members(output: OutputMode, members: &[OrgMemberResponse]) -> Result<(), CliError> {
+    if output.is_json() {
+        return print_json(members);
+    }
+    let rows = members
+        .iter()
+        .map(|member| {
+            vec![
+                member.user_id.to_string(),
+                org_role_label(member.role).to_owned(),
+                member_state_label(member.state).to_owned(),
+            ]
+        })
+        .collect::<Vec<_>>();
+    crate::output::print_table(&["user_id", "role", "state"], &rows);
+    Ok(())
+}
+
+fn render_org_member_added(output: OutputMode, member: &OrgMemberResponse) -> Result<(), CliError> {
+    if output.is_json() {
+        return print_json(member);
+    }
+    crate::output::print_kv(&[
+        ("org_id", member.org_id.to_string()),
+        ("user_id", member.user_id.to_string()),
+        ("role", org_role_label(member.role).to_owned()),
+        ("state", member_state_label(member.state).to_owned()),
+    ]);
+    Ok(())
 }
 
 fn render_cache_status(
@@ -1810,6 +1972,34 @@ mod tests {
             Err(CliError::Input(
                 "profile has no account public key; run `umbra register` for this profile"
             ))
+        ));
+    }
+
+    #[test]
+    fn role_labels_are_stable_for_membership_output() {
+        assert_eq!(org_role_label(umbra_core::OrgRole::Owner), "owner");
+        assert_eq!(org_role_label(umbra_core::OrgRole::Admin), "admin");
+        assert_eq!(org_role_label(umbra_core::OrgRole::Member), "member");
+        assert_eq!(vault_role_label(umbra_core::VaultRole::Owner), "owner");
+        assert_eq!(vault_role_label(umbra_core::VaultRole::Admin), "admin");
+        assert_eq!(vault_role_label(umbra_core::VaultRole::Editor), "editor");
+        assert_eq!(vault_role_label(umbra_core::VaultRole::Viewer), "viewer");
+    }
+
+    #[test]
+    fn resolve_target_user_requires_exactly_one_selector() {
+        let user_id = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+        assert_eq!(
+            resolve_target_user_id(Some(user_id), None, None).unwrap(),
+            user_id
+        );
+        assert!(matches!(
+            resolve_target_user_id(Some(user_id), Some(user_id), None),
+            Err(CliError::Input(_))
+        ));
+        assert!(matches!(
+            resolve_target_user_id(None, None, None),
+            Err(CliError::Input(_))
         ));
     }
 
