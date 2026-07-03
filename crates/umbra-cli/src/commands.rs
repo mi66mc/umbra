@@ -28,7 +28,7 @@ use crate::keys::DeviceSigningKey;
 use crate::output::{OutputMode, print_json};
 use crate::{
     AuthCommand, CacheCommand, Command, DeviceCommand, EmergencyKitCommand, ItemCommand,
-    ProfileCommand, SecretCommand, SyncCommand, TokenCommand, VaultCommand,
+    OrgCommand, ProfileCommand, SecretCommand, SyncCommand, TokenCommand, VaultCommand,
 };
 
 trait OutputModeExt {
@@ -493,6 +493,12 @@ pub async fn run(
                 Ok(())
             }
         }
+        Command::Org(OrgCommand::List)
+        | Command::Org(OrgCommand::Create { .. })
+        | Command::Org(OrgCommand::Members { .. })
+        | Command::Org(OrgCommand::AddMember { .. }) => {
+            Err(CliError::Input("org commands are not implemented yet"))
+        }
         Command::Vault(VaultCommand::List) => {
             let profile = active_profile(&config)?;
             require_login(profile)?;
@@ -506,6 +512,7 @@ pub async fn run(
         }
         Command::Vault(VaultCommand::Create {
             name,
+            org_id: _,
             wrapping_json,
         }) => {
             let profile = active_profile(&config)?;
@@ -557,6 +564,11 @@ pub async fn run(
             .await?;
             render_vault_created(output, &vault)
         }
+        Command::Vault(VaultCommand::Members { .. })
+        | Command::Vault(VaultCommand::AddMember { .. })
+        | Command::Vault(VaultCommand::RemoveMember { .. }) => Err(CliError::Input(
+            "vault member commands are not implemented yet",
+        )),
         Command::Item(ItemCommand::List {
             vault_id,
             vault,
@@ -1752,6 +1764,25 @@ pub fn parse_item_kind(value: &str) -> Result<ItemKind, String> {
             custom.trim_start_matches("custom:").to_owned(),
         )),
         _ => Err("expected known kind or custom:<name>".to_owned()),
+    }
+}
+
+pub fn parse_org_role(value: &str) -> Result<umbra_core::OrgRole, String> {
+    match value {
+        "owner" => Ok(umbra_core::OrgRole::Owner),
+        "admin" => Ok(umbra_core::OrgRole::Admin),
+        "member" => Ok(umbra_core::OrgRole::Member),
+        _ => Err("expected one of: owner, admin, member".to_owned()),
+    }
+}
+
+pub fn parse_vault_role(value: &str) -> Result<umbra_core::VaultRole, String> {
+    match value {
+        "owner" => Ok(umbra_core::VaultRole::Owner),
+        "admin" => Ok(umbra_core::VaultRole::Admin),
+        "editor" => Ok(umbra_core::VaultRole::Editor),
+        "viewer" => Ok(umbra_core::VaultRole::Viewer),
+        _ => Err("expected one of: owner, admin, editor, viewer".to_owned()),
     }
 }
 

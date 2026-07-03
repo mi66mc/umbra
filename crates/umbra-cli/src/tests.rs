@@ -1,4 +1,5 @@
 use clap::Parser;
+use umbra_core::{OrgRole, VaultRole};
 
 use crate::config::{CliConfig, ProfileConfig};
 use crate::{
@@ -49,6 +50,7 @@ fn parses_vault_create_as_personal_without_kind() {
 
     let Command::Vault(VaultCommand::Create {
         name,
+        org_id,
         wrapping_json,
     }) = cli.command
     else {
@@ -56,6 +58,7 @@ fn parses_vault_create_as_personal_without_kind() {
     };
 
     assert_eq!(name.as_deref(), Some("personal"));
+    assert_eq!(org_id, None);
     assert_eq!(wrapping_json.as_deref(), Some(r#"{"alg":"test"}"#));
 }
 
@@ -65,6 +68,7 @@ fn parses_vault_create_without_wrapping_json() {
 
     let Command::Vault(VaultCommand::Create {
         name,
+        org_id,
         wrapping_json,
     }) = cli.command
     else {
@@ -72,7 +76,121 @@ fn parses_vault_create_without_wrapping_json() {
     };
 
     assert_eq!(name.as_deref(), Some("personal"));
+    assert_eq!(org_id, None);
     assert_eq!(wrapping_json, None);
+}
+
+#[test]
+fn parses_org_commands() {
+    let list = Cli::parse_from(["umbra", "org", "list"]);
+    assert!(matches!(
+        list.command,
+        Command::Org(crate::OrgCommand::List)
+    ));
+
+    let create = Cli::parse_from(["umbra", "org", "create", "BlackWire"]);
+    assert!(matches!(
+        create.command,
+        Command::Org(crate::OrgCommand::Create { name }) if name == "BlackWire"
+    ));
+
+    let org_id = "00000000-0000-0000-0000-000000000001";
+    let members = Cli::parse_from(["umbra", "org", "members", org_id]);
+    assert!(matches!(
+        members.command,
+        Command::Org(crate::OrgCommand::Members { org_id: parsed }) if parsed.to_string() == org_id
+    ));
+
+    let add = Cli::parse_from([
+        "umbra",
+        "org",
+        "add-member",
+        org_id,
+        "--email",
+        "ana@example.com",
+        "--role",
+        "admin",
+    ]);
+    assert!(matches!(
+        add.command,
+        Command::Org(crate::OrgCommand::AddMember {
+            org_id: parsed,
+            email,
+            user_id: None,
+            role: OrgRole::Admin,
+        }) if parsed.to_string() == org_id && email.as_deref() == Some("ana@example.com")
+    ));
+}
+
+#[test]
+fn parses_vault_member_commands() {
+    let vault_id = "00000000-0000-0000-0000-000000000001";
+    let user_id = "00000000-0000-0000-0000-000000000002";
+
+    let create = Cli::parse_from([
+        "umbra",
+        "vault",
+        "create",
+        "Platform",
+        "--org-id",
+        "00000000-0000-0000-0000-000000000003",
+    ]);
+    assert!(matches!(
+        create.command,
+        Command::Vault(VaultCommand::Create {
+            org_id: Some(_),
+            ..
+        })
+    ));
+
+    let members = Cli::parse_from(["umbra", "vault", "members", "--vault-id", vault_id]);
+    assert!(matches!(
+        members.command,
+        Command::Vault(VaultCommand::Members {
+            vault_id: Some(parsed),
+            vault: None
+        }) if parsed.to_string() == vault_id
+    ));
+
+    let add = Cli::parse_from([
+        "umbra",
+        "vault",
+        "add-member",
+        "--vault-id",
+        vault_id,
+        "--email",
+        "ana@example.com",
+        "--role",
+        "viewer",
+    ]);
+    assert!(matches!(
+        add.command,
+        Command::Vault(VaultCommand::AddMember {
+            vault_id: Some(parsed),
+            vault: None,
+            email,
+            user_id: None,
+            role: VaultRole::Viewer,
+        }) if parsed.to_string() == vault_id && email.as_deref() == Some("ana@example.com")
+    ));
+
+    let remove = Cli::parse_from([
+        "umbra",
+        "vault",
+        "remove-member",
+        "--vault-id",
+        vault_id,
+        "--user-id",
+        user_id,
+    ]);
+    assert!(matches!(
+        remove.command,
+        Command::Vault(VaultCommand::RemoveMember {
+            vault_id: Some(parsed),
+            user_id: parsed_user,
+            ..
+        }) if parsed.to_string() == vault_id && parsed_user.to_string() == user_id
+    ));
 }
 
 #[test]

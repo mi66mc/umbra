@@ -20,9 +20,11 @@ use opaque_ke::argon2::Argon2;
 use opaque_ke::ciphersuite::CipherSuite;
 use sha2::Sha512;
 use std::path::PathBuf;
-use umbra_core::{DeviceId, ItemId, ItemKind, RevisionId, VaultId};
+use umbra_core::{
+    DeviceId, ItemId, ItemKind, OrgId, OrgRole, RevisionId, UserId, VaultId, VaultRole,
+};
 
-use crate::commands::parse_item_kind;
+use crate::commands::{parse_item_kind, parse_org_role, parse_vault_role};
 use crate::config::{CliConfig, load_config};
 use crate::error::CliError;
 
@@ -81,6 +83,8 @@ pub enum Command {
     #[command(subcommand)]
     Profile(ProfileCommand),
     #[command(subcommand)]
+    Org(OrgCommand),
+    #[command(subcommand)]
     Vault(VaultCommand),
     #[command(subcommand)]
     Item(ItemCommand),
@@ -120,6 +124,26 @@ pub enum EmergencyKitCommand {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum OrgCommand {
+    List,
+    Create {
+        name: String,
+    },
+    Members {
+        org_id: OrgId,
+    },
+    AddMember {
+        org_id: OrgId,
+        #[arg(long, conflicts_with = "user_id", required_unless_present = "user_id")]
+        email: Option<String>,
+        #[arg(long, conflicts_with = "email", required_unless_present = "email")]
+        user_id: Option<UserId>,
+        #[arg(long, value_parser = parse_org_role)]
+        role: OrgRole,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 pub enum AuthCommand {
     #[command(subcommand)]
     Token(TokenCommand),
@@ -141,7 +165,35 @@ pub enum VaultCommand {
     Create {
         name: Option<String>,
         #[arg(long)]
+        org_id: Option<OrgId>,
+        #[arg(long)]
         wrapping_json: Option<String>,
+    },
+    Members {
+        #[arg(long)]
+        vault_id: Option<VaultId>,
+        #[arg(long)]
+        vault: Option<String>,
+    },
+    AddMember {
+        #[arg(long)]
+        vault_id: Option<VaultId>,
+        #[arg(long)]
+        vault: Option<String>,
+        #[arg(long, conflicts_with = "user_id", required_unless_present = "user_id")]
+        email: Option<String>,
+        #[arg(long, conflicts_with = "email", required_unless_present = "email")]
+        user_id: Option<UserId>,
+        #[arg(long, value_parser = parse_vault_role)]
+        role: VaultRole,
+    },
+    RemoveMember {
+        #[arg(long)]
+        vault_id: Option<VaultId>,
+        #[arg(long)]
+        vault: Option<String>,
+        #[arg(long)]
+        user_id: UserId,
     },
 }
 
