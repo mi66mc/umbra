@@ -28,8 +28,8 @@ use umbra_protocol::{
     OpaqueRegisterStartRequest, OpaqueRegisterStartResponse, OrgResponse, PROTOCOL_VERSION,
     PendingDeviceRequest, PendingDeviceSummary, RecoverTrustRequest, RecoverTrustResponse,
     RecoveryChallengeStartRequest, RecoveryChallengeStartResponse, RegisterResponse, SyncRequest,
-    SyncResponse, SyncStatusRequest, SyncStatusResponse, UpdateItemRequest, VaultResponse,
-    VaultStatusCursor, VaultSyncCursor,
+    SyncResponse, SyncStatusRequest, SyncStatusResponse, UpdateItemRequest, UserLookupRequest,
+    UserLookupResponse, VaultMemberResponse, VaultResponse, VaultStatusCursor, VaultSyncCursor,
 };
 use umbra_storage::Storage;
 use uuid::Uuid;
@@ -245,6 +245,128 @@ async fn create_vault_returns_client_supplied_id() {
     assert_eq!(vault.vault_id, requested_vault_id);
     assert_eq!(vault.vault_revision, 0);
     assert!(vault.access_revision > 0);
+}
+
+#[tokio::test]
+#[serial(postgres)]
+async fn signed_user_lookup_returns_public_key() {
+    let Some(storage) = fresh_test_storage().await else {
+        return;
+    };
+    let app = router(test_state_with_storage(storage));
+    let login = register_and_signed_login(
+        app.clone(),
+        "lookup-owner@example.com",
+        b"lookup owner password",
+        "lookup-owner",
+    )
+    .await;
+    let target = register_user_with_device(
+        app.clone(),
+        "lookup-target@example.com",
+        b"lookup target password",
+        Some("Lookup Target"),
+        "target laptop",
+        "target-device-public-key".to_owned(),
+        "target-fingerprint".to_owned(),
+        "target-public-key".to_owned(),
+    )
+    .await;
+
+    let (status, response): (StatusCode, UserLookupResponse) = signed_json_request(
+        app,
+        Method::POST,
+        "/api/v1/users/lookup",
+        login.auth("lookup-user"),
+        &UserLookupRequest {
+            protocol_version: PROTOCOL_VERSION,
+            email: "lookup-target@example.com".to_owned(),
+        },
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(response.user_id, target.user_id);
+    assert_eq!(response.email, "lookup-target@example.com");
+    assert_eq!(response.public_key, "target-public-key");
+}
+
+#[tokio::test]
+#[serial(postgres)]
+async fn vault_members_endpoint_lists_active_members() {
+    let Some(storage) = fresh_test_storage().await else {
+        return;
+    };
+    let app = router(test_state_with_storage(storage));
+    let owner = register_and_signed_login(
+        app.clone(),
+        "vault-members-owner@example.com",
+        b"vault members owner",
+        "vault-members-owner",
+    )
+    .await;
+    let member = register_user_with_device(
+        app.clone(),
+        "vault-members-viewer@example.com",
+        b"vault members viewer",
+        Some("Vault Member Viewer"),
+        "viewer laptop",
+        "viewer-device-public-key".to_owned(),
+        "viewer-fingerprint".to_owned(),
+        "viewer-public-key".to_owned(),
+    )
+    .await;
+    let vault_id = Uuid::parse_str("00000000-0000-0000-0000-000000000099").unwrap();
+    let (_status, vault): (StatusCode, VaultResponse) = signed_json_request(
+        app.clone(),
+        Method::POST,
+        "/api/v1/vaults",
+        owner.auth("vault-members-create"),
+        &CreateVaultRequest {
+            protocol_version: PROTOCOL_VERSION,
+            vault_id: Some(vault_id),
+            name: "Team".to_owned(),
+            kind: VaultKind::Shared,
+            initial_key_wrapping: json!({"owner": "wrapping"}),
+        },
+    )
+    .await;
+    let (status, _added): (StatusCode, VaultMemberResponse) = signed_json_request(
+        app.clone(),
+        Method::POST,
+        &format!("/api/v1/vaults/{}/members", vault.vault_id),
+        owner.auth("vault-members-add"),
+        &AddVaultMemberRequest {
+            protocol_version: PROTOCOL_VERSION,
+            user_id: member.user_id,
+            role: VaultRole::Viewer,
+            vault_key_wrapping: json!({"viewer": "wrapping"}),
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, members): (StatusCode, Vec<VaultMemberResponse>) = signed_json_request(
+        app,
+        Method::GET,
+        &format!("/api/v1/vaults/{}/members", vault.vault_id),
+        owner.auth("vault-members-list"),
+        &json!({}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(members.len(), 2);
+    assert!(
+        members
+            .iter()
+            .any(|m| m.user_id == owner.user_id && m.role == VaultRole::Owner)
+    );
+    assert!(
+        members
+            .iter()
+            .any(|m| m.user_id == member.user_id && m.role == VaultRole::Viewer)
+    );
 }
 
 #[tokio::test]
@@ -1277,6 +1399,7 @@ async fn register_and_login(app: Router, email: &str, password: &[u8]) -> String
 }
 
 struct SignedLogin {
+    user_id: Uuid,
     session_id: Uuid,
     device_id: Uuid,
     signing_key: ed25519_dalek::SigningKey,
@@ -1325,6 +1448,7 @@ async fn register_and_signed_login(
     assert_eq!(finish.session_token, None);
 
     SignedLogin {
+        user_id: finish.user_id,
         session_id: finish.session_id,
         device_id: register.device_id,
         signing_key,

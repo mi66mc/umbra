@@ -23,11 +23,12 @@ use umbra_protocol::{
     DeviceBootstrapResponse, DeviceResponse, ItemRevisionResponse, OpaqueLoginFinishRequest,
     OpaqueLoginFinishResponse, OpaqueLoginStartRequest, OpaqueLoginStartResponse,
     OpaqueRegisterFinishRequest, OpaqueRegisterStartRequest, OpaqueRegisterStartResponse,
-    OrgResponse, PROTOCOL_VERSION, PendingDeviceResponse, PendingDeviceSummary,
+    OrgMemberResponse, OrgResponse, PROTOCOL_VERSION, PendingDeviceResponse, PendingDeviceSummary,
     RecoverTrustRequest, RecoverTrustResponse, RecoveryChallengeStartRequest,
     RecoveryChallengeStartResponse, RotateVaultKeyRequest, RotationStatusResponse, SyncRequest,
-    SyncResponse, SyncStatusRequest, SyncStatusResponse, UpdateItemRequest,
-    VaultKeyWrappingResponse, VaultResponse, VaultStatus, VaultSyncChanges,
+    SyncResponse, SyncStatusRequest, SyncStatusResponse, UpdateItemRequest, UserLookupRequest,
+    UserLookupResponse, VaultKeyWrappingResponse, VaultMemberResponse, VaultResponse, VaultStatus,
+    VaultSyncChanges,
 };
 use umbra_storage::{
     AppendAuditLog, ApprovePendingDevice, CreateDevice, CreateEncryptedItem, CreateItemRevision,
@@ -68,6 +69,7 @@ pub(crate) fn router(state: AppState) -> Router {
             "/api/v1/devices/:device_id/recover-trust",
             post(recover_trust),
         )
+        .route("/api/v1/users/lookup", post(lookup_user))
         .route("/api/v1/orgs", post(create_org).get(list_orgs))
         .route("/api/v1/orgs/:org_id", get(get_org))
         .route(
@@ -86,7 +88,10 @@ pub(crate) fn router(state: AppState) -> Router {
             "/api/v1/vaults/:vault_id/items/:item_id",
             post(update_item).put(update_item),
         )
-        .route("/api/v1/vaults/:vault_id/members", post(add_vault_member))
+        .route(
+            "/api/v1/vaults/:vault_id/members",
+            get(list_vault_members).post(add_vault_member),
+        )
         .route(
             "/api/v1/vaults/:vault_id/members/:user_id",
             delete(remove_vault_member),
@@ -663,6 +668,21 @@ async fn recover_trust(
     }))
 }
 
+async fn lookup_user(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<UserLookupRequest>,
+) -> Result<Json<UserLookupResponse>, ServerError> {
+    ensure_protocol(request.protocol_version)?;
+    authenticate_trusted_context(&state, &headers).await?;
+    let user = state.storage.find_user_by_email(&request.email).await?;
+    Ok(Json(UserLookupResponse {
+        user_id: user.id,
+        email: user.email,
+        public_key: user.public_key,
+    }))
+}
+
 async fn create_org(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -736,18 +756,13 @@ async fn list_org_members(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(org_id): Path<Uuid>,
-) -> Result<Json<Value>, ServerError> {
+) -> Result<Json<Vec<OrgMemberResponse>>, ServerError> {
     let user_id = authenticate_trusted_context(&state, &headers)
         .await?
         .user_id;
     ensure_org_manager(&state, org_id, user_id).await?;
     let members = state.storage.list_org_members(org_id).await?;
-    Ok(Json(json!(
-        members
-            .into_iter()
-            .map(|m| json!({"user_id": m.user_id, "role": m.role, "state": m.state}))
-            .collect::<Vec<_>>()
-    )))
+    Ok(Json(members.into_iter().map(org_member_response).collect()))
 }
 
 async fn add_org_member(
@@ -755,7 +770,7 @@ async fn add_org_member(
     headers: HeaderMap,
     Path(org_id): Path<Uuid>,
     Json(request): Json<AddOrgMemberRequest>,
-) -> Result<Json<Value>, ServerError> {
+) -> Result<Json<OrgMemberResponse>, ServerError> {
     ensure_protocol(request.protocol_version)?;
     let user_id = authenticate_trusted_context(&state, &headers)
         .await?
@@ -770,9 +785,7 @@ async fn add_org_member(
             state: MemberState::Active,
         })
         .await?;
-    Ok(Json(
-        json!({"org_id": member.org_id, "user_id": member.user_id, "role": member.role, "state": member.state}),
-    ))
+    Ok(Json(org_member_response(member)))
 }
 
 async fn create_personal_vault(
@@ -874,12 +887,27 @@ async fn list_vaults(
     Ok(Json(vaults.into_iter().map(vault_response).collect()))
 }
 
+async fn list_vault_members(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(vault_id): Path<Uuid>,
+) -> Result<Json<Vec<VaultMemberResponse>>, ServerError> {
+    let user_id = authenticate_trusted_context(&state, &headers)
+        .await?
+        .user_id;
+    ensure_vault_member(&state, vault_id, user_id).await?;
+    let members = state.storage.list_vault_members(vault_id).await?;
+    Ok(Json(
+        members.into_iter().map(vault_member_response).collect(),
+    ))
+}
+
 async fn add_vault_member(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(vault_id): Path<Uuid>,
     Json(request): Json<AddVaultMemberRequest>,
-) -> Result<Json<Value>, ServerError> {
+) -> Result<Json<VaultMemberResponse>, ServerError> {
     ensure_protocol(request.protocol_version)?;
     let user_id = authenticate_trusted_context(&state, &headers)
         .await?
@@ -907,9 +935,7 @@ async fn add_vault_member(
             key_generation: status.current_key_generation,
         })
         .await?;
-    Ok(Json(
-        json!({"vault_id": member.vault_id, "user_id": member.user_id, "role": member.role, "state": member.state}),
-    ))
+    Ok(Json(vault_member_response(member)))
 }
 
 async fn remove_vault_member(
@@ -1149,6 +1175,24 @@ fn vault_response(vault: umbra_storage::VaultRecord) -> VaultResponse {
         access_revision: vault.access_revision,
         current_key_generation: vault.current_key_generation,
         needs_key_rotation: vault.needs_key_rotation,
+    }
+}
+
+fn org_member_response(member: umbra_storage::OrgMemberRecord) -> OrgMemberResponse {
+    OrgMemberResponse {
+        org_id: member.org_id,
+        user_id: member.user_id,
+        role: member.role,
+        state: member.state,
+    }
+}
+
+fn vault_member_response(member: umbra_storage::VaultMemberRecord) -> VaultMemberResponse {
+    VaultMemberResponse {
+        vault_id: member.vault_id,
+        user_id: member.user_id,
+        role: member.role,
+        state: member.state,
     }
 }
 
