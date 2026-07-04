@@ -2488,6 +2488,65 @@ mod tests {
     }
 
     #[test]
+    fn rotation_request_rejects_stale_item_generation() {
+        let vault_id = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+        let member_id = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
+        let old_vault_key = generate_vault_key();
+        let new_vault_key = generate_vault_key();
+        let member_keys = generate_user_keypair();
+        let plaintext = ItemPlaintextV1 {
+            schema_version: 1,
+            title: "GitHub".to_owned(),
+            fields: vec![],
+            notes: Some("rotated".to_owned()),
+            tags: vec![],
+        };
+        let item_id = Uuid::parse_str("00000000-0000-0000-0000-000000000003").unwrap();
+        let envelope = encrypt_item_plaintext(
+            vault_id,
+            item_id,
+            1,
+            "login".to_owned(),
+            &old_vault_key,
+            &plaintext,
+        )
+        .unwrap();
+        let revision = crate::cache::CachedItemRevision {
+            vault_id,
+            item_id,
+            revision: 1,
+            vault_revision: 1,
+            key_generation: 2,
+            author_user_id: None,
+            envelope,
+        };
+        let member = VaultMemberResponse {
+            vault_id,
+            user_id: member_id,
+            role: VaultRole::Editor,
+            state: MemberState::Active,
+            public_key: member_keys.public_key.to_base64url(),
+        };
+
+        let result = build_rotation_request(
+            vault_id,
+            1,
+            &old_vault_key,
+            &new_vault_key,
+            &[member],
+            &[revision],
+            RotationCacheSnapshot::full_vault([item_id]),
+        );
+
+        match result {
+            Err(CliError::Input(message)) => {
+                assert!(message.contains("cached item generation is stale"));
+            }
+            other => panic!("expected stale generation error, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn save_pending_login_crypto_material_stores_encrypted_private_key() {
         let mut profile = crate::config::ProfileConfig::default();
         let encrypted_private_key = serde_json::json!({
