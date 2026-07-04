@@ -31,8 +31,9 @@ use crate::http::{PublicHttpClient, UmbraHttpClient};
 use crate::keys::DeviceSigningKey;
 use crate::output::{OutputMode, print_json};
 use crate::{
-    AuthCommand, CacheCommand, Command, DeviceCommand, EmergencyKitCommand, ItemCommand,
-    OrgCommand, ProfileCommand, SecretCommand, SyncCommand, TokenCommand, VaultCommand,
+    AuthCommand, CacheCommand, Command, CryptoCommand, DeviceCommand, EmergencyKitCommand,
+    ItemCommand, OrgCommand, ProfileCommand, SecretCommand, SyncCommand, TokenCommand,
+    VaultCommand,
 };
 
 trait OutputModeExt {
@@ -554,6 +555,12 @@ pub async fn run(
                 .await?;
             render_org_member_added(output, &member)
         }
+        Command::Crypto(CryptoCommand::RotationStatus { .. }) => Err(CliError::Input(
+            "crypto rotation-status is not implemented yet",
+        )),
+        Command::Crypto(CryptoCommand::RotateVaultKey { .. }) => Err(CliError::Input(
+            "crypto rotate-vault-key is not implemented yet",
+        )),
         Command::Vault(VaultCommand::List) => {
             let profile = active_profile(&config)?;
             require_login(profile)?;

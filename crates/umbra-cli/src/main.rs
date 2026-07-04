@@ -79,6 +79,8 @@ pub enum Command {
     #[command(subcommand)]
     Cache(CacheCommand),
     #[command(subcommand)]
+    Crypto(CryptoCommand),
+    #[command(subcommand)]
     EmergencyKit(EmergencyKitCommand),
     #[command(subcommand)]
     Profile(ProfileCommand),
@@ -113,6 +115,28 @@ pub enum ProfileCommand {
 #[derive(Debug, Subcommand)]
 pub enum CacheCommand {
     Status,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CryptoCommand {
+    RotationStatus {
+        #[arg(long)]
+        vault_id: Option<VaultId>,
+        #[arg(long)]
+        vault: Option<String>,
+    },
+    RotateVaultKey {
+        #[arg(long)]
+        vault_id: Option<VaultId>,
+        #[arg(long)]
+        vault: Option<String>,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]

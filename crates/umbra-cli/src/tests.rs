@@ -3,8 +3,8 @@ use umbra_core::{OrgRole, VaultRole};
 
 use crate::config::{CliConfig, ProfileConfig};
 use crate::{
-    AuthCommand, CacheCommand, Cli, Command, DeviceCommand, ItemCommand, ProfileCommand,
-    SecretCommand, TokenCommand, VaultCommand,
+    AuthCommand, CacheCommand, Cli, Command, CryptoCommand, DeviceCommand, ItemCommand,
+    ProfileCommand, SecretCommand, TokenCommand, VaultCommand,
 };
 
 #[test]
@@ -759,6 +759,60 @@ fn parses_cache_status_command() {
     let cli = Cli::parse_from(["umbra", "cache", "status"]);
 
     assert!(matches!(cli.command, Command::Cache(CacheCommand::Status)));
+}
+
+#[test]
+fn parses_crypto_rotation_commands() {
+    let vault_id = "00000000-0000-0000-0000-000000000001";
+
+    let status = Cli::parse_from(["umbra", "crypto", "rotation-status", "--vault-id", vault_id]);
+    assert!(matches!(
+        status.command,
+        Command::Crypto(CryptoCommand::RotationStatus {
+            vault_id: Some(parsed),
+            vault: None
+        }) if parsed.to_string() == vault_id
+    ));
+
+    let rotate = Cli::parse_from([
+        "umbra",
+        "crypto",
+        "rotate-vault-key",
+        "--vault",
+        "Platform",
+        "--dry-run",
+        "--yes",
+    ]);
+    assert!(matches!(
+        rotate.command,
+        Command::Crypto(CryptoCommand::RotateVaultKey {
+            vault_id: None,
+            vault: Some(name),
+            dry_run: true,
+            force: false,
+            yes: true,
+        }) if name == "Platform"
+    ));
+
+    let forced = Cli::parse_from([
+        "umbra",
+        "crypto",
+        "rotate-vault-key",
+        "--vault-id",
+        vault_id,
+        "--force",
+        "--yes",
+    ]);
+    assert!(matches!(
+        forced.command,
+        Command::Crypto(CryptoCommand::RotateVaultKey {
+            vault_id: Some(parsed),
+            vault: None,
+            dry_run: false,
+            force: true,
+            yes: true,
+        }) if parsed.to_string() == vault_id
+    ));
 }
 
 #[test]
