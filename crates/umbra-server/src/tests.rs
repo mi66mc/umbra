@@ -27,7 +27,8 @@ use umbra_protocol::{
     OpaqueLoginStartRequest, OpaqueLoginStartResponse, OpaqueRegisterFinishRequest,
     OpaqueRegisterStartRequest, OpaqueRegisterStartResponse, OrgResponse, PROTOCOL_VERSION,
     PendingDeviceRequest, PendingDeviceSummary, RecoverTrustRequest, RecoverTrustResponse,
-    RecoveryChallengeStartRequest, RecoveryChallengeStartResponse, RegisterResponse, SyncRequest,
+    RecoveryChallengeStartRequest, RecoveryChallengeStartResponse, RegisterResponse,
+    RotateVaultKeyRequest, RotationStatusResponse, RotationVaultKeyWrapping, SyncRequest,
     SyncResponse, SyncStatusRequest, SyncStatusResponse, UpdateItemRequest, UserLookupRequest,
     UserLookupResponse, VaultMemberResponse, VaultResponse, VaultStatusCursor, VaultSyncCursor,
 };
@@ -371,6 +372,94 @@ async fn vault_members_endpoint_lists_active_members() {
         .expect("viewer member is listed");
     assert_eq!(viewer_member.role, VaultRole::Viewer);
     assert_eq!(viewer_member.public_key, "viewer-public-key");
+}
+
+#[tokio::test]
+#[serial(postgres)]
+async fn signed_rotation_endpoint_accepts_client_side_wrappings() {
+    let Some(storage) = fresh_test_storage().await else {
+        return;
+    };
+    let app = router(test_state_with_storage(storage));
+    let owner = register_and_signed_login(
+        app.clone(),
+        "rotation-owner@example.com",
+        b"rotation owner",
+        "rotation-owner",
+    )
+    .await;
+    let member = register_user_with_device(
+        app.clone(),
+        "rotation-member@example.com",
+        b"rotation member",
+        Some("Rotation Member"),
+        "rotation laptop",
+        "rotation-device-public-key".to_owned(),
+        "rotation-fingerprint".to_owned(),
+        "rotation-public-key".to_owned(),
+    )
+    .await;
+    let vault_id = Uuid::parse_str("00000000-0000-0000-0000-000000000177").unwrap();
+    let (_status, vault): (StatusCode, VaultResponse) = signed_json_request(
+        app.clone(),
+        Method::POST,
+        "/api/v1/vaults",
+        owner.auth("rotation-create-vault"),
+        &CreateVaultRequest {
+            protocol_version: PROTOCOL_VERSION,
+            vault_id: Some(vault_id),
+            name: "Rotation".to_owned(),
+            kind: VaultKind::Shared,
+            initial_key_wrapping: json!({"owner": "wrapping-v1"}),
+        },
+    )
+    .await;
+    let (_status, _added): (StatusCode, VaultMemberResponse) = signed_json_request(
+        app.clone(),
+        Method::POST,
+        &format!("/api/v1/vaults/{}/members", vault.vault_id),
+        owner.auth("rotation-add-member"),
+        &AddVaultMemberRequest {
+            protocol_version: PROTOCOL_VERSION,
+            user_id: member.user_id,
+            role: VaultRole::Editor,
+            vault_key_wrapping: json!({"member": "wrapping-v1"}),
+        },
+    )
+    .await;
+    let (_status, _removed): (StatusCode, serde_json::Value) = signed_json_request(
+        app.clone(),
+        Method::DELETE,
+        &format!("/api/v1/vaults/{}/members/{}", vault.vault_id, member.user_id),
+        owner.auth("rotation-remove-member"),
+        &json!({}),
+    )
+    .await;
+
+    let (status, rotated): (StatusCode, RotationStatusResponse) = signed_json_request(
+        app,
+        Method::POST,
+        &format!("/api/v1/vaults/{}/rotate-key", vault.vault_id),
+        owner.auth("rotation-finish"),
+        &RotateVaultKeyRequest {
+            protocol_version: PROTOCOL_VERSION,
+            from_generation: 1,
+            to_generation: 2,
+            new_wrappings: vec![RotationVaultKeyWrapping {
+                user_id: owner.user_id,
+                device_id: None,
+                wrapping_type: "user_public_key".to_owned(),
+                envelope: json!({"owner": "wrapping-v2"}),
+            }],
+            reencrypted_revisions: vec![],
+        },
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(rotated.vault_id, vault.vault_id);
+    assert_eq!(rotated.current_key_generation, 2);
+    assert!(!rotated.needs_key_rotation);
 }
 
 #[tokio::test]
