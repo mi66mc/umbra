@@ -12,14 +12,16 @@ use umbra_crypto::{
     decrypt_recovery_challenge, encrypt_device_bootstrap_bundle, encrypt_item,
     generate_user_keypair, generate_vault_key, unwrap_vault_key, wrap_vault_key_for_user,
 };
+#[allow(unused_imports)]
 use umbra_protocol::{
     AddOrgMemberRequest, AddVaultMemberRequest, ApprovalLookupRequest, ApproveDeviceRequest,
     CreateItemRequest, CreateOrgRequest, CreateOrgVaultRequest, CreateVaultRequest,
     DeviceBootstrapResponse, DeviceResponse, ItemRevisionResponse, OrgMemberResponse, OrgResponse,
     PROTOCOL_VERSION, PendingDeviceSummary, RecoverTrustRequest, RecoverTrustResponse,
-    RecoveryChallengeStartRequest, RecoveryChallengeStartResponse, SyncRequest, SyncResponse,
-    UpdateItemRequest, UserLookupRequest, UserLookupResponse, VaultMemberResponse, VaultResponse,
-    VaultSyncCursor,
+    RecoveryChallengeStartRequest, RecoveryChallengeStartResponse, RotateVaultKeyRequest,
+    RotationItemRevision, RotationStatusResponse, RotationVaultKeyWrapping, SyncRequest,
+    SyncResponse, UpdateItemRequest, UserLookupRequest, UserLookupResponse, VaultMemberResponse,
+    VaultResponse, VaultSyncCursor,
 };
 use uuid::Uuid;
 
@@ -1888,6 +1890,8 @@ pub(crate) struct DecryptedListedItem {
 }
 
 struct DecryptedCachedItem {
+    #[allow(dead_code)]
+    kind: String,
     plaintext: ItemPlaintextV1,
 }
 
@@ -1935,6 +1939,89 @@ fn wrap_vault_key_for_member(
     let aad = AadV1::vault_key_wrapping(vault_id.to_string());
     let wrapping = wrap_vault_key_for_user(recipient_public_key, vault_key, aad)?;
     serde_json::to_value(wrapping).map_err(CliError::from)
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct RotationPlanSummary {
+    vault_id: VaultId,
+    from_generation: i64,
+    to_generation: i64,
+    member_wrapping_count: usize,
+    item_revision_count: usize,
+    dry_run: bool,
+}
+
+#[allow(dead_code)]
+fn rotation_next_generation(current_key_generation: i64) -> Result<i64, CliError> {
+    if current_key_generation < 1 {
+        return Err(CliError::Input("current key generation must be positive"));
+    }
+    Ok(current_key_generation + 1)
+}
+
+#[allow(dead_code)]
+fn build_rotation_request(
+    vault_id: VaultId,
+    from_generation: i64,
+    old_vault_key: &VaultKey,
+    new_vault_key: &VaultKey,
+    members: &[VaultMemberResponse],
+    current_revisions: &[crate::cache::CachedItemRevision],
+) -> Result<RotateVaultKeyRequest, CliError> {
+    let to_generation = rotation_next_generation(from_generation)?;
+    let active_members = members
+        .iter()
+        .filter(|member| member.state == MemberState::Active)
+        .collect::<Vec<_>>();
+    if active_members.is_empty() {
+        return Err(CliError::Input(
+            "cannot rotate a vault with no active members",
+        ));
+    }
+
+    let mut new_wrappings = Vec::with_capacity(active_members.len());
+    for member in active_members {
+        let public_key = UserPublicKey::from_base64url(&member.public_key)?;
+        new_wrappings.push(RotationVaultKeyWrapping {
+            user_id: member.user_id,
+            device_id: None,
+            wrapping_type: "user_public_key".to_owned(),
+            envelope: wrap_vault_key_for_member(&public_key, new_vault_key, vault_id)?,
+        });
+    }
+
+    let mut reencrypted_revisions = Vec::with_capacity(current_revisions.len());
+    for revision in current_revisions {
+        if revision.key_generation != from_generation {
+            return Err(CliError::Input(
+                "cached item generation is stale; run `umbra sync run --force-full` and try again",
+            ));
+        }
+        let decrypted = decrypt_cached_item(old_vault_key, revision)?;
+        let next_revision = revision.revision + 1;
+        let envelope = encrypt_item_plaintext(
+            vault_id,
+            revision.item_id,
+            next_revision,
+            decrypted.kind,
+            new_vault_key,
+            &decrypted.plaintext,
+        )?;
+        reencrypted_revisions.push(RotationItemRevision {
+            item_id: revision.item_id,
+            expected_revision: revision.revision,
+            envelope,
+        });
+    }
+
+    Ok(RotateVaultKeyRequest {
+        protocol_version: PROTOCOL_VERSION,
+        from_generation,
+        to_generation,
+        new_wrappings,
+        reencrypted_revisions,
+    })
 }
 
 fn encrypt_item_plaintext(
@@ -2038,11 +2125,12 @@ fn decrypt_cached_item_wrapper(
         revision.vault_id.to_string(),
         revision.item_id.to_string(),
         revision.revision,
-        wrapper.kind,
+        wrapper.kind.clone(),
     );
     let plaintext = decrypt_item(vault_key, &aad, &wrapper.crypto)?;
 
     Ok(DecryptedCachedItem {
+        kind: wrapper.kind,
         plaintext: serde_json::from_slice(&plaintext)?,
     })
 }
@@ -2189,6 +2277,86 @@ mod tests {
         let opened = unwrap_vault_key(&target.private_key, &aad, &envelope).unwrap();
 
         assert_eq!(opened, vault_key);
+    }
+
+    #[test]
+    fn rotation_next_generation_rejects_invalid_current_generation() {
+        assert!(rotation_next_generation(0).is_err());
+        assert!(rotation_next_generation(-1).is_err());
+        assert_eq!(rotation_next_generation(1).unwrap(), 2);
+    }
+
+    #[test]
+    fn build_rotation_request_rewraps_members_and_reencrypts_items() {
+        let vault_id = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+        let member_id = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
+        let old_vault_key = generate_vault_key();
+        let new_vault_key = generate_vault_key();
+        let member_keys = generate_user_keypair();
+        let plaintext = ItemPlaintextV1 {
+            schema_version: 1,
+            title: "GitHub".to_owned(),
+            fields: vec![],
+            notes: Some("rotated".to_owned()),
+            tags: vec![],
+        };
+        let item_id = Uuid::parse_str("00000000-0000-0000-0000-000000000003").unwrap();
+        let envelope = encrypt_item_plaintext(
+            vault_id,
+            item_id,
+            1,
+            "login".to_owned(),
+            &old_vault_key,
+            &plaintext,
+        )
+        .unwrap();
+        let revision = crate::cache::CachedItemRevision {
+            vault_id,
+            item_id,
+            revision: 1,
+            vault_revision: 1,
+            key_generation: 1,
+            author_user_id: None,
+            envelope,
+        };
+        let member = VaultMemberResponse {
+            vault_id,
+            user_id: member_id,
+            role: VaultRole::Editor,
+            state: MemberState::Active,
+            public_key: member_keys.public_key.to_base64url(),
+        };
+
+        let request = build_rotation_request(
+            vault_id,
+            1,
+            &old_vault_key,
+            &new_vault_key,
+            &[member],
+            &[revision],
+        )
+        .unwrap();
+
+        assert_eq!(request.from_generation, 1);
+        assert_eq!(request.to_generation, 2);
+        assert_eq!(request.new_wrappings.len(), 1);
+        assert_eq!(request.new_wrappings[0].user_id, member_id);
+        assert_eq!(request.new_wrappings[0].wrapping_type, "user_public_key");
+        assert_eq!(request.reencrypted_revisions.len(), 1);
+        assert_eq!(request.reencrypted_revisions[0].expected_revision, 1);
+
+        let wrapping: VaultKeyWrappingEnvelopeV1 =
+            serde_json::from_value(request.new_wrappings[0].envelope.clone()).unwrap();
+        let wrapping_aad = AadV1::vault_key_wrapping(vault_id.to_string());
+        let opened = unwrap_vault_key(&member_keys.private_key, &wrapping_aad, &wrapping).unwrap();
+        assert_eq!(opened, new_vault_key);
+
+        let wrapper: ItemEnvelopeWrapper =
+            serde_json::from_value(request.reencrypted_revisions[0].envelope.clone()).unwrap();
+        let item_aad = AadV1::item(vault_id.to_string(), item_id.to_string(), 2, "login");
+        let decrypted = decrypt_item(&new_vault_key, &item_aad, &wrapper.crypto).unwrap();
+        let rotated_plaintext: ItemPlaintextV1 = serde_json::from_slice(&decrypted).unwrap();
+        assert_eq!(rotated_plaintext.title, "GitHub");
     }
 
     #[test]
