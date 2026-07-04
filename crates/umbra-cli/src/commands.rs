@@ -12,16 +12,14 @@ use umbra_crypto::{
     decrypt_recovery_challenge, encrypt_device_bootstrap_bundle, encrypt_item,
     generate_user_keypair, generate_vault_key, unwrap_vault_key, wrap_vault_key_for_user,
 };
-#[allow(unused_imports)]
 use umbra_protocol::{
     AddOrgMemberRequest, AddVaultMemberRequest, ApprovalLookupRequest, ApproveDeviceRequest,
     CreateItemRequest, CreateOrgRequest, CreateOrgVaultRequest, CreateVaultRequest,
     DeviceBootstrapResponse, DeviceResponse, ItemRevisionResponse, OrgMemberResponse, OrgResponse,
     PROTOCOL_VERSION, PendingDeviceSummary, RecoverTrustRequest, RecoverTrustResponse,
     RecoveryChallengeStartRequest, RecoveryChallengeStartResponse, RotateVaultKeyRequest,
-    RotationItemRevision, RotationStatusResponse, RotationVaultKeyWrapping, SyncRequest,
-    SyncResponse, UpdateItemRequest, UserLookupRequest, UserLookupResponse, VaultMemberResponse,
-    VaultResponse, VaultSyncCursor,
+    RotationItemRevision, RotationVaultKeyWrapping, SyncRequest, SyncResponse, UpdateItemRequest,
+    UserLookupRequest, UserLookupResponse, VaultMemberResponse, VaultResponse, VaultSyncCursor,
 };
 use uuid::Uuid;
 
@@ -1890,7 +1888,7 @@ pub(crate) struct DecryptedListedItem {
 }
 
 struct DecryptedCachedItem {
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), allow(dead_code))]
     kind: String,
     plaintext: ItemPlaintextV1,
 }
@@ -1952,7 +1950,13 @@ struct RotationPlanSummary {
     dry_run: bool,
 }
 
-#[allow(dead_code)]
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RotationCacheSnapshot {
+    FullVaultSync,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 fn rotation_next_generation(current_key_generation: i64) -> Result<i64, CliError> {
     if current_key_generation < 1 {
         return Err(CliError::Input("current key generation must be positive"));
@@ -1960,7 +1964,7 @@ fn rotation_next_generation(current_key_generation: i64) -> Result<i64, CliError
     Ok(current_key_generation + 1)
 }
 
-#[allow(dead_code)]
+#[cfg_attr(not(test), allow(dead_code))]
 fn build_rotation_request(
     vault_id: VaultId,
     from_generation: i64,
@@ -1968,8 +1972,15 @@ fn build_rotation_request(
     new_vault_key: &VaultKey,
     members: &[VaultMemberResponse],
     current_revisions: &[crate::cache::CachedItemRevision],
+    cache_snapshot: RotationCacheSnapshot,
 ) -> Result<RotateVaultKeyRequest, CliError> {
+    let RotationCacheSnapshot::FullVaultSync = cache_snapshot;
     let to_generation = rotation_next_generation(from_generation)?;
+    if members.iter().any(|member| member.vault_id != vault_id) {
+        return Err(CliError::Input(
+            "vault member response does not belong to selected vault",
+        ));
+    }
     let active_members = members
         .iter()
         .filter(|member| member.state == MemberState::Active)
@@ -2334,6 +2345,7 @@ mod tests {
             &new_vault_key,
             &[member],
             &[revision],
+            RotationCacheSnapshot::FullVaultSync,
         )
         .unwrap();
 
@@ -2357,6 +2369,40 @@ mod tests {
         let decrypted = decrypt_item(&new_vault_key, &item_aad, &wrapper.crypto).unwrap();
         let rotated_plaintext: ItemPlaintextV1 = serde_json::from_slice(&decrypted).unwrap();
         assert_eq!(rotated_plaintext.title, "GitHub");
+    }
+
+    #[test]
+    fn rotation_request_rejects_member_from_other_vault() {
+        let vault_id = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+        let other_vault_id = Uuid::parse_str("00000000-0000-0000-0000-000000000004").unwrap();
+        let member_id = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
+        let old_vault_key = generate_vault_key();
+        let new_vault_key = generate_vault_key();
+        let member_keys = generate_user_keypair();
+        let member = VaultMemberResponse {
+            vault_id: other_vault_id,
+            user_id: member_id,
+            role: VaultRole::Editor,
+            state: MemberState::Active,
+            public_key: member_keys.public_key.to_base64url(),
+        };
+
+        let result = build_rotation_request(
+            vault_id,
+            1,
+            &old_vault_key,
+            &new_vault_key,
+            &[member],
+            &[],
+            RotationCacheSnapshot::FullVaultSync,
+        );
+
+        assert!(matches!(
+            result,
+            Err(CliError::Input(
+                "vault member response does not belong to selected vault"
+            ))
+        ));
     }
 
     #[test]
