@@ -897,9 +897,11 @@ async fn list_vault_members(
         .user_id;
     ensure_vault_member(&state, vault_id, user_id).await?;
     let members = state.storage.list_vault_members(vault_id).await?;
-    Ok(Json(
-        members.into_iter().map(vault_member_response).collect(),
-    ))
+    let mut responses = Vec::with_capacity(members.len());
+    for member in members {
+        responses.push(vault_member_response(&state, member).await?);
+    }
+    Ok(Json(responses))
 }
 
 async fn add_vault_member(
@@ -935,7 +937,7 @@ async fn add_vault_member(
             key_generation: status.current_key_generation,
         })
         .await?;
-    Ok(Json(vault_member_response(member)))
+    Ok(Json(vault_member_response(&state, member).await?))
 }
 
 async fn remove_vault_member(
@@ -1187,13 +1189,18 @@ fn org_member_response(member: umbra_storage::OrgMemberRecord) -> OrgMemberRespo
     }
 }
 
-fn vault_member_response(member: umbra_storage::VaultMemberRecord) -> VaultMemberResponse {
-    VaultMemberResponse {
+async fn vault_member_response(
+    state: &AppState,
+    member: umbra_storage::VaultMemberRecord,
+) -> Result<VaultMemberResponse, ServerError> {
+    let user = state.storage.find_user_by_id(member.user_id).await?;
+    Ok(VaultMemberResponse {
         vault_id: member.vault_id,
         user_id: member.user_id,
         role: member.role,
         state: member.state,
-    }
+        public_key: user.public_key,
+    })
 }
 
 fn item_revision_response(revision: umbra_storage::ItemRevisionRecord) -> ItemRevisionResponse {

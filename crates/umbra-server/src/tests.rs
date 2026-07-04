@@ -345,6 +345,7 @@ async fn vault_members_endpoint_lists_active_members() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    assert_eq!(_added.public_key, "viewer-public-key");
 
     let (status, members): (StatusCode, Vec<VaultMemberResponse>) = signed_json_request(
         app,
@@ -357,16 +358,19 @@ async fn vault_members_endpoint_lists_active_members() {
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(members.len(), 2);
-    assert!(
-        members
-            .iter()
-            .any(|m| m.user_id == owner.user_id && m.role == VaultRole::Owner)
-    );
-    assert!(
-        members
-            .iter()
-            .any(|m| m.user_id == member.user_id && m.role == VaultRole::Viewer)
-    );
+    let owner_member = members
+        .iter()
+        .find(|m| m.user_id == owner.user_id)
+        .expect("owner member is listed");
+    assert_eq!(owner_member.role, VaultRole::Owner);
+    assert_eq!(owner_member.public_key, "first-public-key");
+
+    let viewer_member = members
+        .iter()
+        .find(|m| m.user_id == member.user_id)
+        .expect("viewer member is listed");
+    assert_eq!(viewer_member.role, VaultRole::Viewer);
+    assert_eq!(viewer_member.public_key, "viewer-public-key");
 }
 
 #[tokio::test]
