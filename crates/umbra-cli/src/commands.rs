@@ -18,8 +18,9 @@ use umbra_protocol::{
     DeviceBootstrapResponse, DeviceResponse, ItemRevisionResponse, OrgMemberResponse, OrgResponse,
     PROTOCOL_VERSION, PendingDeviceSummary, RecoverTrustRequest, RecoverTrustResponse,
     RecoveryChallengeStartRequest, RecoveryChallengeStartResponse, RotateVaultKeyRequest,
-    RotationItemRevision, RotationVaultKeyWrapping, SyncRequest, SyncResponse, UpdateItemRequest,
-    UserLookupRequest, UserLookupResponse, VaultMemberResponse, VaultResponse, VaultSyncCursor,
+    RotationItemRevision, RotationStatusResponse, RotationVaultKeyWrapping, SyncRequest,
+    SyncResponse, UpdateItemRequest, UserLookupRequest, UserLookupResponse, VaultMemberResponse,
+    VaultResponse, VaultSyncCursor,
 };
 use uuid::Uuid;
 
@@ -555,12 +556,141 @@ pub async fn run(
                 .await?;
             render_org_member_added(output, &member)
         }
-        Command::Crypto(CryptoCommand::RotationStatus { .. }) => Err(CliError::Input(
-            "crypto rotation-status is not implemented yet",
-        )),
-        Command::Crypto(CryptoCommand::RotateVaultKey { .. }) => Err(CliError::Input(
-            "crypto rotate-vault-key is not implemented yet",
-        )),
+        Command::Crypto(CryptoCommand::RotationStatus { vault_id, vault }) => {
+            let profile = active_profile(&config)?;
+            require_login(profile)?;
+            let cache = crate::cache::LocalCache::open(&config.active_profile)?;
+            let vault_id =
+                resolve_vault_id_for_output(profile, &cache, vault_id, vault.as_deref(), output)?;
+            let client = UmbraHttpClient::new(profile)?;
+            let status: RotationStatusResponse = client
+                .get(&format!("/api/v1/vaults/{vault_id}/rotation-status"))
+                .await?;
+            render_rotation_status(output, &status)
+        }
+        Command::Crypto(CryptoCommand::RotateVaultKey {
+            vault_id,
+            vault,
+            dry_run,
+            force,
+            yes,
+        }) => {
+            let profile_name = config.active_profile.clone();
+            let profile = active_profile(&config)?;
+            require_login(profile)?;
+            let device_id = profile.device_id.ok_or(CliError::Input(
+                "profile has no device id; run `umbra login` first",
+            ))?;
+            let client = UmbraHttpClient::new(profile)?;
+            let mut cache = crate::cache::LocalCache::open(&profile_name)?;
+            let vault_id =
+                resolve_vault_id_for_output(profile, &cache, vault_id, vault.as_deref(), output)?;
+            let status: RotationStatusResponse = client
+                .get(&format!("/api/v1/vaults/{vault_id}/rotation-status"))
+                .await?;
+            if !status.needs_key_rotation && !force {
+                return Err(CliError::Input(
+                    "vault does not require rotation; pass --force to rotate anyway",
+                ));
+            }
+            if output.is_json() && !dry_run && !yes {
+                return Err(CliError::Input(
+                    "pass --yes to rotate vault key in JSON mode",
+                ));
+            }
+            if !output.is_json()
+                && !dry_run
+                && !yes
+                && !dialoguer::Confirm::new()
+                    .with_prompt("Rotate this vault key and reencrypt all cached items?")
+                    .default(false)
+                    .interact()?
+            {
+                return Err(CliError::Input("vault key rotation cancelled"));
+            }
+
+            let full_sync: SyncResponse = client
+                .post(
+                    "/api/v1/sync",
+                    &SyncRequest {
+                        protocol_version: PROTOCOL_VERSION,
+                        device_id,
+                        vaults: vec![VaultSyncCursor {
+                            vault_id,
+                            since_vault_revision: 0,
+                        }],
+                    },
+                )
+                .await?;
+            for vault_changes in &full_sync.vaults {
+                cache.apply_sync_changes(vault_changes)?;
+            }
+            let snapshot_item_ids = full_sync
+                .vaults
+                .iter()
+                .find(|changes| changes.vault_id == vault_id)
+                .map(|changes| {
+                    changes
+                        .items
+                        .iter()
+                        .map(|item| item.item_id)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let members: Vec<VaultMemberResponse> = client
+                .get(&format!("/api/v1/vaults/{vault_id}/members"))
+                .await?;
+            let current_revisions = cache.list_latest_item_revisions(vault_id)?;
+            let old_vault_key = unlock_vault_key(&profile_name, profile, &cache, vault_id)?;
+            let new_vault_key = generate_vault_key();
+            let request = build_rotation_request(
+                vault_id,
+                status.current_key_generation,
+                &old_vault_key,
+                &new_vault_key,
+                &members,
+                &current_revisions,
+                RotationCacheSnapshot::full_vault(snapshot_item_ids),
+            )?;
+            let summary = RotationPlanSummary {
+                vault_id,
+                from_generation: request.from_generation,
+                to_generation: request.to_generation,
+                member_wrapping_count: request.new_wrappings.len(),
+                item_revision_count: request.reencrypted_revisions.len(),
+                dry_run,
+            };
+            if dry_run {
+                return render_rotation_dry_run(output, &summary);
+            }
+
+            let completed: RotationStatusResponse = client
+                .post(&format!("/api/v1/vaults/{vault_id}/rotate-key"), &request)
+                .await?;
+            save_rotated_vault_key_to_unlock_store(
+                &profile_name,
+                profile,
+                vault_id,
+                new_vault_key,
+            )?;
+            let refresh: SyncResponse = client
+                .post(
+                    "/api/v1/sync",
+                    &SyncRequest {
+                        protocol_version: PROTOCOL_VERSION,
+                        device_id,
+                        vaults: vec![VaultSyncCursor {
+                            vault_id,
+                            since_vault_revision: 0,
+                        }],
+                    },
+                )
+                .await?;
+            for vault_changes in &refresh.vaults {
+                cache.apply_sync_changes(vault_changes)?;
+            }
+            render_rotation_complete(output, &completed, &summary)
+        }
         Command::Vault(VaultCommand::List) => {
             let profile = active_profile(&config)?;
             require_login(profile)?;
@@ -1694,6 +1824,92 @@ fn render_sync_response(output: OutputMode, response: &SyncResponse) -> Result<(
     Ok(())
 }
 
+fn render_rotation_status(
+    output: OutputMode,
+    status: &RotationStatusResponse,
+) -> Result<(), CliError> {
+    if output.is_json() {
+        return print_json(status);
+    }
+
+    crate::output::print_kv(&[
+        ("vault_id", status.vault_id.to_string()),
+        (
+            "current key generation",
+            status.current_key_generation.to_string(),
+        ),
+        (
+            "needs key rotation",
+            if status.needs_key_rotation {
+                "yes"
+            } else {
+                "no"
+            }
+            .to_owned(),
+        ),
+    ]);
+    Ok(())
+}
+
+fn render_rotation_complete(
+    output: OutputMode,
+    status: &RotationStatusResponse,
+    summary: &RotationPlanSummary,
+) -> Result<(), CliError> {
+    if output.is_json() {
+        return print_json(&serde_json::json!({
+            "status": status,
+            "summary": summary,
+        }));
+    }
+
+    crate::output::print_kv(&[
+        ("vault_id", status.vault_id.to_string()),
+        ("from generation", summary.from_generation.to_string()),
+        ("to generation", summary.to_generation.to_string()),
+        (
+            "member wrappings",
+            summary.member_wrapping_count.to_string(),
+        ),
+        ("reencrypted items", summary.item_revision_count.to_string()),
+        (
+            "needs key rotation",
+            if status.needs_key_rotation {
+                "yes"
+            } else {
+                "no"
+            }
+            .to_owned(),
+        ),
+    ]);
+    Ok(())
+}
+
+fn render_rotation_dry_run(
+    output: OutputMode,
+    summary: &RotationPlanSummary,
+) -> Result<(), CliError> {
+    if output.is_json() {
+        return print_json(summary);
+    }
+
+    crate::output::print_kv(&[
+        ("vault_id", summary.vault_id.to_string()),
+        ("from generation", summary.from_generation.to_string()),
+        ("to generation", summary.to_generation.to_string()),
+        (
+            "member wrappings",
+            summary.member_wrapping_count.to_string(),
+        ),
+        (
+            "items to reencrypt",
+            summary.item_revision_count.to_string(),
+        ),
+        ("dry run", "yes".to_owned()),
+    ]);
+    Ok(())
+}
+
 fn render_item_plaintext(
     output: OutputMode,
     item_id: Uuid,
@@ -1888,7 +2104,6 @@ pub(crate) struct DecryptedListedItem {
 }
 
 struct DecryptedCachedItem {
-    #[cfg_attr(not(test), allow(dead_code))]
     kind: String,
     plaintext: ItemPlaintextV1,
 }
@@ -1929,6 +2144,21 @@ fn unlock_vault_key(
     unwrap_vault_key(&unlocked.private_key, &aad, &envelope).map_err(CliError::from)
 }
 
+fn save_rotated_vault_key_to_unlock_store(
+    profile_name: &str,
+    profile: &crate::config::ProfileConfig,
+    vault_id: VaultId,
+    new_vault_key: VaultKey,
+) -> Result<(), CliError> {
+    let Some(mut state) =
+        crate::unlock_store::UnlockStore::open(profile_name, profile.device_id).load()?
+    else {
+        return Ok(());
+    };
+    state.vault_keys.insert(vault_id, new_vault_key);
+    crate::unlock_store::UnlockStore::open(profile_name, profile.device_id).save(&state)
+}
+
 fn wrap_vault_key_for_member(
     recipient_public_key: &UserPublicKey,
     vault_key: &VaultKey,
@@ -1939,7 +2169,6 @@ fn wrap_vault_key_for_member(
     serde_json::to_value(wrapping).map_err(CliError::from)
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct RotationPlanSummary {
     vault_id: VaultId,
@@ -1950,14 +2179,12 @@ struct RotationPlanSummary {
     dry_run: bool,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RotationCacheSnapshot {
     item_ids: BTreeSet<ItemId>,
 }
 
 impl RotationCacheSnapshot {
-    #[cfg_attr(not(test), allow(dead_code))]
     fn full_vault(item_ids: impl IntoIterator<Item = ItemId>) -> Self {
         Self {
             item_ids: item_ids.into_iter().collect(),
@@ -1965,7 +2192,6 @@ impl RotationCacheSnapshot {
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 fn rotation_next_generation(current_key_generation: i64) -> Result<i64, CliError> {
     if current_key_generation < 1 {
         return Err(CliError::Input("current key generation must be positive"));
@@ -1973,7 +2199,6 @@ fn rotation_next_generation(current_key_generation: i64) -> Result<i64, CliError
     Ok(current_key_generation + 1)
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 fn build_rotation_request(
     vault_id: VaultId,
     from_generation: i64,
