@@ -363,7 +363,7 @@ async fn vault_members_endpoint_lists_active_members() {
         .find(|m| m.user_id == owner.user_id)
         .expect("owner member is listed");
     assert_eq!(owner_member.role, VaultRole::Owner);
-    assert_eq!(owner_member.public_key, "first-public-key");
+    assert_eq!(owner_member.public_key, "user-public-key");
 
     let viewer_member = members
         .iter()
