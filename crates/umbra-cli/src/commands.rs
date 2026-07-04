@@ -20,7 +20,7 @@ use umbra_protocol::{
     RecoveryChallengeStartRequest, RecoveryChallengeStartResponse, RotateVaultKeyRequest,
     RotationItemRevision, RotationStatusResponse, RotationVaultKeyWrapping, SyncRequest,
     SyncResponse, UpdateItemRequest, UserLookupRequest, UserLookupResponse, VaultMemberResponse,
-    VaultResponse, VaultSyncCursor,
+    VaultResponse, VaultSyncChanges, VaultSyncCursor,
 };
 use uuid::Uuid;
 
@@ -622,21 +622,14 @@ pub async fn run(
                     },
                 )
                 .await?;
+            let snapshot_item_ids = sync_changes_for_vault(&full_sync, vault_id)?
+                .items
+                .iter()
+                .map(|item| item.item_id)
+                .collect::<Vec<_>>();
             for vault_changes in &full_sync.vaults {
                 cache.apply_sync_changes(vault_changes)?;
             }
-            let snapshot_item_ids = full_sync
-                .vaults
-                .iter()
-                .find(|changes| changes.vault_id == vault_id)
-                .map(|changes| {
-                    changes
-                        .items
-                        .iter()
-                        .map(|item| item.item_id)
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
             let members: Vec<VaultMemberResponse> = client
                 .get(&format!("/api/v1/vaults/{vault_id}/members"))
                 .await?;
@@ -667,12 +660,6 @@ pub async fn run(
             let completed: RotationStatusResponse = client
                 .post(&format!("/api/v1/vaults/{vault_id}/rotate-key"), &request)
                 .await?;
-            save_rotated_vault_key_to_unlock_store(
-                &profile_name,
-                profile,
-                vault_id,
-                new_vault_key,
-            )?;
             let refresh: SyncResponse = client
                 .post(
                     "/api/v1/sync",
@@ -686,9 +673,17 @@ pub async fn run(
                     },
                 )
                 .await?;
+            sync_changes_for_vault(&refresh, vault_id)?;
             for vault_changes in &refresh.vaults {
                 cache.apply_sync_changes(vault_changes)?;
             }
+            refresh_cached_vault_metadata(&client, &cache, vault_id).await?;
+            save_rotated_vault_key_to_unlock_store(
+                &profile_name,
+                profile,
+                vault_id,
+                new_vault_key,
+            )?;
             render_rotation_complete(output, &completed, &summary)
         }
         Command::Vault(VaultCommand::List) => {
@@ -1453,6 +1448,30 @@ async fn lookup_user_by_email(
             },
         )
         .await
+}
+
+fn sync_changes_for_vault(
+    response: &SyncResponse,
+    vault_id: VaultId,
+) -> Result<&VaultSyncChanges, CliError> {
+    response
+        .vaults
+        .iter()
+        .find(|changes| changes.vault_id == vault_id)
+        .ok_or(CliError::Input("full sync did not return selected vault"))
+}
+
+async fn refresh_cached_vault_metadata(
+    client: &UmbraHttpClient,
+    cache: &crate::cache::LocalCache,
+    vault_id: VaultId,
+) -> Result<(), CliError> {
+    let vaults: Vec<VaultResponse> = client.get("/api/v1/vaults").await?;
+    let vault = vaults
+        .iter()
+        .find(|vault| vault.vault_id == vault_id)
+        .ok_or(CliError::Input("vault list did not return selected vault"))?;
+    cache.upsert_vault(vault)
 }
 
 fn apply_recovered_emergency_kit_material(
