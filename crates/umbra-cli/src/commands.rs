@@ -1,9 +1,9 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use umbra_core::{
-    ItemKind, ItemPlaintextV1, MemberState, OrgRole, UserId, VaultId, VaultKind, VaultRole,
+    ItemId, ItemKind, ItemPlaintextV1, MemberState, OrgRole, UserId, VaultId, VaultKind, VaultRole,
 };
 use umbra_crypto::{
     AadV1, CryptoEnvelopeV1, DeviceBootstrapBundleV1, DeviceBootstrapEnvelopeV1, MasterPassword,
@@ -1951,9 +1951,18 @@ struct RotationPlanSummary {
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RotationCacheSnapshot {
-    FullVaultSync,
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RotationCacheSnapshot {
+    item_ids: BTreeSet<ItemId>,
+}
+
+impl RotationCacheSnapshot {
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn full_vault(item_ids: impl IntoIterator<Item = ItemId>) -> Self {
+        Self {
+            item_ids: item_ids.into_iter().collect(),
+        }
+    }
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -1974,7 +1983,6 @@ fn build_rotation_request(
     current_revisions: &[crate::cache::CachedItemRevision],
     cache_snapshot: RotationCacheSnapshot,
 ) -> Result<RotateVaultKeyRequest, CliError> {
-    let RotationCacheSnapshot::FullVaultSync = cache_snapshot;
     let to_generation = rotation_next_generation(from_generation)?;
     if members.iter().any(|member| member.vault_id != vault_id) {
         return Err(CliError::Input(
@@ -1988,6 +1996,20 @@ fn build_rotation_request(
     if active_members.is_empty() {
         return Err(CliError::Input(
             "cannot rotate a vault with no active members",
+        ));
+    }
+
+    let mut current_item_ids = BTreeSet::new();
+    for revision in current_revisions {
+        if !current_item_ids.insert(revision.item_id) {
+            return Err(CliError::Input(
+                "cached item snapshot is incomplete; run a full sync and try again",
+            ));
+        }
+    }
+    if current_item_ids != cache_snapshot.item_ids {
+        return Err(CliError::Input(
+            "cached item snapshot is incomplete; run a full sync and try again",
         ));
     }
 
@@ -2345,7 +2367,7 @@ mod tests {
             &new_vault_key,
             &[member],
             &[revision],
-            RotationCacheSnapshot::FullVaultSync,
+            RotationCacheSnapshot::full_vault([item_id]),
         )
         .unwrap();
 
@@ -2394,13 +2416,73 @@ mod tests {
             &new_vault_key,
             &[member],
             &[],
-            RotationCacheSnapshot::FullVaultSync,
+            RotationCacheSnapshot::full_vault([]),
         );
 
         assert!(matches!(
             result,
             Err(CliError::Input(
                 "vault member response does not belong to selected vault"
+            ))
+        ));
+    }
+
+    #[test]
+    fn rotation_request_rejects_incomplete_item_snapshot() {
+        let vault_id = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+        let member_id = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
+        let item_id = Uuid::parse_str("00000000-0000-0000-0000-000000000003").unwrap();
+        let missing_item_id = Uuid::parse_str("00000000-0000-0000-0000-000000000004").unwrap();
+        let old_vault_key = generate_vault_key();
+        let new_vault_key = generate_vault_key();
+        let member_keys = generate_user_keypair();
+        let plaintext = ItemPlaintextV1 {
+            schema_version: 1,
+            title: "GitHub".to_owned(),
+            fields: vec![],
+            notes: Some("rotated".to_owned()),
+            tags: vec![],
+        };
+        let envelope = encrypt_item_plaintext(
+            vault_id,
+            item_id,
+            1,
+            "login".to_owned(),
+            &old_vault_key,
+            &plaintext,
+        )
+        .unwrap();
+        let revision = crate::cache::CachedItemRevision {
+            vault_id,
+            item_id,
+            revision: 1,
+            vault_revision: 1,
+            key_generation: 1,
+            author_user_id: None,
+            envelope,
+        };
+        let member = VaultMemberResponse {
+            vault_id,
+            user_id: member_id,
+            role: VaultRole::Editor,
+            state: MemberState::Active,
+            public_key: member_keys.public_key.to_base64url(),
+        };
+
+        let result = build_rotation_request(
+            vault_id,
+            1,
+            &old_vault_key,
+            &new_vault_key,
+            &[member],
+            &[revision],
+            RotationCacheSnapshot::full_vault([item_id, missing_item_id]),
+        );
+
+        assert!(matches!(
+            result,
+            Err(CliError::Input(
+                "cached item snapshot is incomplete; run a full sync and try again"
             ))
         ));
     }
