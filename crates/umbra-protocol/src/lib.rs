@@ -244,6 +244,7 @@ pub struct VaultMemberResponse {
     pub user_id: UserId,
     pub role: VaultRole,
     pub state: MemberState,
+    pub public_key: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -596,9 +597,11 @@ mod tests {
             user_id: lookup.user_id,
             role: VaultRole::Viewer,
             state: MemberState::Active,
+            public_key: "ana-public-key".to_owned(),
         };
         let encoded = serde_json::to_value(&vault_member).unwrap();
         assert_eq!(encoded["role"], json!("viewer"));
         assert_eq!(encoded["state"], json!("active"));
+        assert_eq!(encoded["public_key"], json!("ana-public-key"));
     }
 }
