@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
@@ -1469,9 +1469,8 @@ pub async fn run(
                 offline,
             )
             .await?;
-            ensure_can_write_env_file(&output_path, yes)?;
             let dotenv = crate::item_plaintext::render_dotenv(&plaintext);
-            write_env_file(&output_path, &dotenv)?;
+            write_env_file(&output_path, &dotenv, yes)?;
             if output.is_json() {
                 print_json(&serde_json::json!({
                     "project_env": project_env,
@@ -1579,6 +1578,7 @@ async fn load_env_bundle_for_command(
     Ok(plaintext)
 }
 
+#[allow(dead_code)]
 fn ensure_can_write_env_file(path: &Path, yes: bool) -> Result<(), CliError> {
     if path.exists() && !yes {
         return Err(CliError::Input(
@@ -1588,14 +1588,27 @@ fn ensure_can_write_env_file(path: &Path, yes: bool) -> Result<(), CliError> {
     Ok(())
 }
 
-fn write_env_file(path: &Path, contents: &str) -> Result<(), CliError> {
+fn write_env_file(path: &Path, contents: &str, overwrite: bool) -> Result<(), CliError> {
     let mut options = OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    options.write(true);
+    if overwrite {
+        options.create(true).truncate(true);
+    } else {
+        options.create_new(true);
+    }
     #[cfg(unix)]
     {
         options.mode(0o600);
     }
-    let mut file = options.open(path)?;
+    let mut file = match options.open(path) {
+        Ok(file) => file,
+        Err(error) if !overwrite && error.kind() == ErrorKind::AlreadyExists => {
+            return Err(CliError::Input(
+                "output file already exists; pass --yes to overwrite",
+            ));
+        }
+        Err(error) => return Err(error.into()),
+    };
     file.write_all(contents.as_bytes())?;
     file.sync_all()?;
     Ok(())
@@ -3661,7 +3674,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(".env");
 
-        write_env_file(&path, "DATABASE_URL=postgres://localhost\n").unwrap();
+        write_env_file(&path, "DATABASE_URL=postgres://localhost\n", false).unwrap();
 
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
@@ -3677,10 +3690,39 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(".env");
 
-        write_env_file(&path, "SECRET=value\n").unwrap();
+        write_env_file(&path, "SECRET=value\n", false).unwrap();
 
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn env_file_writer_refuses_existing_file_without_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".env");
+        std::fs::write(&path, "DATABASE_URL=old\n").unwrap();
+
+        let result = write_env_file(&path, "DATABASE_URL=new\n", false);
+
+        assert!(matches!(result, Err(CliError::Input(_))));
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "DATABASE_URL=old\n"
+        );
+    }
+
+    #[test]
+    fn env_file_writer_overwrites_existing_file_when_requested() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".env");
+        std::fs::write(&path, "DATABASE_URL=old\n").unwrap();
+
+        write_env_file(&path, "DATABASE_URL=new\n", true).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "DATABASE_URL=new\n"
+        );
     }
 
     #[test]
