@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -35,7 +36,7 @@ use crate::keys::DeviceSigningKey;
 use crate::output::{OutputMode, print_json};
 use crate::{
     AuthCommand, CacheCommand, Command, CryptoCommand, DeviceCommand, EmergencyKitCommand,
-    InviteCommand, ItemCommand, OrgCommand, ProfileCommand, SecretCommand, SyncCommand,
+    EnvCommand, InviteCommand, ItemCommand, OrgCommand, ProfileCommand, SecretCommand, SyncCommand,
     TokenCommand, VaultCommand,
 };
 
@@ -1417,9 +1418,65 @@ pub async fn run(
                 Ok(())
             }
         }
-        Command::Env(_) | Command::Run { .. } => {
-            Err(CliError::Input("env workflows are not implemented yet"))
+        Command::Env(EnvCommand::Get {
+            project_env,
+            vault_id,
+            vault,
+            offline,
+        }) => {
+            let profile = active_profile(&config)?;
+            let plaintext = load_env_bundle_for_command(
+                &config,
+                profile,
+                output,
+                &project_env,
+                vault_id,
+                vault.as_deref(),
+                offline,
+            )
+            .await?;
+            let dotenv = crate::item_plaintext::render_dotenv(&plaintext);
+            print!("{dotenv}");
+            Ok(())
         }
+        Command::Env(EnvCommand::Inject {
+            project_env,
+            vault_id,
+            vault,
+            output: output_path,
+            offline,
+            yes,
+        }) => {
+            let profile = active_profile(&config)?;
+            let plaintext = load_env_bundle_for_command(
+                &config,
+                profile,
+                output,
+                &project_env,
+                vault_id,
+                vault.as_deref(),
+                offline,
+            )
+            .await?;
+            ensure_can_write_env_file(&output_path, yes)?;
+            let dotenv = crate::item_plaintext::render_dotenv(&plaintext);
+            std::fs::write(&output_path, dotenv)?;
+            if output.is_json() {
+                print_json(&serde_json::json!({
+                    "project_env": project_env,
+                    "output": output_path,
+                    "written": true
+                }))
+            } else {
+                crate::output::print_kv(&[
+                    ("project_env", project_env),
+                    ("output", output_path.display().to_string()),
+                    ("written", "true".to_owned()),
+                ]);
+                Ok(())
+            }
+        }
+        Command::Run { .. } => Err(CliError::Input("run workflow is not implemented yet")),
         Command::Sync(SyncCommand::Run {
             vault_id,
             vault,
@@ -1476,6 +1533,48 @@ fn require_login(profile: &crate::config::ProfileConfig) -> Result<(), CliError>
     } else {
         Err(CliError::NotLoggedIn)
     }
+}
+
+async fn load_env_bundle_for_command(
+    config: &CliConfig,
+    profile: &crate::config::ProfileConfig,
+    output: OutputMode,
+    project_env: &str,
+    vault_id: Option<VaultId>,
+    vault: Option<&str>,
+    offline: bool,
+) -> Result<ItemPlaintextV1, CliError> {
+    let mut cache = crate::cache::LocalCache::open(&config.active_profile)?;
+    let vault_id = resolve_vault_id_for_output(profile, &cache, vault_id, vault, output)?;
+    let mode = if offline {
+        crate::sync::SyncMode::Offline
+    } else {
+        require_login(profile)?;
+        crate::sync::SyncMode::IfChanged
+    };
+    let sync_outcome =
+        crate::sync::ensure_vault_synced(profile, &mut cache, vault_id, mode).await?;
+    let _ = (
+        sync_outcome.synced,
+        sync_outcome.latest_vault_revision,
+        sync_outcome.latest_access_revision,
+    );
+    let vault_key = unlock_vault_key(&config.active_profile, profile, &cache, vault_id)?;
+    let Some((_revision, plaintext)) =
+        find_secret_bundle(&cache, &vault_key, vault_id, project_env)?
+    else {
+        return Err(CliError::Input("secret bundle not found"));
+    };
+    Ok(plaintext)
+}
+
+fn ensure_can_write_env_file(path: &Path, yes: bool) -> Result<(), CliError> {
+    if path.exists() && !yes {
+        return Err(CliError::Input(
+            "output file already exists; pass --yes to overwrite",
+        ));
+    }
+    Ok(())
 }
 
 fn save_pending_login_crypto_material(
