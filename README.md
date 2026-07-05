@@ -169,11 +169,14 @@ umbra org add-member <org-id> --email ana@example.com --role admin
 umbra org members <org-id>
 
 umbra vault create Platform --org-id <org-id>
-umbra vault add-member --vault Platform --email ana@example.com --role editor
+umbra vault invite --vault Platform --email ana@example.com --role editor
 umbra vault members --vault Platform
+
+umbra invite list
+umbra invite accept <invite-id>
 ```
 
-`vault add-member` resolves the target user's account public key, unwraps the vault key locally, wraps the vault key to that public key, and sends only the encrypted wrapping to the server. The server never receives the vault key in plaintext.
+`vault invite` resolves the target user's account public key, unwraps the vault key locally, wraps the vault key to that public key, and sends only the encrypted wrapping to the server inside a pending invite. The server never receives the vault key in plaintext. When the recipient runs `invite accept`, the server activates the membership and stores that already-encrypted wrapping for future sync.
 
 Removing a vault member stops future sync for that user and revokes their active wrapping, but it does not erase secrets already seen. Rotate the vault key and real third-party secrets after sensitive removals.
 

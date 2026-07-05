@@ -142,17 +142,18 @@ Revoking a device stops future sync/API access and revokes that device's active 
 
 ```txt
 1. Admin/owner has the vault unlocked locally.
-2. Admin invites another user.
-3. Server creates or records a pending invite.
-4. Client obtains the recipient public key.
-5. Admin client encrypts the vault key for the recipient public key.
-6. Server stores the recipient vault_key_wrapping.
-7. Recipient downloads the wrapping and opens it with their private key.
+2. Admin runs `umbra vault invite --vault <name> --email <email> --role <role>`.
+3. Admin client obtains the recipient public key from the server.
+4. Admin client encrypts the vault key for the recipient public key.
+5. Server stores a pending invite containing the encrypted recipient vault_key_wrapping.
+6. Recipient runs `umbra invite list` and `umbra invite accept <invite-id>`.
+7. Server activates the membership and stores the encrypted vault_key_wrapping.
+8. Recipient syncs the vault and opens the wrapping with their private key.
 ```
 
 An accepted invite without a key wrapping is not enough to decrypt a vault. Access becomes cryptographically usable only after a wrapping exists.
 
-The first CLI sharing flow is direct membership, not email invites. The owner/admin runs `vault add-member --email <email> --role <role>`. The CLI asks the server for the target user's account public key, unwraps the current vault key locally, creates a new `user_public_key` wrapping for the target user, and uploads that encrypted wrapping with the membership change. A user can have personal vaults with `org_id = null`; organizations are only needed for team ownership and org-scoped vaults.
+The normal CLI sharing flow is invite-based. The owner/admin runs `vault invite --email <email> --role <role>`. The CLI asks the server for the target user's account public key, unwraps the current vault key locally, creates a new `user_public_key` wrapping for the target user, and uploads that encrypted wrapping with the pending invite. A user can have personal vaults with `org_id = null`; organizations are only needed for team ownership and org-scoped vaults.
 
 Vault key rotation is also client-side. An owner/admin requests rotation status, syncs the latest vault revisions, decrypts the latest item revisions with the old vault key, generates a new random vault key, reencrypts each item with the new key, wraps the new key for active members, and submits `RotateVaultKeyRequest`. The server validates role and revision preconditions, revokes old wrappings, stores new encrypted wrappings and item revisions, increments key generation, and clears `needs_key_rotation`.
 

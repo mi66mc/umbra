@@ -47,6 +47,7 @@ DELETE /api/v1/vaults/:vault_id
 
 GET    /api/v1/vaults/:vault_id/members
 POST   /api/v1/vaults/:vault_id/invites
+GET    /api/v1/invites
 POST   /api/v1/vaults/:vault_id/members
 POST   /api/v1/invites/:invite_id/accept
 POST   /api/v1/invites/:invite_id/reject
@@ -64,7 +65,7 @@ POST /api/v1/sync
 POST /api/v1/sync/status
 ```
 
-The server currently implements the OPAQUE register/login flow, organization creation/listing/member management, personal vault creation, organization vault creation, direct vault member grants, member removal, rotation status, rotation completion, encrypted item creation/update, and revision sync.
+The server currently implements the OPAQUE register/login flow, organization creation/listing/member management, personal vault creation, organization vault creation, invite-based vault sharing, direct vault member grants, member removal, rotation status, rotation completion, encrypted item creation/update, sync status, and revision sync.
 
 ### User Lookup
 
@@ -83,6 +84,19 @@ DELETE /api/v1/vaults/:vault_id/members/:user_id
 ```
 
 `POST` requires `vault_key_wrapping`. The wrapping is produced client-side with the target account public key. The server stores the wrapping and enforces membership/role checks, but cannot decrypt it.
+
+### Vault Invites
+
+```http
+POST /api/v1/vaults/:vault_id/invites
+GET /api/v1/invites
+POST /api/v1/invites/:invite_id/accept
+POST /api/v1/invites/:invite_id/reject
+```
+
+`POST /vaults/:vault_id/invites` is the normal CLI sharing path. The owner/admin client looks up the target account public key, unwraps the vault key locally, creates a `user_public_key` vault-key wrapping for the target user, and sends that encrypted wrapping with `InviteMemberRequest`.
+
+`GET /invites` returns pending invites for the authenticated user's email. `accept` validates the trusted device id, activates the membership, stores the pending encrypted vault-key wrapping, and increments access revision so sync sees the new access material. `reject` marks the invite rejected without creating membership.
 
 ### Vault Key Rotation
 
@@ -185,12 +199,13 @@ The server verifies the stored trusted device public key, rejects stale timestam
 
 ## Vault Grants
 
-Adding a user to a vault requires a client-generated vault key wrapping:
+Inviting or directly adding a user to a vault requires a client-generated vault key wrapping:
 
 ```json
 {
   "protocol_version": 1,
-  "user_id": "...",
+  "vault_id": "...",
+  "email": "ana@example.com",
   "role": "viewer",
   "vault_key_wrapping": {
     "version": 1,
@@ -205,7 +220,7 @@ Adding a user to a vault requires a client-generated vault key wrapping:
 }
 ```
 
-The server stores this as an opaque JSON envelope. It does not validate or decrypt the vault key.
+The server stores this as an opaque JSON envelope. It does not validate or decrypt the vault key. The invite recipient can only decrypt the wrapping after accepting and syncing it locally with their account private key.
 
 ## Item And Sync API
 
