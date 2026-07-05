@@ -946,6 +946,9 @@ pub async fn run(
         }) => {
             let profile = active_profile(&config)?;
             require_login(profile)?;
+            if output.is_json() && !yes {
+                return Err(CliError::Input("pass --yes to delete item in JSON mode"));
+            }
             let client = UmbraHttpClient::new(profile)?;
             let mut cache = crate::cache::LocalCache::open(&config.active_profile)?;
             let vault_id =
@@ -964,23 +967,25 @@ pub async fn run(
                 title.as_deref(),
                 output,
             )?;
-            let vault_key = unlock_vault_key(&config.active_profile, profile, &cache, vault_id)?;
             let revision = match selection {
                 ItemSelectionNeed::Selected(revision) => revision,
-                ItemSelectionNeed::NeedsTitleDecrypt => select_cached_item_revision_by_title(
-                    &cache,
-                    &vault_key,
-                    vault_id,
-                    title.as_deref().expect("title selector was validated"),
-                )?,
+                ItemSelectionNeed::NeedsTitleDecrypt => {
+                    let vault_key =
+                        unlock_vault_key(&config.active_profile, profile, &cache, vault_id)?;
+                    select_cached_item_revision_by_title(
+                        &cache,
+                        &vault_key,
+                        vault_id,
+                        title.as_deref().expect("title selector was validated"),
+                    )?
+                }
                 ItemSelectionNeed::NeedsInteractiveDecrypt => {
+                    let vault_key =
+                        unlock_vault_key(&config.active_profile, profile, &cache, vault_id)?;
                     select_cached_item_revision_interactively(&cache, &vault_key, vault_id)?
                 }
             };
 
-            if output.is_json() && !yes {
-                return Err(CliError::Input("pass --yes to delete item in JSON mode"));
-            }
             if !output.is_json()
                 && !yes
                 && !dialoguer::Confirm::new()

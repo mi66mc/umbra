@@ -733,6 +733,18 @@ async fn item_deletion_flow_on<S: StorageBackend + ?Sized>(storage: &S) {
         .unwrap();
     assert!(active_revisions.is_empty());
 
+    let update_after_delete = storage
+        .create_item_revision(CreateItemRevision {
+            revision_id: None,
+            item_id: created.item_id,
+            vault_id: vault.id,
+            expected_revision: created.revision,
+            author_user_id: Some(owner.id),
+            envelope: serde_json::json!({"ciphertext": "v2"}),
+        })
+        .await;
+    assert!(matches!(update_after_delete, Err(StorageError::NotFound)));
+
     let stale_delete = storage
         .delete_item(DeleteItem {
             item_id: created.item_id,

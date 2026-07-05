@@ -69,7 +69,7 @@ impl SqliteStorage {
         let mut tx = self.pool.begin().await?;
 
         let current_revision: i64 = sqlx::query_scalar(
-            "SELECT current_revision FROM items WHERE id = ?1 AND vault_id = ?2",
+            "SELECT current_revision FROM items WHERE id = ?1 AND vault_id = ?2 AND deleted_at IS NULL",
         )
         .bind(input.item_id.to_string())
         .bind(input.vault_id.to_string())
@@ -90,10 +90,11 @@ impl SqliteStorage {
         .await?;
 
         sqlx::query(
-            "UPDATE items SET current_revision = ?1, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?2",
+            "UPDATE items SET current_revision = ?1, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?2 AND vault_id = ?3 AND deleted_at IS NULL",
         )
         .bind(next_revision)
         .bind(input.item_id.to_string())
+        .bind(input.vault_id.to_string())
         .execute(&mut *tx)
         .await?;
 
