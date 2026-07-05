@@ -154,6 +154,8 @@ An accepted invite without a key wrapping is not enough to decrypt a vault. Acce
 
 The first CLI sharing flow is direct membership, not email invites. The owner/admin runs `vault add-member --email <email> --role <role>`. The CLI asks the server for the target user's account public key, unwraps the current vault key locally, creates a new `user_public_key` wrapping for the target user, and uploads that encrypted wrapping with the membership change. A user can have personal vaults with `org_id = null`; organizations are only needed for team ownership and org-scoped vaults.
 
+Vault key rotation is also client-side. An owner/admin requests rotation status, syncs the latest vault revisions, decrypts the latest item revisions with the old vault key, generates a new random vault key, reencrypts each item with the new key, wraps the new key for active members, and submits `RotateVaultKeyRequest`. The server validates role and revision preconditions, revokes old wrappings, stores new encrypted wrappings and item revisions, increments key generation, and clears `needs_key_rotation`.
+
 ## Item Model
 
 Vault items must support simple and complex secrets. The encrypted plaintext schema is client-owned and versioned. Initial item kinds include:

@@ -173,6 +173,20 @@ umbra vault members --vault Platform
 
 Removing a vault member stops future sync for that user and revokes their active wrapping, but it does not erase secrets already seen. Rotate the vault key and real third-party secrets after sensitive removals.
 
+## Vault Key Rotation
+
+Removing a vault member blocks future sync and marks the vault as needing key rotation. Rotation is a client-side crypto operation:
+
+```bash
+umbra crypto rotation-status --vault Platform
+umbra crypto rotate-vault-key --vault Platform --dry-run
+umbra crypto rotate-vault-key --vault Platform --yes
+```
+
+The CLI downloads the latest encrypted item revisions, unlocks the current vault key locally, generates a fresh vault key, reencrypts each latest item revision, wraps the new vault key for every active vault member public key, and uploads only encrypted envelopes to the server.
+
+After removing a member, also rotate any real external credential the removed member may have seen, such as GitHub tokens, API keys, SSH keys, or database passwords. Vault key rotation prevents future Umbra sync access; it cannot erase knowledge already copied.
+
 Legacy bearer-token setup is still available for debugging:
 
 ```bash

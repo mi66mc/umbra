@@ -84,6 +84,15 @@ DELETE /api/v1/vaults/:vault_id/members/:user_id
 
 `POST` requires `vault_key_wrapping`. The wrapping is produced client-side with the target account public key. The server stores the wrapping and enforces membership/role checks, but cannot decrypt it.
 
+### Vault Key Rotation
+
+```http
+GET /api/v1/vaults/:vault_id/rotation-status
+POST /api/v1/vaults/:vault_id/rotate-key
+```
+
+`rotation-status` returns the current key generation and whether the vault needs rotation. `rotate-key` accepts `RotateVaultKeyRequest` with `from_generation`, `to_generation`, new encrypted vault-key wrappings, and reencrypted item revisions. The server never receives the new vault key or plaintext item contents.
+
 ## Auth Flow
 
 OPAQUE is a two-step registration and login flow.
