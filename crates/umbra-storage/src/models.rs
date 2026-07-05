@@ -234,6 +234,21 @@ pub struct CreateItemRevision {
 }
 
 #[derive(Debug, Clone)]
+pub struct DeleteItem {
+    pub item_id: ItemId,
+    pub vault_id: VaultId,
+    pub expected_revision: RevisionId,
+    pub author_user_id: Option<UserId>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DeletedItemRecord {
+    pub item_id: ItemId,
+    pub vault_id: VaultId,
+    pub deleted_vault_revision: RevisionId,
+}
+
+#[derive(Debug, Clone)]
 pub struct ItemRevisionRecord {
     pub id: Uuid,
     pub item_id: ItemId,

@@ -4,11 +4,11 @@ use uuid::Uuid;
 use crate::{
     AppendAuditLog, ApprovePendingDevice, AuditLogRecord, CreateDevice, CreateEncryptedItem,
     CreateItemRevision, CreateOrg, CreateRecoveryChallenge, CreateSession, CreateUser, CreateVault,
-    CreateVaultKeyWrapping, DeviceRecord, FinishVaultKeyRotation, ItemRevisionRecord,
-    OrgMemberRecord, OrgRecord, PostgresStorage, RecoveryChallengeRecord, RotationStatusRecord,
-    SessionRecord, StorageError, UpsertOrgMember, UpsertUserAuth, UpsertVaultMember,
-    UserAuthRecord, UserRecord, VaultKeyWrappingRecord, VaultMemberRecord, VaultRecord,
-    VaultSyncStatusRecord,
+    CreateVaultKeyWrapping, DeleteItem, DeletedItemRecord, DeviceRecord, FinishVaultKeyRotation,
+    ItemRevisionRecord, OrgMemberRecord, OrgRecord, PostgresStorage, RecoveryChallengeRecord,
+    RotationStatusRecord, SessionRecord, StorageError, UpsertOrgMember, UpsertUserAuth,
+    UpsertVaultMember, UserAuthRecord, UserRecord, VaultKeyWrappingRecord, VaultMemberRecord,
+    VaultRecord, VaultSyncStatusRecord,
 };
 use umbra_core::{DeviceId, OrgId, UserId, VaultId};
 
@@ -138,6 +138,12 @@ pub trait StorageBackend: Send + Sync {
         &self,
         input: CreateEncryptedItem,
     ) -> Result<ItemRevisionRecord, StorageError>;
+    async fn delete_item(&self, input: DeleteItem) -> Result<DeletedItemRecord, StorageError>;
+    async fn list_deleted_item_ids_since(
+        &self,
+        vault_id: VaultId,
+        since_vault_revision: i64,
+    ) -> Result<Vec<DeletedItemRecord>, StorageError>;
     async fn list_item_revisions_since(
         &self,
         vault_id: VaultId,
@@ -402,6 +408,18 @@ impl StorageBackend for PostgresStorage {
         input: CreateEncryptedItem,
     ) -> Result<ItemRevisionRecord, StorageError> {
         PostgresStorage::create_encrypted_item(self, input).await
+    }
+
+    async fn delete_item(&self, input: DeleteItem) -> Result<DeletedItemRecord, StorageError> {
+        PostgresStorage::delete_item(self, input).await
+    }
+
+    async fn list_deleted_item_ids_since(
+        &self,
+        vault_id: VaultId,
+        since_vault_revision: i64,
+    ) -> Result<Vec<DeletedItemRecord>, StorageError> {
+        PostgresStorage::list_deleted_item_ids_since(self, vault_id, since_vault_revision).await
     }
 
     async fn list_item_revisions_since(
@@ -679,6 +697,23 @@ impl StorageBackend for crate::sqlite::SqliteStorage {
         input: CreateEncryptedItem,
     ) -> Result<ItemRevisionRecord, StorageError> {
         crate::sqlite::SqliteStorage::create_encrypted_item(self, input).await
+    }
+
+    async fn delete_item(&self, input: DeleteItem) -> Result<DeletedItemRecord, StorageError> {
+        crate::sqlite::SqliteStorage::delete_item(self, input).await
+    }
+
+    async fn list_deleted_item_ids_since(
+        &self,
+        vault_id: VaultId,
+        since_vault_revision: i64,
+    ) -> Result<Vec<DeletedItemRecord>, StorageError> {
+        crate::sqlite::SqliteStorage::list_deleted_item_ids_since(
+            self,
+            vault_id,
+            since_vault_revision,
+        )
+        .await
     }
 
     async fn list_item_revisions_since(

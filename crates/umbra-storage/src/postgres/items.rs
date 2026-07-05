@@ -1,6 +1,8 @@
 use umbra_core::*;
 use uuid::Uuid;
 
+use sqlx::Row;
+
 use crate::convert::*;
 use crate::error::map_sqlx_error;
 use crate::models::*;
@@ -130,6 +132,96 @@ impl PostgresStorage {
         item_revision_from_row(row)
     }
 
+    pub async fn delete_item(
+        &self,
+        input: DeleteItem,
+    ) -> Result<DeletedItemRecord, StorageError> {
+        let mut tx = self.pool.begin().await?;
+
+        let current_revision: i64 = sqlx::query_scalar(
+            "SELECT current_revision FROM items WHERE id = $1 AND vault_id = $2 AND deleted_at IS NULL",
+        )
+        .bind(input.item_id)
+        .bind(input.vault_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+
+        if current_revision != input.expected_revision {
+            return Err(StorageError::Conflict);
+        }
+
+        let vault_revision: i64 = sqlx::query_scalar(
+            r#"
+            UPDATE vaults
+            SET vault_revision = vault_revision + 1, updated_at = now()
+            WHERE id = $1
+            RETURNING vault_revision
+            "#,
+        )
+        .bind(input.vault_id)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        let affected = sqlx::query(
+            r#"
+            UPDATE items
+            SET deleted_at = now(),
+                deleted_vault_revision = $3,
+                updated_at = now()
+            WHERE id = $1 AND vault_id = $2 AND deleted_at IS NULL
+            "#,
+        )
+        .bind(input.item_id)
+        .bind(input.vault_id)
+        .bind(vault_revision)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+
+        if affected != 1 {
+            return Err(StorageError::NotFound);
+        }
+
+        tx.commit().await?;
+        Ok(DeletedItemRecord {
+            item_id: input.item_id,
+            vault_id: input.vault_id,
+            deleted_vault_revision: vault_revision,
+        })
+    }
+
+    pub async fn list_deleted_item_ids_since(
+        &self,
+        vault_id: VaultId,
+        since_vault_revision: RevisionId,
+    ) -> Result<Vec<DeletedItemRecord>, StorageError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, vault_id, deleted_vault_revision
+            FROM items
+            WHERE vault_id = $1
+              AND deleted_vault_revision IS NOT NULL
+              AND deleted_vault_revision > $2
+            ORDER BY deleted_vault_revision ASC, id ASC
+            "#,
+        )
+        .bind(vault_id)
+        .bind(since_vault_revision)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|row| {
+                Ok(DeletedItemRecord {
+                    item_id: row.try_get("id")?,
+                    vault_id: row.try_get("vault_id")?,
+                    deleted_vault_revision: row.try_get("deleted_vault_revision")?,
+                })
+            })
+            .collect()
+    }
+
     pub async fn list_item_revisions_since(
         &self,
         vault_id: VaultId,
@@ -137,10 +229,13 @@ impl PostgresStorage {
     ) -> Result<Vec<ItemRevisionRecord>, StorageError> {
         let rows = sqlx::query(
             r#"
-            SELECT id, item_id, vault_id, revision, vault_revision, key_generation, author_user_id, envelope, created_at
-            FROM item_revisions
-            WHERE vault_id = $1 AND vault_revision > $2
-            ORDER BY vault_revision ASC
+            SELECT ir.id, ir.item_id, ir.vault_id, ir.revision, ir.vault_revision, ir.key_generation, ir.author_user_id, ir.envelope, ir.created_at
+            FROM item_revisions ir
+            INNER JOIN items i ON i.id = ir.item_id AND i.vault_id = ir.vault_id
+            WHERE ir.vault_id = $1
+              AND ir.vault_revision > $2
+              AND i.deleted_at IS NULL
+            ORDER BY ir.vault_revision ASC
             "#,
         )
         .bind(vault_id)

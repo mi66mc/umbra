@@ -177,6 +177,16 @@ async fn sqlite_vault_item_and_rotation_flow() {
 }
 
 #[tokio::test]
+async fn sqlite_item_deletion_flow() {
+    let storage = crate::sqlite::SqliteStorage::connect("sqlite::memory:", 1)
+        .await
+        .unwrap();
+    umbra_migrations::run_sqlite(storage.pool()).await.unwrap();
+
+    item_deletion_flow_on(&storage).await;
+}
+
+#[tokio::test]
 #[serial(postgres)]
 async fn postgres_migrations_create_required_schema() {
     let Some(storage) = fresh_test_storage().await else {
@@ -196,6 +206,16 @@ async fn postgres_migrations_create_required_schema() {
     .unwrap();
 
     assert_eq!(tables, 9);
+}
+
+#[tokio::test]
+#[serial(postgres)]
+async fn postgres_item_deletion_flow() {
+    let Some(storage) = fresh_test_storage().await else {
+        return;
+    };
+
+    item_deletion_flow_on(&storage).await;
 }
 
 #[tokio::test]
@@ -649,6 +669,76 @@ async fn fresh_test_storage() -> Option<Storage> {
 
 async fn create_test_user(storage: &Storage, email: &str) -> UserRecord {
     create_test_user_on(storage, email).await
+}
+
+async fn item_deletion_flow_on<S: StorageBackend + ?Sized>(storage: &S) {
+    let owner = create_test_user_on(storage, "delete-owner@example.com").await;
+    let vault = storage
+        .create_vault(CreateVault {
+            id: None,
+            org_id: None,
+            name: "Delete Vault".to_owned(),
+            kind: VaultKind::Personal,
+            created_by: Some(owner.id),
+            crypto_policy: serde_json::json!({"min_envelope_version": 1}),
+        })
+        .await
+        .unwrap();
+    storage
+        .upsert_vault_member(UpsertVaultMember {
+            vault_id: vault.id,
+            user_id: owner.id,
+            role: VaultRole::Owner,
+            state: MemberState::Active,
+        })
+        .await
+        .unwrap();
+
+    let created = storage
+        .create_encrypted_item(CreateEncryptedItem {
+            item_id: None,
+            revision_id: None,
+            vault_id: vault.id,
+            kind: ItemKind::Login,
+            author_user_id: Some(owner.id),
+            envelope: serde_json::json!({"ciphertext": "v1"}),
+        })
+        .await
+        .unwrap();
+
+    let deleted = storage
+        .delete_item(DeleteItem {
+            item_id: created.item_id,
+            vault_id: vault.id,
+            expected_revision: created.revision,
+            author_user_id: Some(owner.id),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(deleted.item_id, created.item_id);
+    assert_eq!(deleted.vault_id, vault.id);
+    assert!(deleted.deleted_vault_revision > created.vault_revision);
+
+    let deleted_since_create = storage
+        .list_deleted_item_ids_since(vault.id, created.vault_revision)
+        .await
+        .unwrap();
+    assert_eq!(deleted_since_create.len(), 1);
+    assert_eq!(deleted_since_create[0].item_id, created.item_id);
+
+    let active_revisions = storage.list_item_revisions_since(vault.id, 0).await.unwrap();
+    assert!(active_revisions.is_empty());
+
+    let stale_delete = storage
+        .delete_item(DeleteItem {
+            item_id: created.item_id,
+            vault_id: vault.id,
+            expected_revision: created.revision,
+            author_user_id: Some(owner.id),
+        })
+        .await;
+    assert!(matches!(stale_delete, Err(StorageError::NotFound)));
 }
 
 async fn create_test_user_on<S: StorageBackend + ?Sized>(storage: &S, email: &str) -> UserRecord {

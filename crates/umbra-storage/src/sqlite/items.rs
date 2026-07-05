@@ -1,11 +1,16 @@
 use umbra_core::{RevisionId, VaultId};
 use uuid::Uuid;
 
+use sqlx::Row;
+
 use crate::convert::item_kind_to_str;
 use crate::error::map_sqlx_error;
 use crate::sqlite::SqliteStorage;
 use crate::sqlite::convert::item_revision_from_row;
-use crate::{CreateEncryptedItem, CreateItemRevision, ItemRevisionRecord, StorageError};
+use crate::{
+    CreateEncryptedItem, CreateItemRevision, DeleteItem, DeletedItemRecord, ItemRevisionRecord,
+    StorageError,
+};
 
 impl SqliteStorage {
     pub async fn create_encrypted_item(
@@ -114,6 +119,87 @@ impl SqliteStorage {
         item_revision_from_row(row)
     }
 
+    pub async fn delete_item(
+        &self,
+        input: DeleteItem,
+    ) -> Result<DeletedItemRecord, StorageError> {
+        let mut tx = self.pool.begin().await?;
+
+        let current_revision: i64 = sqlx::query_scalar(
+            "SELECT current_revision FROM items WHERE id = ?1 AND vault_id = ?2 AND deleted_at IS NULL",
+        )
+        .bind(input.item_id.to_string())
+        .bind(input.vault_id.to_string())
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(StorageError::NotFound)?;
+
+        if current_revision != input.expected_revision {
+            return Err(StorageError::Conflict);
+        }
+
+        let vault_revision: i64 = sqlx::query_scalar(
+            "UPDATE vaults SET vault_revision = vault_revision + 1, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?1 RETURNING vault_revision",
+        )
+        .bind(input.vault_id.to_string())
+        .fetch_one(&mut *tx)
+        .await?;
+
+        let affected = sqlx::query(
+            "UPDATE items SET deleted_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), deleted_vault_revision = ?3, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?1 AND vault_id = ?2 AND deleted_at IS NULL",
+        )
+        .bind(input.item_id.to_string())
+        .bind(input.vault_id.to_string())
+        .bind(vault_revision)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+
+        if affected != 1 {
+            return Err(StorageError::NotFound);
+        }
+
+        tx.commit().await?;
+        Ok(DeletedItemRecord {
+            item_id: input.item_id,
+            vault_id: input.vault_id,
+            deleted_vault_revision: vault_revision,
+        })
+    }
+
+    pub async fn list_deleted_item_ids_since(
+        &self,
+        vault_id: VaultId,
+        since_vault_revision: RevisionId,
+    ) -> Result<Vec<DeletedItemRecord>, StorageError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, vault_id, deleted_vault_revision
+            FROM items
+            WHERE vault_id = ?1
+              AND deleted_vault_revision IS NOT NULL
+              AND deleted_vault_revision > ?2
+            ORDER BY deleted_vault_revision ASC, id ASC
+            "#,
+        )
+        .bind(vault_id.to_string())
+        .bind(since_vault_revision)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|row| {
+                Ok(DeletedItemRecord {
+                    item_id: crate::sqlite::convert::parse_uuid(row.try_get::<String, _>("id")?)?,
+                    vault_id: crate::sqlite::convert::parse_uuid(
+                        row.try_get::<String, _>("vault_id")?,
+                    )?,
+                    deleted_vault_revision: row.try_get("deleted_vault_revision")?,
+                })
+            })
+            .collect()
+    }
+
     pub async fn list_item_revisions_since(
         &self,
         vault_id: VaultId,
@@ -121,10 +207,13 @@ impl SqliteStorage {
     ) -> Result<Vec<ItemRevisionRecord>, StorageError> {
         let rows = sqlx::query(
             r#"
-            SELECT id, item_id, vault_id, revision, vault_revision, key_generation, author_user_id, envelope, created_at
-            FROM item_revisions
-            WHERE vault_id = ?1 AND vault_revision > ?2
-            ORDER BY vault_revision ASC
+            SELECT ir.id, ir.item_id, ir.vault_id, ir.revision, ir.vault_revision, ir.key_generation, ir.author_user_id, ir.envelope, ir.created_at
+            FROM item_revisions ir
+            INNER JOIN items i ON i.id = ir.item_id AND i.vault_id = ir.vault_id
+            WHERE ir.vault_id = ?1
+              AND ir.vault_revision > ?2
+              AND i.deleted_at IS NULL
+            ORDER BY ir.vault_revision ASC
             "#,
         )
         .bind(vault_id.to_string())
