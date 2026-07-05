@@ -92,8 +92,8 @@ mod tests {
         let migrations = POSTGRES_MIGRATOR.iter().collect::<Vec<_>>();
         let sqlite_migrations = SQLITE_MIGRATOR.iter().collect::<Vec<_>>();
 
-        assert_eq!(migrations.len(), 6);
-        assert_eq!(sqlite_migrations.len(), 6);
+        assert_eq!(migrations.len(), 7);
+        assert_eq!(sqlite_migrations.len(), 7);
         assert!(migrations.iter().any(|migration| {
             migration.version == 4 && migration.description == "vault access revision"
         }));
@@ -111,6 +111,12 @@ mod tests {
         }));
         assert!(sqlite_migrations.iter().any(|migration| {
             migration.version == 6 && migration.description == "item deletions"
+        }));
+        assert!(migrations.iter().any(|migration| {
+            migration.version == 7 && migration.description == "invite wrappings"
+        }));
+        assert!(sqlite_migrations.iter().any(|migration| {
+            migration.version == 7 && migration.description == "invite wrappings"
         }));
     }
 }

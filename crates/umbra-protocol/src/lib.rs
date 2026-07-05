@@ -321,6 +321,7 @@ pub struct InviteMemberRequest {
     pub vault_id: VaultId,
     pub email: String,
     pub role: VaultRole,
+    pub vault_key_wrapping: serde_json::Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -328,6 +329,36 @@ pub struct AcceptInviteRequest {
     pub protocol_version: u16,
     pub invite_id: uuid::Uuid,
     pub device_id: DeviceId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RejectInviteRequest {
+    pub protocol_version: u16,
+    pub invite_id: uuid::Uuid,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InviteResponse {
+    pub invite_id: uuid::Uuid,
+    pub vault_id: VaultId,
+    pub org_id: Option<OrgId>,
+    pub email: String,
+    pub role: VaultRole,
+    pub state: String,
+    pub invited_by: Option<UserId>,
+    pub expires_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingInviteResponse {
+    pub invite_id: uuid::Uuid,
+    pub vault_id: VaultId,
+    pub vault_name: String,
+    pub org_id: Option<OrgId>,
+    pub email: String,
+    pub role: VaultRole,
+    pub invited_by: Option<UserId>,
+    pub expires_at: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -481,6 +512,71 @@ mod tests {
 
         let decoded: DeleteItemRequest = serde_json::from_value(encoded).unwrap();
         assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn invite_member_request_carries_encrypted_wrapping() {
+        let vault_id = Uuid::parse_str("00000000-0000-0000-0000-000000000801").unwrap();
+        let request = InviteMemberRequest {
+            protocol_version: PROTOCOL_VERSION,
+            vault_id,
+            email: "ana@example.com".to_owned(),
+            role: VaultRole::Editor,
+            vault_key_wrapping: json!({"version": 1, "ciphertext": "wrapped-vault-key"}),
+        };
+
+        let encoded = serde_json::to_value(&request).unwrap();
+        assert_eq!(encoded["protocol_version"], json!(1));
+        assert_eq!(encoded["vault_id"], json!(vault_id.to_string()));
+        assert_eq!(encoded["email"], json!("ana@example.com"));
+        assert_eq!(encoded["role"], json!("editor"));
+        assert_eq!(
+            encoded["vault_key_wrapping"],
+            json!({"version": 1, "ciphertext": "wrapped-vault-key"})
+        );
+
+        let decoded: InviteMemberRequest = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn invite_responses_roundtrip() {
+        let invite_id = Uuid::parse_str("00000000-0000-0000-0000-000000000811").unwrap();
+        let vault_id = Uuid::parse_str("00000000-0000-0000-0000-000000000812").unwrap();
+        let invited_by = Uuid::parse_str("00000000-0000-0000-0000-000000000813").unwrap();
+        let invite = InviteResponse {
+            invite_id,
+            vault_id,
+            org_id: None,
+            email: "ana@example.com".to_owned(),
+            role: VaultRole::Viewer,
+            state: "pending".to_owned(),
+            invited_by: Some(invited_by),
+            expires_at: Some("2026-07-12T00:00:00Z".to_owned()),
+        };
+        let pending = PendingInviteResponse {
+            invite_id,
+            vault_id,
+            vault_name: "Platform".to_owned(),
+            org_id: None,
+            email: "ana@example.com".to_owned(),
+            role: VaultRole::Viewer,
+            invited_by: Some(invited_by),
+            expires_at: Some("2026-07-12T00:00:00Z".to_owned()),
+        };
+
+        assert_eq!(
+            serde_json::from_value::<InviteResponse>(serde_json::to_value(&invite).unwrap())
+                .unwrap(),
+            invite
+        );
+        assert_eq!(
+            serde_json::from_value::<PendingInviteResponse>(
+                serde_json::to_value(&pending).unwrap()
+            )
+            .unwrap(),
+            pending
+        );
     }
 
     #[test]
