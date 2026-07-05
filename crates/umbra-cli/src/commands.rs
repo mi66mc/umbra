@@ -1486,7 +1486,36 @@ pub async fn run(
                 Ok(())
             }
         }
-        Command::Run { .. } => Err(CliError::Input("run workflow is not implemented yet")),
+        Command::Run {
+            project_env,
+            vault_id,
+            vault,
+            offline,
+            command,
+        } => {
+            if command.is_empty() {
+                return Err(CliError::Input("run requires a command after --"));
+            }
+            let profile = active_profile(&config)?;
+            let plaintext = load_env_bundle_for_command(
+                &config,
+                profile,
+                output,
+                &project_env,
+                vault_id,
+                vault.as_deref(),
+                offline,
+            )
+            .await?;
+            let env_pairs = crate::item_plaintext::env_pairs(&plaintext);
+            let mut child = build_env_command(&command, env_pairs)?;
+            let status = child.status()?;
+            if status.success() {
+                Ok(())
+            } else {
+                Err(CliError::ProcessExit(status))
+            }
+        }
         Command::Sync(SyncCommand::Run {
             vault_id,
             vault,
@@ -1645,6 +1674,19 @@ fn env_variables_json(plaintext: &ItemPlaintextV1) -> BTreeMap<String, String> {
     crate::item_plaintext::env_pairs(plaintext)
         .into_iter()
         .collect()
+}
+
+fn build_env_command(
+    command: &[String],
+    env_pairs: Vec<(String, String)>,
+) -> Result<std::process::Command, CliError> {
+    if command.is_empty() {
+        return Err(CliError::Input("run requires a command after --"));
+    }
+    let mut child = std::process::Command::new(&command[0]);
+    child.args(&command[1..]);
+    child.envs(env_pairs);
+    Ok(child)
 }
 
 fn save_pending_login_crypto_material(
@@ -3767,6 +3809,16 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "SECRET=new\n");
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn build_env_command_rejects_empty_command() {
+        let result = build_env_command(&[], vec![("DATABASE_URL".to_owned(), "secret".to_owned())]);
+
+        assert!(matches!(
+            result,
+            Err(CliError::Input("run requires a command after --"))
+        ));
     }
 
     #[test]

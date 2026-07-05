@@ -37,6 +37,8 @@ pub enum CliError {
     Opaque(&'static str),
     #[error("input error: {0}")]
     Input(&'static str),
+    #[error("child process exited with status {0}")]
+    ProcessExit(std::process::ExitStatus),
     #[error("prompt error: {0}")]
     Prompt(#[from] dialoguer::Error),
     #[error("cache error: {0}")]
