@@ -97,6 +97,19 @@ pub enum Command {
     Device(DeviceCommand),
     #[command(subcommand)]
     Secret(SecretCommand),
+    #[command(subcommand)]
+    Env(EnvCommand),
+    Run {
+        project_env: String,
+        #[arg(long)]
+        vault_id: Option<VaultId>,
+        #[arg(long)]
+        vault: Option<String>,
+        #[arg(long, alias = "cached")]
+        offline: bool,
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
     #[command(subcommand, alias = "s")]
     Sync(SyncCommand),
 }
@@ -368,6 +381,32 @@ pub enum SecretCommand {
         vault_id: Option<VaultId>,
         #[arg(long)]
         vault: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum EnvCommand {
+    Get {
+        project_env: String,
+        #[arg(long)]
+        vault_id: Option<VaultId>,
+        #[arg(long)]
+        vault: Option<String>,
+        #[arg(long, alias = "cached")]
+        offline: bool,
+    },
+    Inject {
+        project_env: String,
+        #[arg(long)]
+        vault_id: Option<VaultId>,
+        #[arg(long)]
+        vault: Option<String>,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long, alias = "cached")]
+        offline: bool,
+        #[arg(long)]
+        yes: bool,
     },
 }
 

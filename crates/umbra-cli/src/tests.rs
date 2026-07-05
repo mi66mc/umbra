@@ -605,6 +605,78 @@ fn parses_secret_commands() {
 }
 
 #[test]
+fn parses_env_and_run_commands() {
+    let get = Cli::parse_from([
+        "umbra",
+        "env",
+        "get",
+        "pulzar/dev",
+        "--vault",
+        "Personal",
+        "--offline",
+    ]);
+    assert!(matches!(
+        get.command,
+        Command::Env(crate::EnvCommand::Get {
+            project_env,
+            vault: Some(vault),
+            offline: true,
+            ..
+        }) if project_env == "pulzar/dev" && vault == "Personal"
+    ));
+
+    let inject = Cli::parse_from([
+        "umbra",
+        "env",
+        "inject",
+        "pulzar/dev",
+        "--vault-id",
+        "00000000-0000-0000-0000-000000000001",
+        "--output",
+        ".env",
+        "--yes",
+    ]);
+    assert!(matches!(
+        inject.command,
+        Command::Env(crate::EnvCommand::Inject {
+            project_env,
+            output,
+            yes: true,
+            ..
+        }) if project_env == "pulzar/dev" && output == std::path::PathBuf::from(".env")
+    ));
+
+    let run = Cli::parse_from([
+        "umbra",
+        "run",
+        "pulzar/dev",
+        "--vault",
+        "Personal",
+        "--",
+        "cargo",
+        "test",
+        "-p",
+        "app",
+    ]);
+    assert!(matches!(
+        run.command,
+        Command::Run {
+            project_env,
+            vault: Some(vault),
+            command,
+            ..
+        } if project_env == "pulzar/dev"
+            && vault == "Personal"
+            && command == vec![
+                "cargo".to_owned(),
+                "test".to_owned(),
+                "-p".to_owned(),
+                "app".to_owned(),
+            ]
+    ));
+}
+
+#[test]
 fn parses_secret_list_and_rm() {
     let list = Cli::parse_from([
         "umbra",

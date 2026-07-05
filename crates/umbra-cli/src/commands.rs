@@ -1417,6 +1417,9 @@ pub async fn run(
                 Ok(())
             }
         }
+        Command::Env(_) | Command::Run { .. } => {
+            Err(CliError::Input("env workflows are not implemented yet"))
+        }
         Command::Sync(SyncCommand::Run {
             vault_id,
             vault,
