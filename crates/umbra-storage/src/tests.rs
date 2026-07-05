@@ -727,7 +727,10 @@ async fn item_deletion_flow_on<S: StorageBackend + ?Sized>(storage: &S) {
     assert_eq!(deleted_since_create.len(), 1);
     assert_eq!(deleted_since_create[0].item_id, created.item_id);
 
-    let active_revisions = storage.list_item_revisions_since(vault.id, 0).await.unwrap();
+    let active_revisions = storage
+        .list_item_revisions_since(vault.id, 0)
+        .await
+        .unwrap();
     assert!(active_revisions.is_empty());
 
     let stale_delete = storage

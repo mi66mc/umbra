@@ -16,13 +16,12 @@ use umbra_crypto::{
 use umbra_protocol::{
     AddOrgMemberRequest, AddVaultMemberRequest, ApprovalLookupRequest, ApproveDeviceRequest,
     CreateItemRequest, CreateOrgRequest, CreateOrgVaultRequest, CreateVaultRequest,
-    DeleteItemRequest,
-    DeviceBootstrapResponse, DeviceResponse, ItemRevisionResponse, OrgMemberResponse, OrgResponse,
-    PROTOCOL_VERSION, PendingDeviceSummary, RecoverTrustRequest, RecoverTrustResponse,
-    RecoveryChallengeStartRequest, RecoveryChallengeStartResponse, RotateVaultKeyRequest,
-    RotationItemRevision, RotationStatusResponse, RotationVaultKeyWrapping, SyncRequest,
-    SyncResponse, UpdateItemRequest, UserLookupRequest, UserLookupResponse, VaultMemberResponse,
-    VaultResponse, VaultSyncChanges, VaultSyncCursor,
+    DeleteItemRequest, DeviceBootstrapResponse, DeviceResponse, ItemRevisionResponse,
+    OrgMemberResponse, OrgResponse, PROTOCOL_VERSION, PendingDeviceSummary, RecoverTrustRequest,
+    RecoverTrustResponse, RecoveryChallengeStartRequest, RecoveryChallengeStartResponse,
+    RotateVaultKeyRequest, RotationItemRevision, RotationStatusResponse, RotationVaultKeyWrapping,
+    SyncRequest, SyncResponse, UpdateItemRequest, UserLookupRequest, UserLookupResponse,
+    VaultMemberResponse, VaultResponse, VaultSyncChanges, VaultSyncCursor,
 };
 use uuid::Uuid;
 

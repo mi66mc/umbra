@@ -132,10 +132,7 @@ impl PostgresStorage {
         item_revision_from_row(row)
     }
 
-    pub async fn delete_item(
-        &self,
-        input: DeleteItem,
-    ) -> Result<DeletedItemRecord, StorageError> {
+    pub async fn delete_item(&self, input: DeleteItem) -> Result<DeletedItemRecord, StorageError> {
         let mut tx = self.pool.begin().await?;
 
         let current_revision: i64 = sqlx::query_scalar(

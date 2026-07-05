@@ -961,7 +961,17 @@ mod tests {
             })
             .unwrap();
 
-        assert!(cache.latest_item_revision(vault_id, item_id).unwrap().is_none());
-        assert!(cache.list_latest_item_revisions(vault_id).unwrap().is_empty());
+        assert!(
+            cache
+                .latest_item_revision(vault_id, item_id)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            cache
+                .list_latest_item_revisions(vault_id)
+                .unwrap()
+                .is_empty()
+        );
     }
 }

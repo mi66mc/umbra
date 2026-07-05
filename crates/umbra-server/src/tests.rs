@@ -22,15 +22,16 @@ use umbra_auth::{
 use umbra_core::{DeviceState, VaultKind, VaultRole};
 use umbra_protocol::{
     AddVaultMemberRequest, ApprovalLookupRequest, ApproveDeviceRequest, CreateItemRequest,
-    CreateOrgRequest, CreateVaultRequest, DeleteItemRequest, DeviceBootstrapResponse, DeviceRegisterRequest,
-    DeviceResponse, ItemRevisionResponse, OpaqueLoginFinishRequest, OpaqueLoginFinishResponse,
-    OpaqueLoginStartRequest, OpaqueLoginStartResponse, OpaqueRegisterFinishRequest,
-    OpaqueRegisterStartRequest, OpaqueRegisterStartResponse, OrgResponse, PROTOCOL_VERSION,
-    PendingDeviceRequest, PendingDeviceSummary, RecoverTrustRequest, RecoverTrustResponse,
-    RecoveryChallengeStartRequest, RecoveryChallengeStartResponse, RegisterResponse,
-    RotateVaultKeyRequest, RotationStatusResponse, RotationVaultKeyWrapping, SyncRequest,
-    SyncResponse, SyncStatusRequest, SyncStatusResponse, UpdateItemRequest, UserLookupRequest,
-    UserLookupResponse, VaultMemberResponse, VaultResponse, VaultStatusCursor, VaultSyncCursor,
+    CreateOrgRequest, CreateVaultRequest, DeleteItemRequest, DeviceBootstrapResponse,
+    DeviceRegisterRequest, DeviceResponse, ItemRevisionResponse, OpaqueLoginFinishRequest,
+    OpaqueLoginFinishResponse, OpaqueLoginStartRequest, OpaqueLoginStartResponse,
+    OpaqueRegisterFinishRequest, OpaqueRegisterStartRequest, OpaqueRegisterStartResponse,
+    OrgResponse, PROTOCOL_VERSION, PendingDeviceRequest, PendingDeviceSummary, RecoverTrustRequest,
+    RecoverTrustResponse, RecoveryChallengeStartRequest, RecoveryChallengeStartResponse,
+    RegisterResponse, RotateVaultKeyRequest, RotationStatusResponse, RotationVaultKeyWrapping,
+    SyncRequest, SyncResponse, SyncStatusRequest, SyncStatusResponse, UpdateItemRequest,
+    UserLookupRequest, UserLookupResponse, VaultMemberResponse, VaultResponse, VaultStatusCursor,
+    VaultSyncCursor,
 };
 use umbra_storage::Storage;
 use uuid::Uuid;

@@ -430,13 +430,7 @@ fn parses_item_delete_commands() {
     ));
 
     let by_title = Cli::parse_from([
-        "umbra",
-        "item",
-        "delete",
-        "--vault",
-        "Personal",
-        "--title",
-        "GitHub",
+        "umbra", "item", "delete", "--vault", "Personal", "--title", "GitHub",
     ]);
     assert!(matches!(
         by_title.command,
