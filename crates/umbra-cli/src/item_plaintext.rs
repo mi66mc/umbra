@@ -108,6 +108,51 @@ pub fn remove_plaintext_field(item: &mut ItemPlaintextV1, name: &str) -> bool {
     item.fields.len() != before
 }
 
+pub fn env_pairs(item: &ItemPlaintextV1) -> Vec<(String, String)> {
+    let mut pairs = item
+        .fields
+        .iter()
+        .filter(|field| is_valid_env_name(&field.name))
+        .map(|field| (field.name.clone(), field.value.clone()))
+        .collect::<Vec<_>>();
+    pairs.sort_by(|left, right| left.0.cmp(&right.0));
+    pairs
+}
+
+pub fn render_dotenv(item: &ItemPlaintextV1) -> String {
+    env_pairs(item)
+        .into_iter()
+        .map(|(name, value)| format!("{name}={}\n", quote_dotenv_value(&value)))
+        .collect()
+}
+
+fn is_valid_env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first == '_' || first.is_ascii_uppercase()) {
+        return false;
+    }
+    chars.all(|ch| ch == '_' || ch.is_ascii_uppercase() || ch.is_ascii_digit())
+}
+
+fn quote_dotenv_value(value: &str) -> String {
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ':' | '@'))
+    {
+        return value.to_owned();
+    }
+
+    let escaped = value
+        .replace('\\', "\\\\")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('"', "\\\"");
+    format!("\"{escaped}\"")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,5 +219,50 @@ mod tests {
         assert!(!remove_plaintext_field(&mut item, "MISSING"));
         assert_eq!(item.fields.len(), 1);
         assert_eq!(item.fields[0].name, "OPENAI_API_KEY");
+    }
+
+    #[test]
+    fn env_pairs_are_sorted_by_key() {
+        let mut item = build_secret_bundle("pulzar/dev", "DATABASE_URL", "postgres://localhost");
+        set_plaintext_field(&mut item, "OPENAI_API_KEY", "sk-test".to_owned());
+        set_plaintext_field(&mut item, "REDIS_URL", "redis://localhost".to_owned());
+
+        let pairs = env_pairs(&item);
+
+        assert_eq!(
+            pairs,
+            vec![
+                ("DATABASE_URL".to_owned(), "postgres://localhost".to_owned()),
+                ("OPENAI_API_KEY".to_owned(), "sk-test".to_owned()),
+                ("REDIS_URL".to_owned(), "redis://localhost".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn dotenv_output_quotes_values_safely() {
+        let mut item = build_secret_bundle("pulzar/dev", "DATABASE_URL", "postgres://localhost/db");
+        set_plaintext_field(&mut item, "PLAIN", "abc_123".to_owned());
+        set_plaintext_field(&mut item, "SPACED", "hello world".to_owned());
+        set_plaintext_field(&mut item, "QUOTE", "a\"b".to_owned());
+        set_plaintext_field(&mut item, "MULTILINE", "a\nb".to_owned());
+
+        let rendered = render_dotenv(&item);
+
+        assert_eq!(
+            rendered,
+            "DATABASE_URL=postgres://localhost/db\nMULTILINE=\"a\\nb\"\nPLAIN=abc_123\nQUOTE=\"a\\\"b\"\nSPACED=\"hello world\"\n"
+        );
+    }
+
+    #[test]
+    fn invalid_env_names_are_omitted_from_dotenv_output() {
+        let mut item = build_secret_bundle("pulzar/dev", "VALID_KEY", "ok");
+        set_plaintext_field(&mut item, "not-valid", "bad".to_owned());
+        set_plaintext_field(&mut item, "1INVALID", "bad".to_owned());
+
+        let rendered = render_dotenv(&item);
+
+        assert_eq!(rendered, "VALID_KEY=ok\n");
     }
 }
