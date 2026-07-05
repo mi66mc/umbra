@@ -14,14 +14,15 @@ use umbra_crypto::{
     generate_user_keypair, generate_vault_key, unwrap_vault_key, wrap_vault_key_for_user,
 };
 use umbra_protocol::{
-    AddOrgMemberRequest, AddVaultMemberRequest, ApprovalLookupRequest, ApproveDeviceRequest,
-    CreateItemRequest, CreateOrgRequest, CreateOrgVaultRequest, CreateVaultRequest,
-    DeleteItemRequest, DeviceBootstrapResponse, DeviceResponse, ItemRevisionResponse,
-    OrgMemberResponse, OrgResponse, PROTOCOL_VERSION, PendingDeviceSummary, RecoverTrustRequest,
+    AcceptInviteRequest, AddOrgMemberRequest, AddVaultMemberRequest, ApprovalLookupRequest,
+    ApproveDeviceRequest, CreateItemRequest, CreateOrgRequest, CreateOrgVaultRequest,
+    CreateVaultRequest, DeleteItemRequest, DeviceBootstrapResponse, DeviceResponse,
+    InviteMemberRequest, InviteResponse, ItemRevisionResponse, OrgMemberResponse, OrgResponse,
+    PROTOCOL_VERSION, PendingDeviceSummary, PendingInviteResponse, RecoverTrustRequest,
     RecoverTrustResponse, RecoveryChallengeStartRequest, RecoveryChallengeStartResponse,
-    RotateVaultKeyRequest, RotationItemRevision, RotationStatusResponse, RotationVaultKeyWrapping,
-    SyncRequest, SyncResponse, UpdateItemRequest, UserLookupRequest, UserLookupResponse,
-    VaultMemberResponse, VaultResponse, VaultSyncChanges, VaultSyncCursor,
+    RejectInviteRequest, RotateVaultKeyRequest, RotationItemRevision, RotationStatusResponse,
+    RotationVaultKeyWrapping, SyncRequest, SyncResponse, UpdateItemRequest, UserLookupRequest,
+    UserLookupResponse, VaultMemberResponse, VaultResponse, VaultSyncChanges, VaultSyncCursor,
 };
 use uuid::Uuid;
 
@@ -34,7 +35,7 @@ use crate::keys::DeviceSigningKey;
 use crate::output::{OutputMode, print_json};
 use crate::{
     AuthCommand, CacheCommand, Command, CryptoCommand, DeviceCommand, EmergencyKitCommand,
-    ItemCommand, OrgCommand, ProfileCommand, SecretCommand, SyncCommand, TokenCommand,
+    InviteCommand, ItemCommand, OrgCommand, ProfileCommand, SecretCommand, SyncCommand, TokenCommand,
     VaultCommand,
 };
 
@@ -784,6 +785,44 @@ pub async fn run(
                 .await?;
             render_vault_members(output, &members)
         }
+        Command::Vault(VaultCommand::Invite {
+            vault_id,
+            vault,
+            email,
+            role,
+        }) => {
+            let profile = active_profile(&config)?;
+            require_login(profile)?;
+            let mut cache = crate::cache::LocalCache::open(&config.active_profile)?;
+            let vault_id =
+                resolve_vault_id_for_output(profile, &cache, vault_id, vault.as_deref(), output)?;
+            let client = UmbraHttpClient::new(profile)?;
+            crate::sync::ensure_vault_synced(
+                profile,
+                &mut cache,
+                vault_id,
+                crate::sync::SyncMode::IfChanged,
+            )
+            .await?;
+            let user = lookup_user_by_email(&client, &email).await?;
+            let target_public_key = UserPublicKey::from_base64url(&user.public_key)?;
+            let vault_key = unlock_vault_key(&config.active_profile, profile, &cache, vault_id)?;
+            let vault_key_wrapping =
+                wrap_vault_key_for_member(&target_public_key, &vault_key, vault_id)?;
+            let invite: InviteResponse = client
+                .post(
+                    &format!("/api/v1/vaults/{vault_id}/invites"),
+                    &InviteMemberRequest {
+                        protocol_version: PROTOCOL_VERSION,
+                        vault_id,
+                        email,
+                        role,
+                        vault_key_wrapping,
+                    },
+                )
+                .await?;
+            render_invite_created(output, &invite)
+        }
         Command::Vault(VaultCommand::AddMember {
             vault_id,
             vault,
@@ -858,6 +897,56 @@ pub async fn run(
                 ]);
                 Ok(())
             }
+        }
+        Command::Invite(InviteCommand::List) => {
+            let profile = active_profile(&config)?;
+            require_login(profile)?;
+            let client = UmbraHttpClient::new(profile)?;
+            let invites: Vec<PendingInviteResponse> = client.get("/api/v1/invites").await?;
+            render_pending_invites(output, &invites)
+        }
+        Command::Invite(InviteCommand::Accept { invite_id }) => {
+            let profile = active_profile(&config)?;
+            require_login(profile)?;
+            let device_id = profile.device_id.ok_or(CliError::Input(
+                "profile has no device id; run `umbra login` first",
+            ))?;
+            let client = UmbraHttpClient::new(profile)?;
+            let member: VaultMemberResponse = client
+                .post(
+                    &format!("/api/v1/invites/{invite_id}/accept"),
+                    &AcceptInviteRequest {
+                        protocol_version: PROTOCOL_VERSION,
+                        invite_id,
+                        device_id,
+                    },
+                )
+                .await?;
+            let mut cache = crate::cache::LocalCache::open(&config.active_profile)?;
+            refresh_cached_vault_metadata(&client, &cache, member.vault_id).await?;
+            crate::sync::ensure_vault_synced(
+                profile,
+                &mut cache,
+                member.vault_id,
+                crate::sync::SyncMode::Always,
+            )
+            .await?;
+            render_invite_accepted(output, &member)
+        }
+        Command::Invite(InviteCommand::Reject { invite_id }) => {
+            let profile = active_profile(&config)?;
+            require_login(profile)?;
+            let client = UmbraHttpClient::new(profile)?;
+            let invite: InviteResponse = client
+                .post(
+                    &format!("/api/v1/invites/{invite_id}/reject"),
+                    &RejectInviteRequest {
+                        protocol_version: PROTOCOL_VERSION,
+                        invite_id,
+                    },
+                )
+                .await?;
+            render_invite_rejected(output, &invite)
         }
         Command::Item(ItemCommand::List {
             vault_id,
@@ -1877,6 +1966,72 @@ fn render_vault_member_added(
         ("user_id", member.user_id.to_string()),
         ("role", vault_role_label(member.role).to_owned()),
         ("state", member_state_label(member.state).to_owned()),
+    ]);
+    Ok(())
+}
+
+fn render_invite_created(output: OutputMode, invite: &InviteResponse) -> Result<(), CliError> {
+    if output.is_json() {
+        return print_json(invite);
+    }
+    crate::output::print_kv(&[
+        ("invite_id", invite.invite_id.to_string()),
+        ("vault_id", invite.vault_id.to_string()),
+        ("email", invite.email.clone()),
+        ("role", vault_role_label(invite.role).to_owned()),
+        ("state", invite.state.clone()),
+    ]);
+    Ok(())
+}
+
+fn render_pending_invites(
+    output: OutputMode,
+    invites: &[PendingInviteResponse],
+) -> Result<(), CliError> {
+    if output.is_json() {
+        return print_json(invites);
+    }
+    let rows = invites
+        .iter()
+        .map(|invite| {
+            vec![
+                invite.invite_id.to_string(),
+                invite.vault_name.clone(),
+                invite.vault_id.to_string(),
+                vault_role_label(invite.role).to_owned(),
+                invite
+                    .expires_at
+                    .clone()
+                    .unwrap_or_else(|| "never".to_owned()),
+            ]
+        })
+        .collect::<Vec<_>>();
+    crate::output::print_table(&["invite_id", "vault", "vault_id", "role", "expires"], &rows);
+    Ok(())
+}
+
+fn render_invite_accepted(
+    output: OutputMode,
+    member: &VaultMemberResponse,
+) -> Result<(), CliError> {
+    if output.is_json() {
+        return print_json(member);
+    }
+    crate::output::print_kv(&[
+        ("accepted vault", member.vault_id.to_string()),
+        ("role", vault_role_label(member.role).to_owned()),
+        ("state", member_state_label(member.state).to_owned()),
+    ]);
+    Ok(())
+}
+
+fn render_invite_rejected(output: OutputMode, invite: &InviteResponse) -> Result<(), CliError> {
+    if output.is_json() {
+        return print_json(invite);
+    }
+    crate::output::print_kv(&[
+        ("invite_id", invite.invite_id.to_string()),
+        ("state", invite.state.clone()),
     ]);
     Ok(())
 }

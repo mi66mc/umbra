@@ -3,7 +3,7 @@ use umbra_core::{OrgRole, VaultRole};
 
 use crate::config::{CliConfig, ProfileConfig};
 use crate::{
-    AuthCommand, CacheCommand, Cli, Command, CryptoCommand, DeviceCommand, ItemCommand,
+    AuthCommand, CacheCommand, Cli, Command, CryptoCommand, DeviceCommand, InviteCommand, ItemCommand,
     ProfileCommand, SecretCommand, TokenCommand, VaultCommand,
 };
 
@@ -191,6 +191,46 @@ fn parses_vault_member_commands() {
             ..
         }) if parsed.to_string() == vault_id && parsed_user.to_string() == user_id
     ));
+}
+
+#[test]
+fn parses_vault_invite_and_invite_commands() {
+    let invite = Cli::parse_from([
+        "umbra",
+        "vault",
+        "invite",
+        "--vault",
+        "Platform",
+        "--email",
+        "ana@example.com",
+        "--role",
+        "editor",
+    ]);
+    assert!(matches!(
+        invite.command,
+        Command::Vault(VaultCommand::Invite {
+            vault_id: None,
+            vault: Some(vault),
+            email,
+            role: VaultRole::Editor,
+        }) if vault == "Platform" && email == "ana@example.com"
+    ));
+
+    let invite_id = "00000000-0000-0000-0000-000000000901";
+    let accept = Cli::parse_from(["umbra", "invite", "accept", invite_id]);
+    assert!(matches!(
+        accept.command,
+        Command::Invite(InviteCommand::Accept { invite_id: parsed }) if parsed.to_string() == invite_id
+    ));
+
+    let reject = Cli::parse_from(["umbra", "invite", "reject", invite_id]);
+    assert!(matches!(
+        reject.command,
+        Command::Invite(InviteCommand::Reject { invite_id: parsed }) if parsed.to_string() == invite_id
+    ));
+
+    let list = Cli::parse_from(["umbra", "invite", "list"]);
+    assert!(matches!(list.command, Command::Invite(InviteCommand::List)));
 }
 
 #[test]

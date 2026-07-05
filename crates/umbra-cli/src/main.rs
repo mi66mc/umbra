@@ -23,6 +23,7 @@ use std::path::PathBuf;
 use umbra_core::{
     DeviceId, ItemId, ItemKind, OrgId, OrgRole, RevisionId, UserId, VaultId, VaultRole,
 };
+use uuid::Uuid;
 
 use crate::commands::{parse_item_kind, parse_org_role, parse_vault_role};
 use crate::config::{CliConfig, load_config};
@@ -88,6 +89,8 @@ pub enum Command {
     Org(OrgCommand),
     #[command(subcommand)]
     Vault(VaultCommand),
+    #[command(subcommand)]
+    Invite(InviteCommand),
     #[command(subcommand)]
     Item(ItemCommand),
     #[command(subcommand)]
@@ -199,6 +202,16 @@ pub enum VaultCommand {
         #[arg(long)]
         vault: Option<String>,
     },
+    Invite {
+        #[arg(long)]
+        vault_id: Option<VaultId>,
+        #[arg(long)]
+        vault: Option<String>,
+        #[arg(long)]
+        email: String,
+        #[arg(long, value_parser = parse_vault_role)]
+        role: VaultRole,
+    },
     AddMember {
         #[arg(long)]
         vault_id: Option<VaultId>,
@@ -219,6 +232,13 @@ pub enum VaultCommand {
         #[arg(long)]
         user_id: UserId,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum InviteCommand {
+    List,
+    Accept { invite_id: Uuid },
+    Reject { invite_id: Uuid },
 }
 
 #[derive(Debug, Subcommand)]
