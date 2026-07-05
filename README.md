@@ -81,6 +81,8 @@ umbra item create \
 umbra item list --vault Personal
 umbra item get --vault Personal --title GitHub
 umbra item get --vault Personal
+umbra item delete --vault Personal --title GitHub
+umbra item delete --vault-id <vault-id> --item-id <item-id> --yes
 
 umbra sync run --vault Personal
 umbra status
@@ -94,9 +96,11 @@ umbra --json vault list
 umbra --json item get --vault Personal --title GitHub
 ```
 
-Interactive selection only runs in human output mode. Omit `--vault` when you want the CLI to prompt from cached vaults, omit `--title`/`--item-id` from `item get` to choose an item, and omit the key from `secret get` or `secret rm` to choose a field. Commands run with `--json` require explicit selectors and never open prompts.
+Interactive selection only runs in human output mode. Omit `--vault` when you want the CLI to prompt from cached vaults, omit `--title`/`--item-id` from `item get` or `item delete` to choose an item, and omit the key from `secret get` or `secret rm` to choose a field. Commands run with `--json` require explicit selectors and never open prompts.
 
 The CLI encrypts item plaintext locally before upload. The server receives only JSON envelopes and key wrappings. The local SQLite cache stores encrypted envelopes and wrapped vault keys, not plaintext fields.
+
+Deleting an item is a metadata operation on the server. The server marks the encrypted item as deleted, increments the vault revision, and future sync responses include the deleted item id so clients remove it from local encrypted cache.
 
 `vault create` stores the first created vault as the profile default. `--vault Personal` resolves a vault name from the local cache populated by `umbra vault list` or `umbra vault create`. If a name is ambiguous, pass `--vault-id`.
 
@@ -211,6 +215,7 @@ umbra cache status
 umbra item list --vault Personal
 umbra item get --vault Personal --title GitHub
 umbra item get --vault Personal
+umbra item delete --vault Personal --title GitHub
 umbra item list --vault Personal --offline
 umbra item get --vault Personal --title GitHub --offline
 umbra secret get pulzar/dev --vault Personal

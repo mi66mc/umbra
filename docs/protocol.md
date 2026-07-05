@@ -214,8 +214,11 @@ Items are stored as encrypted revision envelopes. The server validates vault mem
 ```http
 POST /api/v1/vaults/:vault_id/items
 PUT /api/v1/vaults/:vault_id/items/:item_id
+DELETE /api/v1/vaults/:vault_id/items/:item_id
 POST /api/v1/sync
 ```
+
+`DELETE /api/v1/vaults/:vault_id/items/:item_id` accepts `DeleteItemRequest` with `expected_revision`. The server checks writer permission and revision preconditions, then soft-deletes the item and increments the vault revision. Sync returns deleted item ids through `VaultSyncChanges.deleted_items`; item plaintext is never sent to or decrypted by the server.
 
 `POST /api/v1/sync` accepts per-vault cursors:
 
