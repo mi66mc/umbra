@@ -18,23 +18,24 @@ use umbra_core::{DeviceState, MemberState, OrgRole, VaultKind, VaultRole};
 use umbra_crypto::{AadV1, UserPublicKey};
 use umbra_migrations::MigrationStatus;
 use umbra_protocol::{
-    AddOrgMemberRequest, AddVaultMemberRequest, ApprovalLookupRequest, ApproveDeviceRequest,
-    CreateItemRequest, CreateOrgRequest, CreateOrgVaultRequest, CreateVaultRequest,
-    DeleteItemRequest, DeviceBootstrapResponse, DeviceResponse, ItemRevisionResponse,
-    OpaqueLoginFinishRequest, OpaqueLoginFinishResponse, OpaqueLoginStartRequest,
-    OpaqueLoginStartResponse, OpaqueRegisterFinishRequest, OpaqueRegisterStartRequest,
-    OpaqueRegisterStartResponse, OrgMemberResponse, OrgResponse, PROTOCOL_VERSION,
-    PendingDeviceResponse, PendingDeviceSummary, RecoverTrustRequest, RecoverTrustResponse,
-    RecoveryChallengeStartRequest, RecoveryChallengeStartResponse, RotateVaultKeyRequest,
-    RotationStatusResponse, SyncRequest, SyncResponse, SyncStatusRequest, SyncStatusResponse,
-    UpdateItemRequest, UserLookupRequest, UserLookupResponse, VaultKeyWrappingResponse,
-    VaultMemberResponse, VaultResponse, VaultStatus, VaultSyncChanges,
+    AcceptInviteRequest, AddOrgMemberRequest, AddVaultMemberRequest, ApprovalLookupRequest,
+    ApproveDeviceRequest, CreateItemRequest, CreateOrgRequest, CreateOrgVaultRequest,
+    CreateVaultRequest, DeleteItemRequest, DeviceBootstrapResponse, DeviceResponse,
+    InviteMemberRequest, InviteResponse, ItemRevisionResponse, OpaqueLoginFinishRequest,
+    OpaqueLoginFinishResponse, OpaqueLoginStartRequest, OpaqueLoginStartResponse,
+    OpaqueRegisterFinishRequest, OpaqueRegisterStartRequest, OpaqueRegisterStartResponse,
+    OrgMemberResponse, OrgResponse, PROTOCOL_VERSION, PendingDeviceResponse,
+    PendingDeviceSummary, PendingInviteResponse, RecoverTrustRequest, RecoverTrustResponse,
+    RecoveryChallengeStartRequest, RecoveryChallengeStartResponse, RejectInviteRequest,
+    RotateVaultKeyRequest, RotationStatusResponse, SyncRequest, SyncResponse, SyncStatusRequest,
+    SyncStatusResponse, UpdateItemRequest, UserLookupRequest, UserLookupResponse,
+    VaultKeyWrappingResponse, VaultMemberResponse, VaultResponse, VaultStatus, VaultSyncChanges,
 };
 use umbra_storage::{
-    AppendAuditLog, ApprovePendingDevice, CreateDevice, CreateEncryptedItem, CreateItemRevision,
-    CreateOrg, CreateRecoveryChallenge, CreateSession, CreateUser, CreateVault,
-    CreateVaultKeyWrapping, DeviceRecord, FinishVaultKeyRotation, RotationItemRevisionInput,
-    UpsertOrgMember, UpsertUserAuth, UpsertVaultMember,
+    AcceptVaultInvite, AppendAuditLog, ApprovePendingDevice, CreateDevice, CreateEncryptedItem,
+    CreateItemRevision, CreateOrg, CreateRecoveryChallenge, CreateSession, CreateUser,
+    CreateVault, CreateVaultInvite, CreateVaultKeyWrapping, DeviceRecord, FinishVaultKeyRotation,
+    RotationItemRevisionInput, UpsertOrgMember, UpsertUserAuth, UpsertVaultMember,
 };
 use uuid::Uuid;
 
@@ -92,6 +93,13 @@ pub(crate) fn router(state: AppState) -> Router {
             "/api/v1/vaults/:vault_id/members",
             get(list_vault_members).post(add_vault_member),
         )
+        .route("/api/v1/invites", get(list_my_invites))
+        .route(
+            "/api/v1/vaults/:vault_id/invites",
+            post(create_vault_invite),
+        )
+        .route("/api/v1/invites/:invite_id/accept", post(accept_invite))
+        .route("/api/v1/invites/:invite_id/reject", post(reject_invite))
         .route(
             "/api/v1/vaults/:vault_id/members/:user_id",
             delete(remove_vault_member),
@@ -940,6 +948,104 @@ async fn add_vault_member(
     Ok(Json(vault_member_response(&state, member).await?))
 }
 
+async fn create_vault_invite(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(vault_id): Path<Uuid>,
+    Json(request): Json<InviteMemberRequest>,
+) -> Result<Json<InviteResponse>, ServerError> {
+    ensure_protocol(request.protocol_version)?;
+    if request.vault_id != vault_id {
+        return Err(ServerError::BadRequest("vault id mismatch"));
+    }
+
+    let user_id = authenticate_trusted_context(&state, &headers)
+        .await?
+        .user_id;
+    ensure_vault_admin(&state, vault_id, user_id).await?;
+    let vault = state.storage.find_vault_by_id(vault_id).await?;
+    state.storage.find_user_by_email(&request.email).await?;
+
+    let invite = state
+        .storage
+        .create_vault_invite(CreateVaultInvite {
+            id: None,
+            vault_id,
+            org_id: vault.org_id,
+            email: request.email,
+            role: request.role,
+            invited_by: Some(user_id),
+            vault_key_wrapping: request.vault_key_wrapping,
+            expires_at: Some(Utc::now() + Duration::days(7)),
+        })
+        .await?;
+
+    Ok(Json(invite_response(invite)))
+}
+
+async fn list_my_invites(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<PendingInviteResponse>>, ServerError> {
+    let context = authenticate_trusted_context(&state, &headers).await?;
+    let user = state.storage.find_user_by_id(context.user_id).await?;
+    let invites = state
+        .storage
+        .list_pending_vault_invites_for_email(&user.email)
+        .await?;
+    Ok(Json(
+        invites.into_iter().map(pending_invite_response).collect(),
+    ))
+}
+
+async fn accept_invite(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(invite_id): Path<Uuid>,
+    Json(request): Json<AcceptInviteRequest>,
+) -> Result<Json<VaultMemberResponse>, ServerError> {
+    ensure_protocol(request.protocol_version)?;
+    if request.invite_id != invite_id {
+        return Err(ServerError::BadRequest("invite id mismatch"));
+    }
+
+    let context = authenticate_trusted_context(&state, &headers).await?;
+    if context.device_id != Some(request.device_id) {
+        return Err(ServerError::BadRequest("device id mismatch"));
+    }
+
+    let member = state
+        .storage
+        .accept_vault_invite(AcceptVaultInvite {
+            invite_id,
+            user_id: context.user_id,
+            device_id: Some(request.device_id),
+        })
+        .await?;
+
+    Ok(Json(vault_member_response(&state, member).await?))
+}
+
+async fn reject_invite(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(invite_id): Path<Uuid>,
+    Json(request): Json<RejectInviteRequest>,
+) -> Result<Json<InviteResponse>, ServerError> {
+    ensure_protocol(request.protocol_version)?;
+    if request.invite_id != invite_id {
+        return Err(ServerError::BadRequest("invite id mismatch"));
+    }
+
+    let context = authenticate_trusted_context(&state, &headers).await?;
+    let invite = state
+        .storage
+        .reject_vault_invite(invite_id, context.user_id)
+        .await?;
+
+    Ok(Json(invite_response(invite)))
+}
+
 async fn remove_vault_member(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1237,6 +1343,34 @@ async fn vault_member_response(
         state: member.state,
         public_key: user.public_key,
     })
+}
+
+fn invite_response(invite: umbra_storage::VaultInviteRecord) -> InviteResponse {
+    InviteResponse {
+        invite_id: invite.id,
+        vault_id: invite.vault_id,
+        org_id: invite.org_id,
+        email: invite.email,
+        role: invite.role,
+        state: invite.state,
+        invited_by: invite.invited_by,
+        expires_at: invite.expires_at.map(|time| time.to_rfc3339()),
+    }
+}
+
+fn pending_invite_response(
+    invite: umbra_storage::PendingVaultInviteRecord,
+) -> PendingInviteResponse {
+    PendingInviteResponse {
+        invite_id: invite.id,
+        vault_id: invite.vault_id,
+        vault_name: invite.vault_name,
+        org_id: invite.org_id,
+        email: invite.email,
+        role: invite.role,
+        invited_by: invite.invited_by,
+        expires_at: invite.expires_at.map(|time| time.to_rfc3339()),
+    }
 }
 
 fn item_revision_response(revision: umbra_storage::ItemRevisionRecord) -> ItemRevisionResponse {

@@ -21,17 +21,18 @@ use umbra_auth::{
 };
 use umbra_core::{DeviceState, VaultKind, VaultRole};
 use umbra_protocol::{
-    AddVaultMemberRequest, ApprovalLookupRequest, ApproveDeviceRequest, CreateItemRequest,
-    CreateOrgRequest, CreateVaultRequest, DeleteItemRequest, DeviceBootstrapResponse,
-    DeviceRegisterRequest, DeviceResponse, ItemRevisionResponse, OpaqueLoginFinishRequest,
-    OpaqueLoginFinishResponse, OpaqueLoginStartRequest, OpaqueLoginStartResponse,
-    OpaqueRegisterFinishRequest, OpaqueRegisterStartRequest, OpaqueRegisterStartResponse,
-    OrgResponse, PROTOCOL_VERSION, PendingDeviceRequest, PendingDeviceSummary, RecoverTrustRequest,
+    AcceptInviteRequest, AddVaultMemberRequest, ApprovalLookupRequest, ApproveDeviceRequest,
+    CreateItemRequest, CreateOrgRequest, CreateVaultRequest, DeleteItemRequest,
+    DeviceBootstrapResponse, DeviceRegisterRequest, DeviceResponse, InviteMemberRequest,
+    InviteResponse, ItemRevisionResponse, OpaqueLoginFinishRequest, OpaqueLoginFinishResponse,
+    OpaqueLoginStartRequest, OpaqueLoginStartResponse, OpaqueRegisterFinishRequest,
+    OpaqueRegisterStartRequest, OpaqueRegisterStartResponse, OrgResponse, PROTOCOL_VERSION,
+    PendingDeviceRequest, PendingDeviceSummary, PendingInviteResponse, RecoverTrustRequest,
     RecoverTrustResponse, RecoveryChallengeStartRequest, RecoveryChallengeStartResponse,
-    RegisterResponse, RotateVaultKeyRequest, RotationStatusResponse, RotationVaultKeyWrapping,
-    SyncRequest, SyncResponse, SyncStatusRequest, SyncStatusResponse, UpdateItemRequest,
-    UserLookupRequest, UserLookupResponse, VaultMemberResponse, VaultResponse, VaultStatusCursor,
-    VaultSyncCursor,
+    RegisterResponse, RejectInviteRequest, RotateVaultKeyRequest, RotationStatusResponse,
+    RotationVaultKeyWrapping, SyncRequest, SyncResponse, SyncStatusRequest, SyncStatusResponse,
+    UpdateItemRequest, UserLookupRequest, UserLookupResponse, VaultMemberResponse, VaultResponse,
+    VaultStatusCursor, VaultSyncCursor,
 };
 use umbra_storage::Storage;
 use uuid::Uuid;
@@ -550,6 +551,193 @@ async fn viewer_cannot_create_item() {
     .await;
 
     assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+#[serial(postgres)]
+async fn invited_user_can_list_accept_and_sync_vault() {
+    let Some(storage) = fresh_test_storage().await else {
+        return;
+    };
+    let app = router(test_state_with_storage(storage));
+    let owner = register_and_signed_login(
+        app.clone(),
+        "invite-owner@example.com",
+        b"invite owner password",
+        "invite-owner",
+    )
+    .await;
+    let recipient = register_and_signed_login(
+        app.clone(),
+        "invite-recipient@example.com",
+        b"invite recipient password",
+        "invite-recipient",
+    )
+    .await;
+
+    let (_status, vault): (StatusCode, VaultResponse) = signed_json_request(
+        app.clone(),
+        Method::POST,
+        "/api/v1/vaults",
+        owner.auth("invite-create-vault"),
+        &CreateVaultRequest {
+            protocol_version: PROTOCOL_VERSION,
+            vault_id: None,
+            name: "Invite Vault".to_owned(),
+            kind: VaultKind::Shared,
+            initial_key_wrapping: json!({"owner": "wrapping"}),
+        },
+    )
+    .await;
+
+    let (status, invite): (StatusCode, InviteResponse) = signed_json_request(
+        app.clone(),
+        Method::POST,
+        &format!("/api/v1/vaults/{}/invites", vault.vault_id),
+        owner.auth("invite-create"),
+        &InviteMemberRequest {
+            protocol_version: PROTOCOL_VERSION,
+            vault_id: vault.vault_id,
+            email: "INVITE-RECIPIENT@example.com".to_owned(),
+            role: VaultRole::Editor,
+            vault_key_wrapping: json!({"wrapped": "for-recipient"}),
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(invite.email, "invite-recipient@example.com");
+    assert_eq!(invite.state, "pending");
+
+    let (status, invites): (StatusCode, Vec<PendingInviteResponse>) = signed_json_request(
+        app.clone(),
+        Method::GET,
+        "/api/v1/invites",
+        recipient.auth("invite-list"),
+        &json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(invites.len(), 1);
+    assert_eq!(invites[0].invite_id, invite.invite_id);
+    assert_eq!(invites[0].vault_name, "Invite Vault");
+
+    let (status, member): (StatusCode, VaultMemberResponse) = signed_json_request(
+        app.clone(),
+        Method::POST,
+        &format!("/api/v1/invites/{}/accept", invite.invite_id),
+        recipient.auth("invite-accept"),
+        &AcceptInviteRequest {
+            protocol_version: PROTOCOL_VERSION,
+            invite_id: invite.invite_id,
+            device_id: recipient.device_id,
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(member.vault_id, vault.vault_id);
+    assert_eq!(member.user_id, recipient.user_id);
+    assert_eq!(member.role, VaultRole::Editor);
+
+    let (status, sync): (StatusCode, SyncResponse) = signed_json_request(
+        app,
+        Method::POST,
+        "/api/v1/sync",
+        recipient.auth("invite-sync"),
+        &SyncRequest {
+            protocol_version: PROTOCOL_VERSION,
+            device_id: recipient.device_id,
+            vaults: vec![VaultSyncCursor {
+                vault_id: vault.vault_id,
+                since_vault_revision: 0,
+            }],
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(sync.vaults.len(), 1);
+    assert_eq!(sync.vaults[0].key_wrappings.len(), 1);
+    assert_eq!(
+        sync.vaults[0].key_wrappings[0].envelope,
+        json!({"wrapped": "for-recipient"})
+    );
+}
+
+#[tokio::test]
+#[serial(postgres)]
+async fn invited_user_can_reject_invite() {
+    let Some(storage) = fresh_test_storage().await else {
+        return;
+    };
+    let app = router(test_state_with_storage(storage));
+    let owner = register_and_signed_login(
+        app.clone(),
+        "reject-owner@example.com",
+        b"reject owner password",
+        "reject-owner",
+    )
+    .await;
+    let recipient = register_and_signed_login(
+        app.clone(),
+        "reject-recipient@example.com",
+        b"reject recipient password",
+        "reject-recipient",
+    )
+    .await;
+
+    let (_status, vault): (StatusCode, VaultResponse) = signed_json_request(
+        app.clone(),
+        Method::POST,
+        "/api/v1/vaults",
+        owner.auth("reject-create-vault"),
+        &CreateVaultRequest {
+            protocol_version: PROTOCOL_VERSION,
+            vault_id: None,
+            name: "Reject Vault".to_owned(),
+            kind: VaultKind::Shared,
+            initial_key_wrapping: json!({"owner": "wrapping"}),
+        },
+    )
+    .await;
+
+    let (_status, invite): (StatusCode, InviteResponse) = signed_json_request(
+        app.clone(),
+        Method::POST,
+        &format!("/api/v1/vaults/{}/invites", vault.vault_id),
+        owner.auth("reject-create"),
+        &InviteMemberRequest {
+            protocol_version: PROTOCOL_VERSION,
+            vault_id: vault.vault_id,
+            email: "reject-recipient@example.com".to_owned(),
+            role: VaultRole::Viewer,
+            vault_key_wrapping: json!({"wrapped": "reject"}),
+        },
+    )
+    .await;
+
+    let (status, rejected): (StatusCode, InviteResponse) = signed_json_request(
+        app.clone(),
+        Method::POST,
+        &format!("/api/v1/invites/{}/reject", invite.invite_id),
+        recipient.auth("reject-invite"),
+        &RejectInviteRequest {
+            protocol_version: PROTOCOL_VERSION,
+            invite_id: invite.invite_id,
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(rejected.state, "rejected");
+
+    let (status, invites): (StatusCode, Vec<PendingInviteResponse>) = signed_json_request(
+        app,
+        Method::GET,
+        "/api/v1/invites",
+        recipient.auth("reject-list"),
+        &json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(invites.is_empty());
 }
 
 #[tokio::test]
