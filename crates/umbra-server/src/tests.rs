@@ -434,7 +434,10 @@ async fn signed_rotation_endpoint_accepts_client_side_wrappings() {
     let (status, _removed): (StatusCode, serde_json::Value) = signed_json_request(
         app.clone(),
         Method::DELETE,
-        &format!("/api/v1/vaults/{}/members/{}", vault.vault_id, member.user_id),
+        &format!(
+            "/api/v1/vaults/{}/members/{}",
+            vault.vault_id, member.user_id
+        ),
         owner.auth("rotation-remove-member"),
         &json!({}),
     )
