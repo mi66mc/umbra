@@ -1588,30 +1588,57 @@ fn ensure_can_write_env_file(path: &Path, yes: bool) -> Result<(), CliError> {
     Ok(())
 }
 
-fn write_env_file(path: &Path, contents: &str, overwrite: bool) -> Result<(), CliError> {
+fn write_new_env_file(path: &Path, contents: &str) -> Result<(), CliError> {
     let mut options = OpenOptions::new();
-    options.write(true);
-    if overwrite {
-        options.create(true).truncate(true);
-    } else {
-        options.create_new(true);
-    }
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
         options.mode(0o600);
     }
-    let mut file = match options.open(path) {
-        Ok(file) => file,
-        Err(error) if !overwrite && error.kind() == ErrorKind::AlreadyExists => {
-            return Err(CliError::Input(
-                "output file already exists; pass --yes to overwrite",
-            ));
-        }
-        Err(error) => return Err(error.into()),
-    };
+    let mut file = options.open(path)?;
     file.write_all(contents.as_bytes())?;
     file.sync_all()?;
     Ok(())
+}
+
+fn write_env_file(path: &Path, contents: &str, overwrite: bool) -> Result<(), CliError> {
+    if !overwrite {
+        return match write_new_env_file(path, contents) {
+            Ok(()) => Ok(()),
+            Err(CliError::Io(error)) if error.kind() == ErrorKind::AlreadyExists => Err(
+                CliError::Input("output file already exists; pass --yes to overwrite"),
+            ),
+            Err(error) => Err(error),
+        };
+    }
+
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .ok_or(CliError::Input("output path must include a file name"))?;
+    let temp_path = parent.join(format!(
+        ".{}.{}.tmp",
+        file_name.to_string_lossy(),
+        Uuid::new_v4()
+    ));
+
+    write_new_env_file(&temp_path, contents)?;
+
+    #[cfg(windows)]
+    if path.exists() {
+        if let Err(error) = std::fs::remove_file(path) {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(error.into());
+        }
+    }
+
+    match std::fs::rename(&temp_path, path) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let _ = std::fs::remove_file(&temp_path);
+            Err(error.into())
+        }
+    }
 }
 
 fn env_variables_json(plaintext: &ItemPlaintextV1) -> BTreeMap<String, String> {
@@ -3723,6 +3750,23 @@ mod tests {
             std::fs::read_to_string(&path).unwrap(),
             "DATABASE_URL=new\n"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn env_file_writer_overwrite_replaces_permissive_file_with_owner_only_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".env");
+        std::fs::write(&path, "SECRET=old\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        write_env_file(&path, "SECRET=new\n", true).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "SECRET=new\n");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     #[test]
