@@ -3,8 +3,8 @@ use umbra_core::{OrgRole, VaultRole};
 
 use crate::config::{CliConfig, ProfileConfig};
 use crate::{
-    AuthCommand, CacheCommand, Cli, Command, CryptoCommand, DeviceCommand, InviteCommand, ItemCommand,
-    ProfileCommand, SecretCommand, TokenCommand, VaultCommand,
+    AuthCommand, CacheCommand, Cli, Command, CryptoCommand, DeviceCommand, InviteCommand,
+    ItemCommand, ProfileCommand, SecretCommand, TokenCommand, VaultCommand,
 };
 
 #[test]

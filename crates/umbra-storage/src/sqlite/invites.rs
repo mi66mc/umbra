@@ -63,7 +63,9 @@ impl SqliteStorage {
         .fetch_all(&self.pool)
         .await?;
 
-        rows.into_iter().map(pending_vault_invite_from_row).collect()
+        rows.into_iter()
+            .map(pending_vault_invite_from_row)
+            .collect()
     }
 
     pub async fn accept_vault_invite(

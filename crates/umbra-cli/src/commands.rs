@@ -35,8 +35,8 @@ use crate::keys::DeviceSigningKey;
 use crate::output::{OutputMode, print_json};
 use crate::{
     AuthCommand, CacheCommand, Command, CryptoCommand, DeviceCommand, EmergencyKitCommand,
-    InviteCommand, ItemCommand, OrgCommand, ProfileCommand, SecretCommand, SyncCommand, TokenCommand,
-    VaultCommand,
+    InviteCommand, ItemCommand, OrgCommand, ProfileCommand, SecretCommand, SyncCommand,
+    TokenCommand, VaultCommand,
 };
 
 trait OutputModeExt {
@@ -2006,7 +2006,10 @@ fn render_pending_invites(
             ]
         })
         .collect::<Vec<_>>();
-    crate::output::print_table(&["invite_id", "vault", "vault_id", "role", "expires"], &rows);
+    crate::output::print_table(
+        &["invite_id", "vault", "vault_id", "role", "expires"],
+        &rows,
+    );
     Ok(())
 }
 

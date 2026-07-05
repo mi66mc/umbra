@@ -24,8 +24,8 @@ use umbra_protocol::{
     InviteMemberRequest, InviteResponse, ItemRevisionResponse, OpaqueLoginFinishRequest,
     OpaqueLoginFinishResponse, OpaqueLoginStartRequest, OpaqueLoginStartResponse,
     OpaqueRegisterFinishRequest, OpaqueRegisterStartRequest, OpaqueRegisterStartResponse,
-    OrgMemberResponse, OrgResponse, PROTOCOL_VERSION, PendingDeviceResponse,
-    PendingDeviceSummary, PendingInviteResponse, RecoverTrustRequest, RecoverTrustResponse,
+    OrgMemberResponse, OrgResponse, PROTOCOL_VERSION, PendingDeviceResponse, PendingDeviceSummary,
+    PendingInviteResponse, RecoverTrustRequest, RecoverTrustResponse,
     RecoveryChallengeStartRequest, RecoveryChallengeStartResponse, RejectInviteRequest,
     RotateVaultKeyRequest, RotationStatusResponse, SyncRequest, SyncResponse, SyncStatusRequest,
     SyncStatusResponse, UpdateItemRequest, UserLookupRequest, UserLookupResponse,
@@ -33,8 +33,8 @@ use umbra_protocol::{
 };
 use umbra_storage::{
     AcceptVaultInvite, AppendAuditLog, ApprovePendingDevice, CreateDevice, CreateEncryptedItem,
-    CreateItemRevision, CreateOrg, CreateRecoveryChallenge, CreateSession, CreateUser,
-    CreateVault, CreateVaultInvite, CreateVaultKeyWrapping, DeviceRecord, FinishVaultKeyRotation,
+    CreateItemRevision, CreateOrg, CreateRecoveryChallenge, CreateSession, CreateUser, CreateVault,
+    CreateVaultInvite, CreateVaultKeyWrapping, DeviceRecord, FinishVaultKeyRotation,
     RotationItemRevisionInput, UpsertOrgMember, UpsertUserAuth, UpsertVaultMember,
 };
 use uuid::Uuid;
