@@ -149,7 +149,9 @@ fn quote_dotenv_value(value: &str) -> String {
         .replace('\\', "\\\\")
         .replace('\n', "\\n")
         .replace('\r', "\\r")
-        .replace('"', "\\\"");
+        .replace('"', "\\\"")
+        .replace('$', "\\$")
+        .replace('`', "\\`");
     format!("\"{escaped}\"")
 }
 
@@ -252,6 +254,20 @@ mod tests {
         assert_eq!(
             rendered,
             "DATABASE_URL=postgres://localhost/db\nMULTILINE=\"a\\nb\"\nPLAIN=abc_123\nQUOTE=\"a\\\"b\"\nSPACED=\"hello world\"\n"
+        );
+    }
+
+    #[test]
+    fn dotenv_output_escapes_shell_interpolation_in_quoted_values() {
+        let mut item = build_secret_bundle("pulzar/dev", "DOLLAR", "$HOME");
+        set_plaintext_field(&mut item, "SUBSHELL", "$(echo leaked)".to_owned());
+        set_plaintext_field(&mut item, "BACKTICK", "`echo leaked`".to_owned());
+
+        let rendered = render_dotenv(&item);
+
+        assert_eq!(
+            rendered,
+            "BACKTICK=\"\\`echo leaked\\`\"\nDOLLAR=\"\\$HOME\"\nSUBSHELL=\"\\$(echo leaked)\"\n"
         );
     }
 
