@@ -400,7 +400,7 @@ async fn signed_rotation_endpoint_accepts_client_side_wrappings() {
     )
     .await;
     let vault_id = Uuid::parse_str("00000000-0000-0000-0000-000000000177").unwrap();
-    let (_status, vault): (StatusCode, VaultResponse) = signed_json_request(
+    let (status, vault): (StatusCode, VaultResponse) = signed_json_request(
         app.clone(),
         Method::POST,
         "/api/v1/vaults",
@@ -414,7 +414,9 @@ async fn signed_rotation_endpoint_accepts_client_side_wrappings() {
         },
     )
     .await;
-    let (_status, _added): (StatusCode, VaultMemberResponse) = signed_json_request(
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _added): (StatusCode, VaultMemberResponse) = signed_json_request(
         app.clone(),
         Method::POST,
         &format!("/api/v1/vaults/{}/members", vault.vault_id),
@@ -427,7 +429,9 @@ async fn signed_rotation_endpoint_accepts_client_side_wrappings() {
         },
     )
     .await;
-    let (_status, _removed): (StatusCode, serde_json::Value) = signed_json_request(
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _removed): (StatusCode, serde_json::Value) = signed_json_request(
         app.clone(),
         Method::DELETE,
         &format!("/api/v1/vaults/{}/members/{}", vault.vault_id, member.user_id),
@@ -435,6 +439,20 @@ async fn signed_rotation_endpoint_accepts_client_side_wrappings() {
         &json!({}),
     )
     .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, rotation_needed): (StatusCode, RotationStatusResponse) = signed_json_request(
+        app.clone(),
+        Method::GET,
+        &format!("/api/v1/vaults/{}/rotation-status", vault.vault_id),
+        owner.auth("rotation-status-after-remove"),
+        &json!({}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(rotation_needed.needs_key_rotation);
+    assert_eq!(rotation_needed.current_key_generation, 1);
 
     let (status, rotated): (StatusCode, RotationStatusResponse) = signed_json_request(
         app,
