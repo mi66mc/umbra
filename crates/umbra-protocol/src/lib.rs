@@ -463,6 +463,27 @@ mod tests {
     }
 
     #[test]
+    fn delete_item_request_roundtrips() {
+        let vault_id = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+        let item_id = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
+        let request = DeleteItemRequest {
+            protocol_version: PROTOCOL_VERSION,
+            vault_id,
+            item_id,
+            expected_revision: 7,
+        };
+
+        let encoded = serde_json::to_value(&request).unwrap();
+        assert_eq!(encoded["protocol_version"], json!(1));
+        assert_eq!(encoded["vault_id"], json!(vault_id.to_string()));
+        assert_eq!(encoded["item_id"], json!(item_id.to_string()));
+        assert_eq!(encoded["expected_revision"], json!(7));
+
+        let decoded: DeleteItemRequest = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded, request);
+    }
+
+    #[test]
     fn pending_device_response_roundtrips() {
         let response = PendingDeviceResponse {
             device_id: Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap(),
