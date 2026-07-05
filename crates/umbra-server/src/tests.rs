@@ -22,7 +22,7 @@ use umbra_auth::{
 use umbra_core::{DeviceState, VaultKind, VaultRole};
 use umbra_protocol::{
     AddVaultMemberRequest, ApprovalLookupRequest, ApproveDeviceRequest, CreateItemRequest,
-    CreateOrgRequest, CreateVaultRequest, DeviceBootstrapResponse, DeviceRegisterRequest,
+    CreateOrgRequest, CreateVaultRequest, DeleteItemRequest, DeviceBootstrapResponse, DeviceRegisterRequest,
     DeviceResponse, ItemRevisionResponse, OpaqueLoginFinishRequest, OpaqueLoginFinishResponse,
     OpaqueLoginStartRequest, OpaqueLoginStartResponse, OpaqueRegisterFinishRequest,
     OpaqueRegisterStartRequest, OpaqueRegisterStartResponse, OrgResponse, PROTOCOL_VERSION,
@@ -647,6 +647,92 @@ async fn owner_can_create_update_and_sync_item_revisions() {
         json!({"ciphertext": "v2"})
     );
     assert_eq!(sync.vaults[0].key_wrappings.len(), 1);
+}
+
+#[tokio::test]
+#[serial(postgres)]
+async fn owner_can_delete_item_and_sync_deleted_item_id() {
+    let Some(storage) = fresh_test_storage().await else {
+        return;
+    };
+    let app = router(test_state_with_storage(storage));
+    let login = register_and_signed_login(
+        app.clone(),
+        "delete-item@example.com",
+        b"delete item password",
+        "delete-item",
+    )
+    .await;
+    let vault_id = Uuid::parse_str("00000000-0000-0000-0000-000000000501").unwrap();
+    let item_id = Uuid::parse_str("00000000-0000-0000-0000-000000000502").unwrap();
+
+    let (status, vault): (StatusCode, VaultResponse) = signed_json_request(
+        app.clone(),
+        Method::POST,
+        "/api/v1/vaults",
+        login.auth("delete-create-vault"),
+        &CreateVaultRequest {
+            protocol_version: PROTOCOL_VERSION,
+            vault_id: Some(vault_id),
+            name: "Delete".to_owned(),
+            kind: VaultKind::Personal,
+            initial_key_wrapping: json!({"owner": "wrapping"}),
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, created): (StatusCode, ItemRevisionResponse) = signed_json_request(
+        app.clone(),
+        Method::POST,
+        &format!("/api/v1/vaults/{}/items", vault.vault_id),
+        login.auth("delete-create-item"),
+        &CreateItemRequest {
+            protocol_version: PROTOCOL_VERSION,
+            vault_id: vault.vault_id,
+            item_id: Some(item_id),
+            kind: umbra_core::ItemKind::Login,
+            envelope: json!({"ciphertext": "v1"}),
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _deleted): (StatusCode, serde_json::Value) = signed_json_request(
+        app.clone(),
+        Method::DELETE,
+        &format!("/api/v1/vaults/{}/items/{}", vault.vault_id, item_id),
+        login.auth("delete-item"),
+        &DeleteItemRequest {
+            protocol_version: PROTOCOL_VERSION,
+            vault_id: vault.vault_id,
+            item_id,
+            expected_revision: created.revision,
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (status, sync): (StatusCode, SyncResponse) = signed_json_request(
+        app,
+        Method::POST,
+        "/api/v1/sync",
+        login.auth("delete-sync"),
+        &SyncRequest {
+            protocol_version: PROTOCOL_VERSION,
+            device_id: login.device_id,
+            vaults: vec![VaultSyncCursor {
+                vault_id: vault.vault_id,
+                since_vault_revision: created.vault_revision,
+            }],
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(sync.vaults.len(), 1);
+    assert!(sync.vaults[0].items.is_empty());
+    assert_eq!(sync.vaults[0].deleted_items, vec![item_id]);
+    assert!(sync.vaults[0].latest_vault_revision > created.vault_revision);
 }
 
 #[tokio::test]

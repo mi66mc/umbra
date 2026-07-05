@@ -20,6 +20,7 @@ use umbra_migrations::MigrationStatus;
 use umbra_protocol::{
     AddOrgMemberRequest, AddVaultMemberRequest, ApprovalLookupRequest, ApproveDeviceRequest,
     CreateItemRequest, CreateOrgRequest, CreateOrgVaultRequest, CreateVaultRequest,
+    DeleteItemRequest,
     DeviceBootstrapResponse, DeviceResponse, ItemRevisionResponse, OpaqueLoginFinishRequest,
     OpaqueLoginFinishResponse, OpaqueLoginStartRequest, OpaqueLoginStartResponse,
     OpaqueRegisterFinishRequest, OpaqueRegisterStartRequest, OpaqueRegisterStartResponse,
@@ -86,7 +87,7 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/api/v1/vaults/:vault_id/items", post(create_item))
         .route(
             "/api/v1/vaults/:vault_id/items/:item_id",
-            post(update_item).put(update_item),
+            post(update_item).put(update_item).delete(delete_item),
         )
         .route(
             "/api/v1/vaults/:vault_id/members",
@@ -1018,6 +1019,35 @@ async fn update_item(
     Ok(Json(item_revision_response(revision)))
 }
 
+async fn delete_item(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((vault_id, item_id)): Path<(Uuid, Uuid)>,
+    Json(request): Json<DeleteItemRequest>,
+) -> Result<StatusCode, ServerError> {
+    ensure_protocol(request.protocol_version)?;
+    if request.vault_id != vault_id || request.item_id != item_id {
+        return Err(ServerError::BadRequest("item path mismatch"));
+    }
+
+    let user_id = authenticate_trusted_context(&state, &headers)
+        .await?
+        .user_id;
+    ensure_vault_writer(&state, vault_id, user_id).await?;
+
+    state
+        .storage
+        .delete_item(umbra_storage::DeleteItem {
+            item_id,
+            vault_id,
+            expected_revision: request.expected_revision,
+            author_user_id: Some(user_id),
+        })
+        .await?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn sync(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1047,13 +1077,20 @@ async fn sync(
             .into_iter()
             .map(vault_key_wrapping_response)
             .collect();
+        let deleted_items = state
+            .storage
+            .list_deleted_item_ids_since(cursor.vault_id, cursor.since_vault_revision)
+            .await?
+            .into_iter()
+            .map(|deleted| deleted.item_id)
+            .collect();
 
         vaults.push(VaultSyncChanges {
             vault_id: cursor.vault_id,
             latest_vault_revision: vault.vault_revision,
             latest_access_revision: vault.access_revision,
             items,
-            deleted_items: vec![],
+            deleted_items,
             key_wrappings,
         });
     }
