@@ -1,4 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs::OpenOptions;
+use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -1435,9 +1439,16 @@ pub async fn run(
                 offline,
             )
             .await?;
-            let dotenv = crate::item_plaintext::render_dotenv(&plaintext);
-            print!("{dotenv}");
-            Ok(())
+            if output.is_json() {
+                print_json(&serde_json::json!({
+                    "project_env": project_env,
+                    "variables": env_variables_json(&plaintext),
+                }))
+            } else {
+                let dotenv = crate::item_plaintext::render_dotenv(&plaintext);
+                print!("{dotenv}");
+                Ok(())
+            }
         }
         Command::Env(EnvCommand::Inject {
             project_env,
@@ -1460,7 +1471,7 @@ pub async fn run(
             .await?;
             ensure_can_write_env_file(&output_path, yes)?;
             let dotenv = crate::item_plaintext::render_dotenv(&plaintext);
-            std::fs::write(&output_path, dotenv)?;
+            write_env_file(&output_path, &dotenv)?;
             if output.is_json() {
                 print_json(&serde_json::json!({
                     "project_env": project_env,
@@ -1575,6 +1586,25 @@ fn ensure_can_write_env_file(path: &Path, yes: bool) -> Result<(), CliError> {
         ));
     }
     Ok(())
+}
+
+fn write_env_file(path: &Path, contents: &str) -> Result<(), CliError> {
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(contents.as_bytes())?;
+    file.sync_all()?;
+    Ok(())
+}
+
+fn env_variables_json(plaintext: &ItemPlaintextV1) -> BTreeMap<String, String> {
+    crate::item_plaintext::env_pairs(plaintext)
+        .into_iter()
+        .collect()
 }
 
 fn save_pending_login_crypto_material(
@@ -3599,6 +3629,58 @@ mod tests {
         assert!(!value.to_string().contains("secret"));
         assert!(!value.to_string().contains("enabled"));
         assert!(!value.to_string().contains("value"));
+    }
+
+    #[test]
+    fn env_get_json_payload_uses_sorted_variables() {
+        let mut plaintext = crate::item_plaintext::build_secret_bundle(
+            "pulzar/dev",
+            "DATABASE_URL",
+            "postgres://localhost",
+        );
+        crate::item_plaintext::set_plaintext_field(
+            &mut plaintext,
+            "OPENAI_API_KEY",
+            "sk-test".to_owned(),
+        );
+
+        let variables = env_variables_json(&plaintext);
+
+        assert_eq!(
+            variables.keys().cloned().collect::<Vec<_>>(),
+            vec!["DATABASE_URL".to_owned(), "OPENAI_API_KEY".to_owned()]
+        );
+        assert_eq!(
+            variables.get("DATABASE_URL").map(String::as_str),
+            Some("postgres://localhost")
+        );
+    }
+
+    #[test]
+    fn env_file_writer_writes_requested_contents() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".env");
+
+        write_env_file(&path, "DATABASE_URL=postgres://localhost\n").unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "DATABASE_URL=postgres://localhost\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn env_file_writer_creates_owner_only_files_on_unix() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".env");
+
+        write_env_file(&path, "SECRET=value\n").unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     #[test]
