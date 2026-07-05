@@ -2,13 +2,14 @@ use async_trait::async_trait;
 use uuid::Uuid;
 
 use crate::{
-    AppendAuditLog, ApprovePendingDevice, AuditLogRecord, CreateDevice, CreateEncryptedItem,
-    CreateItemRevision, CreateOrg, CreateRecoveryChallenge, CreateSession, CreateUser, CreateVault,
-    CreateVaultKeyWrapping, DeleteItem, DeletedItemRecord, DeviceRecord, FinishVaultKeyRotation,
-    ItemRevisionRecord, OrgMemberRecord, OrgRecord, PostgresStorage, RecoveryChallengeRecord,
+    AcceptVaultInvite, AppendAuditLog, ApprovePendingDevice, AuditLogRecord, CreateDevice,
+    CreateEncryptedItem, CreateItemRevision, CreateOrg, CreateRecoveryChallenge, CreateSession,
+    CreateUser, CreateVault, CreateVaultInvite, CreateVaultKeyWrapping, DeleteItem,
+    DeletedItemRecord, DeviceRecord, FinishVaultKeyRotation, ItemRevisionRecord, OrgMemberRecord,
+    OrgRecord, PendingVaultInviteRecord, PostgresStorage, RecoveryChallengeRecord,
     RotationStatusRecord, SessionRecord, StorageError, UpsertOrgMember, UpsertUserAuth,
-    UpsertVaultMember, UserAuthRecord, UserRecord, VaultKeyWrappingRecord, VaultMemberRecord,
-    VaultRecord, VaultSyncStatusRecord,
+    UpsertVaultMember, UserAuthRecord, UserRecord, VaultInviteRecord, VaultKeyWrappingRecord,
+    VaultMemberRecord, VaultRecord, VaultSyncStatusRecord,
 };
 use umbra_core::{DeviceId, OrgId, UserId, VaultId};
 
@@ -96,6 +97,23 @@ pub trait StorageBackend: Send + Sync {
         &self,
         vault_id: VaultId,
     ) -> Result<Vec<VaultMemberRecord>, StorageError>;
+    async fn create_vault_invite(
+        &self,
+        input: CreateVaultInvite,
+    ) -> Result<VaultInviteRecord, StorageError>;
+    async fn list_pending_vault_invites_for_email(
+        &self,
+        email: &str,
+    ) -> Result<Vec<PendingVaultInviteRecord>, StorageError>;
+    async fn accept_vault_invite(
+        &self,
+        input: AcceptVaultInvite,
+    ) -> Result<VaultMemberRecord, StorageError>;
+    async fn reject_vault_invite(
+        &self,
+        invite_id: Uuid,
+        user_id: UserId,
+    ) -> Result<VaultInviteRecord, StorageError>;
     async fn has_active_vault_membership(
         &self,
         vault_id: VaultId,
@@ -337,6 +355,35 @@ impl StorageBackend for PostgresStorage {
         vault_id: VaultId,
     ) -> Result<Vec<VaultMemberRecord>, StorageError> {
         PostgresStorage::list_vault_members(self, vault_id).await
+    }
+
+    async fn create_vault_invite(
+        &self,
+        input: CreateVaultInvite,
+    ) -> Result<VaultInviteRecord, StorageError> {
+        PostgresStorage::create_vault_invite(self, input).await
+    }
+
+    async fn list_pending_vault_invites_for_email(
+        &self,
+        email: &str,
+    ) -> Result<Vec<PendingVaultInviteRecord>, StorageError> {
+        PostgresStorage::list_pending_vault_invites_for_email(self, email).await
+    }
+
+    async fn accept_vault_invite(
+        &self,
+        input: AcceptVaultInvite,
+    ) -> Result<VaultMemberRecord, StorageError> {
+        PostgresStorage::accept_vault_invite(self, input).await
+    }
+
+    async fn reject_vault_invite(
+        &self,
+        invite_id: Uuid,
+        user_id: UserId,
+    ) -> Result<VaultInviteRecord, StorageError> {
+        PostgresStorage::reject_vault_invite(self, invite_id, user_id).await
     }
 
     async fn has_active_vault_membership(
@@ -625,6 +672,35 @@ impl StorageBackend for crate::sqlite::SqliteStorage {
         vault_id: VaultId,
     ) -> Result<Vec<VaultMemberRecord>, StorageError> {
         crate::sqlite::SqliteStorage::list_vault_members(self, vault_id).await
+    }
+
+    async fn create_vault_invite(
+        &self,
+        input: CreateVaultInvite,
+    ) -> Result<VaultInviteRecord, StorageError> {
+        crate::sqlite::SqliteStorage::create_vault_invite(self, input).await
+    }
+
+    async fn list_pending_vault_invites_for_email(
+        &self,
+        email: &str,
+    ) -> Result<Vec<PendingVaultInviteRecord>, StorageError> {
+        crate::sqlite::SqliteStorage::list_pending_vault_invites_for_email(self, email).await
+    }
+
+    async fn accept_vault_invite(
+        &self,
+        input: AcceptVaultInvite,
+    ) -> Result<VaultMemberRecord, StorageError> {
+        crate::sqlite::SqliteStorage::accept_vault_invite(self, input).await
+    }
+
+    async fn reject_vault_invite(
+        &self,
+        invite_id: Uuid,
+        user_id: UserId,
+    ) -> Result<VaultInviteRecord, StorageError> {
+        crate::sqlite::SqliteStorage::reject_vault_invite(self, invite_id, user_id).await
     }
 
     async fn has_active_vault_membership(

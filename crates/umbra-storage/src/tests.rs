@@ -187,6 +187,16 @@ async fn sqlite_item_deletion_flow() {
 }
 
 #[tokio::test]
+async fn sqlite_vault_invite_lifecycle() {
+    let storage = crate::sqlite::SqliteStorage::connect("sqlite::memory:", 1)
+        .await
+        .unwrap();
+    umbra_migrations::run_sqlite(storage.pool()).await.unwrap();
+
+    vault_invite_lifecycle_on(&storage).await;
+}
+
+#[tokio::test]
 #[serial(postgres)]
 async fn postgres_migrations_create_required_schema() {
     let Some(storage) = fresh_test_storage().await else {
@@ -216,6 +226,16 @@ async fn postgres_item_deletion_flow() {
     };
 
     item_deletion_flow_on(&storage).await;
+}
+
+#[tokio::test]
+#[serial(postgres)]
+async fn postgres_vault_invite_lifecycle() {
+    let Some(storage) = fresh_test_storage().await else {
+        return;
+    };
+
+    vault_invite_lifecycle_on(&storage).await;
 }
 
 #[tokio::test]
@@ -754,6 +774,96 @@ async fn item_deletion_flow_on<S: StorageBackend + ?Sized>(storage: &S) {
         })
         .await;
     assert!(matches!(stale_delete, Err(StorageError::NotFound)));
+}
+
+async fn vault_invite_lifecycle_on<S: StorageBackend + ?Sized>(storage: &S) {
+    let owner = create_test_user_on(storage, "invite-owner@example.com").await;
+    let recipient = create_test_user_on(storage, "invite-recipient@example.com").await;
+    let vault = storage
+        .create_vault(CreateVault {
+            id: None,
+            org_id: None,
+            name: "Invite Vault".to_owned(),
+            kind: VaultKind::Shared,
+            created_by: Some(owner.id),
+            crypto_policy: serde_json::json!({"min_envelope_version": 1}),
+        })
+        .await
+        .unwrap();
+    storage
+        .upsert_vault_member(UpsertVaultMember {
+            vault_id: vault.id,
+            user_id: owner.id,
+            role: VaultRole::Owner,
+            state: MemberState::Active,
+        })
+        .await
+        .unwrap();
+
+    let invite = storage
+        .create_vault_invite(CreateVaultInvite {
+            id: None,
+            vault_id: vault.id,
+            org_id: None,
+            email: "INVITE-RECIPIENT@example.com".to_owned(),
+            role: VaultRole::Editor,
+            invited_by: Some(owner.id),
+            vault_key_wrapping: serde_json::json!({"wrapped": "vault-key"}),
+            expires_at: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(invite.vault_id, vault.id);
+    assert_eq!(invite.email, "invite-recipient@example.com");
+    assert_eq!(invite.role, VaultRole::Editor);
+    assert_eq!(invite.state, "pending");
+
+    let pending = storage
+        .list_pending_vault_invites_for_email("invite-recipient@example.com")
+        .await
+        .unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].id, invite.id);
+    assert_eq!(pending[0].vault_name, "Invite Vault");
+
+    let member = storage
+        .accept_vault_invite(AcceptVaultInvite {
+            invite_id: invite.id,
+            user_id: recipient.id,
+            device_id: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(member.vault_id, vault.id);
+    assert_eq!(member.user_id, recipient.id);
+    assert_eq!(member.role, VaultRole::Editor);
+    assert_eq!(member.state, MemberState::Active);
+
+    let wrappings = storage
+        .list_key_wrappings_for_user_vault(recipient.id, vault.id)
+        .await
+        .unwrap();
+    assert_eq!(wrappings.len(), 1);
+    assert_eq!(
+        wrappings[0].envelope,
+        serde_json::json!({"wrapped": "vault-key"})
+    );
+
+    let pending_after_accept = storage
+        .list_pending_vault_invites_for_email("invite-recipient@example.com")
+        .await
+        .unwrap();
+    assert!(pending_after_accept.is_empty());
+
+    let second_accept = storage
+        .accept_vault_invite(AcceptVaultInvite {
+            invite_id: invite.id,
+            user_id: recipient.id,
+            device_id: None,
+        })
+        .await;
+    assert!(matches!(second_accept, Err(StorageError::NotFound)));
 }
 
 async fn create_test_user_on<S: StorageBackend + ?Sized>(storage: &S, email: &str) -> UserRecord {

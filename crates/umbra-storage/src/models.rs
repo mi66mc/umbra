@@ -189,6 +189,54 @@ pub struct VaultMemberRecord {
 }
 
 #[derive(Debug, Clone)]
+pub struct CreateVaultInvite {
+    pub id: Option<Uuid>,
+    pub vault_id: VaultId,
+    pub org_id: Option<OrgId>,
+    pub email: String,
+    pub role: VaultRole,
+    pub invited_by: Option<UserId>,
+    pub vault_key_wrapping: Value,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct VaultInviteRecord {
+    pub id: Uuid,
+    pub vault_id: VaultId,
+    pub org_id: Option<OrgId>,
+    pub email: String,
+    pub role: VaultRole,
+    pub state: String,
+    pub invited_by: Option<UserId>,
+    pub accepted_user_id: Option<UserId>,
+    pub vault_key_wrapping: Value,
+    pub created_at: DateTime<Utc>,
+    pub accepted_at: Option<DateTime<Utc>>,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingVaultInviteRecord {
+    pub id: Uuid,
+    pub vault_id: VaultId,
+    pub vault_name: String,
+    pub org_id: Option<OrgId>,
+    pub email: String,
+    pub role: VaultRole,
+    pub invited_by: Option<UserId>,
+    pub vault_key_wrapping: Value,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AcceptVaultInvite {
+    pub invite_id: Uuid,
+    pub user_id: UserId,
+    pub device_id: Option<DeviceId>,
+}
+
+#[derive(Debug, Clone)]
 pub struct CreateVaultKeyWrapping {
     pub id: Option<Uuid>,
     pub vault_id: VaultId,

@@ -1,6 +1,7 @@
 mod audit;
 pub(crate) mod convert;
 mod devices;
+mod invites;
 mod items;
 mod orgs;
 mod sessions;

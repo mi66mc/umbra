@@ -1,6 +1,7 @@
 mod audit;
 mod convert;
 mod devices;
+mod invites;
 mod items;
 mod orgs;
 mod sessions;
