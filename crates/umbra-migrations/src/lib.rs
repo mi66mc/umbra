@@ -86,6 +86,7 @@ pub async fn status_sqlite(pool: &SqlitePool) -> Result<MigrationStatus, Migrati
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sqlx::{Executor, SqlitePool};
 
     #[test]
     fn embeds_postgres_and_sqlite_migrations() {
@@ -118,5 +119,114 @@ mod tests {
         assert!(sqlite_migrations.iter().any(|migration| {
             migration.version == 7 && migration.description == "invite wrappings"
         }));
+    }
+
+    #[tokio::test]
+    async fn sqlite_invite_wrapping_migration_expires_legacy_pending_invites() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+
+        pool.execute(include_str!("../sqlite/000001_initial_schema.sql"))
+            .await
+            .unwrap();
+        pool.execute(include_str!(
+            "../sqlite/000002_org_access_and_key_rotation.sql"
+        ))
+        .await
+        .unwrap();
+        pool.execute(include_str!("../sqlite/000003_signed_sessions.sql"))
+            .await
+            .unwrap();
+        pool.execute(include_str!("../sqlite/000004_vault_access_revision.sql"))
+            .await
+            .unwrap();
+        pool.execute(include_str!("../sqlite/000005_device_trust_state.sql"))
+            .await
+            .unwrap();
+        pool.execute(include_str!("../sqlite/000006_item_deletions.sql"))
+            .await
+            .unwrap();
+
+        let user_id = "00000000-0000-0000-0000-000000000001";
+        let vault_id = "00000000-0000-0000-0000-000000000002";
+        let stale_invite_id = "00000000-0000-0000-0000-000000000003";
+        let duplicate_invite_id = "00000000-0000-0000-0000-000000000004";
+
+        sqlx::query(
+            "INSERT INTO users (id, email, display_name, public_key, encrypted_private_key) VALUES (?1, ?2, ?3, ?4, ?5)",
+        )
+        .bind(user_id)
+        .bind("miguel@example.com")
+        .bind("Miguel")
+        .bind("public-key")
+        .bind(r#"{"encrypted":"private-key"}"#)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO vaults (id, name, kind, created_by, crypto_policy) VALUES (?1, ?2, ?3, ?4, ?5)",
+        )
+        .bind(vault_id)
+        .bind("Legacy Invite Vault")
+        .bind("shared")
+        .bind(user_id)
+        .bind("{}")
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO invites (id, vault_id, email, role, state, invited_by) VALUES (?1, ?2, ?3, ?4, 'pending', ?5)",
+        )
+        .bind(stale_invite_id)
+        .bind(vault_id)
+        .bind("ana@example.com")
+        .bind("editor")
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO invites (id, vault_id, email, role, state, invited_by) VALUES (?1, ?2, ?3, ?4, 'pending', ?5)",
+        )
+        .bind(duplicate_invite_id)
+        .bind(vault_id)
+        .bind("ANA@example.com")
+        .bind("viewer")
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        pool.execute(include_str!("../sqlite/000007_invite_wrappings.sql"))
+            .await
+            .unwrap();
+
+        let pending_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM invites WHERE state = 'pending' AND vault_key_wrapping IS NULL",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(pending_count, 0);
+
+        let expired_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM invites WHERE state = 'expired' AND vault_key_wrapping IS NULL",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(expired_count, 2);
+
+        sqlx::query(
+            "INSERT INTO invites (id, vault_id, email, role, state, invited_by, vault_key_wrapping) VALUES (?1, ?2, ?3, ?4, 'pending', ?5, ?6)",
+        )
+        .bind("00000000-0000-0000-0000-000000000005")
+        .bind(vault_id)
+        .bind("ana@example.com")
+        .bind("editor")
+        .bind(user_id)
+        .bind(r#"{"wrapped":"new"}"#)
+        .execute(&pool)
+        .await
+        .unwrap();
     }
 }
