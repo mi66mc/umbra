@@ -3,7 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use umbra_core::{
-    ItemId, ItemKind, ItemPlaintextV1, MemberState, OrgRole, UserId, VaultId, VaultKind, VaultRole,
+    ItemId, ItemKind, ItemPlaintextV1, MemberState, OrgRole, RevisionId, UserId, VaultId,
+    VaultKind, VaultRole,
 };
 use umbra_crypto::{
     AadV1, CryptoEnvelopeV1, DeviceBootstrapBundleV1, DeviceBootstrapEnvelopeV1, MasterPassword,
@@ -15,6 +16,7 @@ use umbra_crypto::{
 use umbra_protocol::{
     AddOrgMemberRequest, AddVaultMemberRequest, ApprovalLookupRequest, ApproveDeviceRequest,
     CreateItemRequest, CreateOrgRequest, CreateOrgVaultRequest, CreateVaultRequest,
+    DeleteItemRequest,
     DeviceBootstrapResponse, DeviceResponse, ItemRevisionResponse, OrgMemberResponse, OrgResponse,
     PROTOCOL_VERSION, PendingDeviceSummary, RecoverTrustRequest, RecoverTrustResponse,
     RecoveryChallengeStartRequest, RecoveryChallengeStartResponse, RotateVaultKeyRequest,
@@ -936,6 +938,81 @@ pub async fn run(
             let item = decrypt_cached_item(&vault_key, &revision)?;
             render_item_plaintext(output, revision.item_id, &item.plaintext)
         }
+        Command::Item(ItemCommand::Delete {
+            vault_id,
+            vault,
+            item_id,
+            title,
+            yes,
+        }) => {
+            let profile = active_profile(&config)?;
+            require_login(profile)?;
+            let client = UmbraHttpClient::new(profile)?;
+            let mut cache = crate::cache::LocalCache::open(&config.active_profile)?;
+            let vault_id =
+                resolve_vault_id_for_output(profile, &cache, vault_id, vault.as_deref(), output)?;
+            crate::sync::ensure_vault_synced(
+                profile,
+                &mut cache,
+                vault_id,
+                crate::sync::SyncMode::IfChanged,
+            )
+            .await?;
+            let selection = select_cached_item_revision_before_unlock_for_output(
+                &cache,
+                vault_id,
+                item_id,
+                title.as_deref(),
+                output,
+            )?;
+            let vault_key = unlock_vault_key(&config.active_profile, profile, &cache, vault_id)?;
+            let revision = match selection {
+                ItemSelectionNeed::Selected(revision) => revision,
+                ItemSelectionNeed::NeedsTitleDecrypt => select_cached_item_revision_by_title(
+                    &cache,
+                    &vault_key,
+                    vault_id,
+                    title.as_deref().expect("title selector was validated"),
+                )?,
+                ItemSelectionNeed::NeedsInteractiveDecrypt => {
+                    select_cached_item_revision_interactively(&cache, &vault_key, vault_id)?
+                }
+            };
+
+            if output.is_json() && !yes {
+                return Err(CliError::Input("pass --yes to delete item in JSON mode"));
+            }
+            if !output.is_json()
+                && !yes
+                && !dialoguer::Confirm::new()
+                    .with_prompt("Delete this item?")
+                    .default(false)
+                    .interact()?
+            {
+                return Err(CliError::Input("item deletion cancelled"));
+            }
+
+            client
+                .delete_json(
+                    &format!("/api/v1/vaults/{vault_id}/items/{}", revision.item_id),
+                    &DeleteItemRequest {
+                        protocol_version: PROTOCOL_VERSION,
+                        vault_id,
+                        item_id: revision.item_id,
+                        expected_revision: revision.revision,
+                    },
+                )
+                .await?;
+            cache.delete_item(vault_id, revision.item_id)?;
+            crate::sync::ensure_vault_synced(
+                profile,
+                &mut cache,
+                vault_id,
+                crate::sync::SyncMode::Always,
+            )
+            .await?;
+            render_item_deleted(output, vault_id, revision.item_id, revision.revision)
+        }
         Command::Item(ItemCommand::Create {
             vault_id,
             vault,
@@ -1634,6 +1711,29 @@ fn render_item_revision_created(
         ("vault_id", response.vault_id.to_string()),
         ("revision", response.revision.to_string()),
         ("vault revision", response.vault_revision.to_string()),
+    ]);
+    Ok(())
+}
+
+fn render_item_deleted(
+    output: OutputMode,
+    vault_id: VaultId,
+    item_id: ItemId,
+    revision: RevisionId,
+) -> Result<(), CliError> {
+    if output.is_json() {
+        return print_json(&serde_json::json!({
+            "deleted": true,
+            "vault_id": vault_id,
+            "item_id": item_id,
+            "expected_revision": revision
+        }));
+    }
+
+    crate::output::print_kv(&[
+        ("deleted item", item_id.to_string()),
+        ("vault_id", vault_id.to_string()),
+        ("expected revision", revision.to_string()),
     ]);
     Ok(())
 }

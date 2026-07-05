@@ -404,6 +404,53 @@ fn parses_item_get_by_title() {
 }
 
 #[test]
+fn parses_item_delete_commands() {
+    let vault_id = "00000000-0000-0000-0000-000000000701";
+    let item_id = "00000000-0000-0000-0000-000000000702";
+
+    let by_id = Cli::parse_from([
+        "umbra",
+        "item",
+        "delete",
+        "--vault-id",
+        vault_id,
+        "--item-id",
+        item_id,
+        "--yes",
+    ]);
+    assert!(matches!(
+        by_id.command,
+        Command::Item(ItemCommand::Delete {
+            vault_id: Some(parsed_vault),
+            vault: None,
+            item_id: Some(parsed_item),
+            title: None,
+            yes: true,
+        }) if parsed_vault.to_string() == vault_id && parsed_item.to_string() == item_id
+    ));
+
+    let by_title = Cli::parse_from([
+        "umbra",
+        "item",
+        "delete",
+        "--vault",
+        "Personal",
+        "--title",
+        "GitHub",
+    ]);
+    assert!(matches!(
+        by_title.command,
+        Command::Item(ItemCommand::Delete {
+            vault_id: None,
+            vault: Some(vault),
+            item_id: None,
+            title: Some(title),
+            yes: false,
+        }) if vault == "Personal" && title == "GitHub"
+    ));
+}
+
+#[test]
 fn parses_offline_read_commands() {
     let list = Cli::parse_from([
         "umbra",

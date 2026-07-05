@@ -243,6 +243,18 @@ pub enum ItemCommand {
         #[arg(long, alias = "cached")]
         offline: bool,
     },
+    Delete {
+        #[arg(long)]
+        vault_id: Option<VaultId>,
+        #[arg(long)]
+        vault: Option<String>,
+        #[arg(long)]
+        item_id: Option<ItemId>,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        yes: bool,
+    },
     Create {
         #[arg(long)]
         vault_id: Option<VaultId>,

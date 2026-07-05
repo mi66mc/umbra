@@ -98,6 +98,14 @@ impl UmbraHttpClient {
         send_empty(request).await
     }
 
+    pub async fn delete_json<T>(&self, path: &str, body: &T) -> Result<(), CliError>
+    where
+        T: Serialize + ?Sized,
+    {
+        let request = self.signed_request(Method::DELETE, path, serde_json::to_vec(body)?)?;
+        send_empty(request).await
+    }
+
     async fn send<R>(&self, method: Method, path: &str, body: Vec<u8>) -> Result<R, CliError>
     where
         R: DeserializeOwned,

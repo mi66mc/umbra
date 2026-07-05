@@ -151,6 +151,13 @@ impl LocalCache {
             )?;
         }
 
+        for item_id in &changes.deleted_items {
+            tx.execute(
+                "DELETE FROM item_revisions WHERE vault_id = ?1 AND item_id = ?2",
+                params![changes.vault_id.to_string(), item_id.to_string()],
+            )?;
+        }
+
         let active_wrapping_ids = changes
             .key_wrappings
             .iter()
@@ -206,6 +213,14 @@ impl LocalCache {
         }
 
         tx.commit()?;
+        Ok(())
+    }
+
+    pub fn delete_item(&self, vault_id: uuid::Uuid, item_id: uuid::Uuid) -> Result<(), CliError> {
+        self.connection.execute(
+            "DELETE FROM item_revisions WHERE vault_id = ?1 AND item_id = ?2",
+            params![vault_id.to_string(), item_id.to_string()],
+        )?;
         Ok(())
     }
 
@@ -907,5 +922,46 @@ mod tests {
 
         assert_eq!(cache.list_key_wrappings(vault_id).unwrap(), vec![]);
         assert_eq!(cache.latest_key_wrapping(vault_id, user_id).unwrap(), None);
+    }
+
+    #[test]
+    fn apply_sync_changes_removes_deleted_items() {
+        let mut cache = LocalCache::open_in_memory("delete-cache").unwrap();
+        let vault_id = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000601").unwrap();
+        let item_id = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000602").unwrap();
+
+        cache
+            .apply_sync_changes(&umbra_protocol::VaultSyncChanges {
+                vault_id,
+                latest_vault_revision: 1,
+                latest_access_revision: 1,
+                items: vec![umbra_protocol::ItemRevisionResponse {
+                    item_id,
+                    vault_id,
+                    revision: 1,
+                    vault_revision: 1,
+                    key_generation: 1,
+                    author_user_id: None,
+                    envelope: serde_json::json!({"ciphertext": "encrypted"}),
+                }],
+                deleted_items: vec![],
+                key_wrappings: vec![],
+            })
+            .unwrap();
+        assert_eq!(cache.list_latest_item_revisions(vault_id).unwrap().len(), 1);
+
+        cache
+            .apply_sync_changes(&umbra_protocol::VaultSyncChanges {
+                vault_id,
+                latest_vault_revision: 2,
+                latest_access_revision: 1,
+                items: vec![],
+                deleted_items: vec![item_id],
+                key_wrappings: vec![],
+            })
+            .unwrap();
+
+        assert!(cache.latest_item_revision(vault_id, item_id).unwrap().is_none());
+        assert!(cache.list_latest_item_revisions(vault_id).unwrap().is_empty());
     }
 }
