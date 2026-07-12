@@ -70,6 +70,9 @@ umbra secret set pulzar/dev DATABASE_URL "postgres://user:pass@localhost:5432/ap
 umbra secret list pulzar/dev --vault Personal
 umbra secret get pulzar/dev DATABASE_URL --vault Personal
 umbra secret get pulzar/dev --vault Personal
+umbra env get pulzar/dev --vault Personal
+umbra env inject pulzar/dev --vault Personal --output .env --yes
+umbra run pulzar/dev --vault Personal -- cargo run
 
 umbra item create \
   --vault Personal \
@@ -99,6 +102,8 @@ umbra --json item get --vault Personal --title GitHub
 Interactive selection only runs in human output mode. Omit `--vault` when you want the CLI to prompt from cached vaults, omit `--title`/`--item-id` from `item get` or `item delete` to choose an item, and omit the key from `secret get` or `secret rm` to choose a field. Commands run with `--json` require explicit selectors and never open prompts.
 
 The CLI encrypts item plaintext locally before upload. The server receives only JSON envelopes and key wrappings. The local SQLite cache stores encrypted envelopes and wrapped vault keys, not plaintext fields.
+
+`env get` prints a deterministic dotenv view of an encrypted `secret` bundle. `env inject` writes that dotenv output to a file and refuses to overwrite an existing file unless `--yes` is passed; on Unix, new and replacement files are created with owner-only permissions. `umbra run <project/env> -- <command>` decrypts the bundle locally and passes the variables only to the direct child process environment; it does not invoke a shell or write plaintext to the local cache.
 
 Deleting an item is a metadata operation on the server. The server marks the encrypted item as deleted, increments the vault revision, and future sync responses include the deleted item id so clients remove it from local encrypted cache.
 
