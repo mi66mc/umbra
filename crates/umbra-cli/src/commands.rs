@@ -1625,9 +1625,20 @@ fn write_new_env_file(path: &Path, contents: &str) -> Result<(), CliError> {
         options.mode(0o600);
     }
     let mut file = options.open(path)?;
-    file.write_all(contents.as_bytes())?;
-    file.sync_all()?;
-    Ok(())
+    let result = file
+        .write_all(contents.as_bytes())
+        .and_then(|()| file.sync_all());
+    drop(file);
+
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            // This file can contain plaintext secrets. Do not leave a partial
+            // temporary file behind when writing or syncing fails.
+            let _ = std::fs::remove_file(path);
+            Err(error.into())
+        }
+    }
 }
 
 fn write_env_file(path: &Path, contents: &str, overwrite: bool) -> Result<(), CliError> {
@@ -1653,21 +1664,56 @@ fn write_env_file(path: &Path, contents: &str, overwrite: bool) -> Result<(), Cl
 
     write_new_env_file(&temp_path, contents)?;
 
-    #[cfg(windows)]
-    if path.exists() {
-        if let Err(error) = std::fs::remove_file(path) {
-            let _ = std::fs::remove_file(&temp_path);
-            return Err(error.into());
-        }
-    }
-
-    match std::fs::rename(&temp_path, path) {
+    match promote_env_temp_file(&temp_path, path) {
         Ok(()) => Ok(()),
         Err(error) => {
             let _ = std::fs::remove_file(&temp_path);
-            Err(error.into())
+            Err(error)
         }
     }
+}
+
+#[cfg(not(windows))]
+fn promote_env_temp_file(temp_path: &Path, path: &Path) -> Result<(), CliError> {
+    std::fs::rename(temp_path, path).map_err(CliError::from)
+}
+
+#[cfg(windows)]
+fn promote_env_temp_file(temp_path: &Path, path: &Path) -> Result<(), CliError> {
+    const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
+
+    unsafe extern "system" {
+        fn MoveFileExW(
+            lp_existing_file_name: *const u16,
+            lp_new_file_name: *const u16,
+            dw_flags: u32,
+        ) -> i32;
+    }
+
+    let temp_path = wide_path(temp_path);
+    let path = wide_path(path);
+    // SAFETY: Both paths are null-terminated UTF-16 buffers that live for this
+    // call. MOVEFILE_REPLACE_EXISTING asks Windows to replace the destination
+    // atomically, without deleting it before the replacement succeeds.
+    let result = unsafe {
+        MoveFileExW(
+            temp_path.as_ptr(),
+            path.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if result == 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn wide_path(path: &Path) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+
+    path.as_os_str().encode_wide().chain(Some(0)).collect()
 }
 
 fn env_variables_json(plaintext: &ItemPlaintextV1) -> BTreeMap<String, String> {
@@ -3792,6 +3838,26 @@ mod tests {
             std::fs::read_to_string(&path).unwrap(),
             "DATABASE_URL=new\n"
         );
+    }
+
+    #[test]
+    fn env_file_writer_preserves_destination_and_removes_temp_when_replace_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".env");
+        std::fs::create_dir(&path).unwrap();
+
+        let result = write_env_file(&path, "DATABASE_URL=new\n", true);
+
+        assert!(result.is_err());
+        assert!(path.is_dir());
+        let temp_prefix = ".env.";
+        assert!(std::fs::read_dir(dir.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(temp_prefix)
+        }));
     }
 
     #[cfg(unix)]
