@@ -1,4 +1,5 @@
 mod audit;
+mod conflicts;
 pub(crate) mod convert;
 mod devices;
 mod invites;

@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use rusqlite::{Connection, params, params_from_iter};
+use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 use umbra_core::VaultKind;
 
 use crate::error::CliError;
@@ -38,6 +38,19 @@ pub struct CachedItemRevision {
     pub key_generation: i64,
     pub author_user_id: Option<uuid::Uuid>,
     pub envelope: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CachedItemConflict {
+    pub conflict_id: uuid::Uuid,
+    pub vault_id: uuid::Uuid,
+    pub item_id: uuid::Uuid,
+    pub base_revision: i64,
+    pub current_revision: i64,
+    pub candidate_kind: String,
+    pub candidate_envelope: Option<serde_json::Value>,
+    pub author_user_id: Option<uuid::Uuid>,
+    pub state: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -212,6 +225,22 @@ impl LocalCache {
             )?;
         }
 
+        tx.execute(
+            "DELETE FROM item_conflicts WHERE vault_id = ?1",
+            params![changes.vault_id.to_string()],
+        )?;
+        for conflict in &changes.conflicts {
+            tx.execute(
+                "INSERT INTO item_conflicts (conflict_id,vault_id,item_id,base_revision,current_revision,candidate_kind,candidate_envelope_json,author_user_id,state,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                params![
+                    conflict.conflict_id.to_string(), conflict.vault_id.to_string(), conflict.item_id.to_string(),
+                    conflict.base_revision, conflict.current_revision, conflict.candidate_kind,
+                    conflict.candidate_envelope.as_ref().map(serde_json::to_string).transpose()?,
+                    conflict.author_user_id.map(|id| id.to_string()), conflict.state, now,
+                ],
+            )?;
+        }
+
         tx.commit()?;
         Ok(())
     }
@@ -222,6 +251,24 @@ impl LocalCache {
             params![vault_id.to_string(), item_id.to_string()],
         )?;
         Ok(())
+    }
+
+    pub fn list_item_conflicts(
+        &self,
+        vault_id: uuid::Uuid,
+    ) -> Result<Vec<CachedItemConflict>, CliError> {
+        let mut statement = self.connection.prepare("SELECT conflict_id,vault_id,item_id,base_revision,current_revision,candidate_kind,candidate_envelope_json,author_user_id,state FROM item_conflicts WHERE vault_id = ?1 ORDER BY conflict_id ASC")?;
+        let rows =
+            statement.query_map(params![vault_id.to_string()], cached_item_conflict_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(CliError::from)
+    }
+
+    pub fn item_conflict(
+        &self,
+        vault_id: uuid::Uuid,
+        conflict_id: uuid::Uuid,
+    ) -> Result<Option<CachedItemConflict>, CliError> {
+        self.connection.query_row("SELECT conflict_id,vault_id,item_id,base_revision,current_revision,candidate_kind,candidate_envelope_json,author_user_id,state FROM item_conflicts WHERE vault_id = ?1 AND conflict_id = ?2", params![vault_id.to_string(), conflict_id.to_string()], cached_item_conflict_from_row).optional().map_err(CliError::from)
     }
 
     pub fn upsert_item_revision(
@@ -564,6 +611,19 @@ impl LocalCache {
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY (vault_id, item_id, revision)
             );
+
+            CREATE TABLE IF NOT EXISTS item_conflicts (
+                conflict_id TEXT PRIMARY KEY,
+                vault_id TEXT NOT NULL,
+                item_id TEXT NOT NULL,
+                base_revision INTEGER NOT NULL,
+                current_revision INTEGER NOT NULL,
+                candidate_kind TEXT NOT NULL,
+                candidate_envelope_json TEXT,
+                author_user_id TEXT,
+                state TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             "#,
         )?;
         self.add_column_if_missing(
@@ -683,6 +743,33 @@ fn cached_item_revision_from_row(
         key_generation: row.get(4)?,
         author_user_id: author_user_id.map(parse_uuid).transpose()?,
         envelope: parse_json(envelope_json)?,
+    })
+}
+
+fn cached_item_conflict_from_row(
+    row: &rusqlite::Row<'_>,
+) -> Result<CachedItemConflict, rusqlite::Error> {
+    let candidate_envelope_json: Option<String> = row.get(6)?;
+    let author_user_id: Option<String> = row.get(7)?;
+    Ok(CachedItemConflict {
+        conflict_id: parse_uuid(row.get::<_, String>(0)?)?,
+        vault_id: parse_uuid(row.get::<_, String>(1)?)?,
+        item_id: parse_uuid(row.get::<_, String>(2)?)?,
+        base_revision: row.get(3)?,
+        current_revision: row.get(4)?,
+        candidate_kind: row.get(5)?,
+        candidate_envelope: candidate_envelope_json
+            .map(|value| serde_json::from_str(&value))
+            .transpose()
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    6,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?,
+        author_user_id: author_user_id.map(parse_uuid).transpose()?,
+        state: row.get(8)?,
     })
 }
 
@@ -848,6 +935,7 @@ mod tests {
                     key_generation: 2,
                 },
             ],
+            conflicts: vec![],
         };
 
         cache.apply_sync_changes(&changes).unwrap();
@@ -892,6 +980,7 @@ mod tests {
                     envelope: serde_json::json!({"wrapped": "latest"}),
                     key_generation: 2,
                 }],
+                conflicts: vec![],
             })
             .unwrap();
 
@@ -917,6 +1006,7 @@ mod tests {
                 items: vec![],
                 deleted_items: vec![],
                 key_wrappings: vec![],
+                conflicts: vec![],
             })
             .unwrap();
 
@@ -946,6 +1036,7 @@ mod tests {
                 }],
                 deleted_items: vec![],
                 key_wrappings: vec![],
+                conflicts: vec![],
             })
             .unwrap();
         assert_eq!(cache.list_latest_item_revisions(vault_id).unwrap().len(), 1);
@@ -958,6 +1049,7 @@ mod tests {
                 items: vec![],
                 deleted_items: vec![item_id],
                 key_wrappings: vec![],
+                conflicts: vec![],
             })
             .unwrap();
 
@@ -973,5 +1065,51 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn sync_replaces_open_conflicts_without_plaintext() {
+        let mut cache = LocalCache::open_in_memory("conflicts").unwrap();
+        let vault_id = uuid::Uuid::new_v4();
+        let conflict_id = uuid::Uuid::new_v4();
+        let item_id = uuid::Uuid::new_v4();
+        cache
+            .apply_sync_changes(&umbra_protocol::VaultSyncChanges {
+                vault_id,
+                latest_vault_revision: 2,
+                latest_access_revision: 1,
+                items: vec![],
+                deleted_items: vec![],
+                key_wrappings: vec![],
+                conflicts: vec![umbra_protocol::ItemConflictResponse {
+                    conflict_id,
+                    vault_id,
+                    item_id,
+                    base_revision: 1,
+                    current_revision: 2,
+                    candidate_kind: "update".to_owned(),
+                    candidate_envelope: Some(serde_json::json!({"ciphertext":"sealed"})),
+                    author_user_id: None,
+                    state: "open".to_owned(),
+                }],
+            })
+            .unwrap();
+        let conflict = cache.item_conflict(vault_id, conflict_id).unwrap().unwrap();
+        assert_eq!(
+            conflict.candidate_envelope,
+            Some(serde_json::json!({"ciphertext":"sealed"}))
+        );
+        cache
+            .apply_sync_changes(&umbra_protocol::VaultSyncChanges {
+                vault_id,
+                latest_vault_revision: 2,
+                latest_access_revision: 1,
+                items: vec![],
+                deleted_items: vec![],
+                key_wrappings: vec![],
+                conflicts: vec![],
+            })
+            .unwrap();
+        assert!(cache.list_item_conflicts(vault_id).unwrap().is_empty());
     }
 }

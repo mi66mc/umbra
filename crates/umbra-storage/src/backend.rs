@@ -3,10 +3,11 @@ use uuid::Uuid;
 
 use crate::{
     AcceptVaultInvite, AppendAuditLog, ApprovePendingDevice, AuditLogRecord, CreateDevice,
-    CreateEncryptedItem, CreateItemRevision, CreateOrg, CreateRecoveryChallenge, CreateSession,
-    CreateUser, CreateVault, CreateVaultInvite, CreateVaultKeyWrapping, DeleteItem,
-    DeletedItemRecord, DeviceRecord, FinishVaultKeyRotation, ItemRevisionRecord, OrgMemberRecord,
-    OrgRecord, PendingVaultInviteRecord, PostgresStorage, RecoveryChallengeRecord,
+    CreateEncryptedItem, CreateItemConflict, CreateItemRevision, CreateOrg,
+    CreateRecoveryChallenge, CreateSession, CreateUser, CreateVault, CreateVaultInvite,
+    CreateVaultKeyWrapping, DeleteItem, DeletedItemRecord, DeviceRecord, FinishVaultKeyRotation,
+    ItemConflictRecord, ItemRevisionRecord, OrgMemberRecord, OrgRecord, PendingVaultInviteRecord,
+    PostgresStorage, RecoveryChallengeRecord, ResolveItemConflict, ResolvedItemConflictRecord,
     RotationStatusRecord, SessionRecord, StorageError, UpsertOrgMember, UpsertUserAuth,
     UpsertVaultMember, UserAuthRecord, UserRecord, VaultInviteRecord, VaultKeyWrappingRecord,
     VaultMemberRecord, VaultRecord, VaultSyncStatusRecord,
@@ -167,6 +168,23 @@ pub trait StorageBackend: Send + Sync {
         vault_id: VaultId,
         since_vault_revision: i64,
     ) -> Result<Vec<ItemRevisionRecord>, StorageError>;
+    async fn create_item_conflict(
+        &self,
+        input: CreateItemConflict,
+    ) -> Result<ItemConflictRecord, StorageError>;
+    async fn list_open_item_conflicts(
+        &self,
+        vault_id: VaultId,
+    ) -> Result<Vec<ItemConflictRecord>, StorageError>;
+    async fn find_item_conflict(
+        &self,
+        vault_id: VaultId,
+        conflict_id: Uuid,
+    ) -> Result<ItemConflictRecord, StorageError>;
+    async fn resolve_item_conflict(
+        &self,
+        input: ResolveItemConflict,
+    ) -> Result<ResolvedItemConflictRecord, StorageError>;
 
     async fn append_audit_log(&self, input: AppendAuditLog)
     -> Result<AuditLogRecord, StorageError>;
@@ -475,6 +493,35 @@ impl StorageBackend for PostgresStorage {
         since_vault_revision: i64,
     ) -> Result<Vec<ItemRevisionRecord>, StorageError> {
         PostgresStorage::list_item_revisions_since(self, vault_id, since_vault_revision).await
+    }
+
+    async fn create_item_conflict(
+        &self,
+        input: CreateItemConflict,
+    ) -> Result<ItemConflictRecord, StorageError> {
+        PostgresStorage::create_item_conflict(self, input).await
+    }
+
+    async fn list_open_item_conflicts(
+        &self,
+        vault_id: VaultId,
+    ) -> Result<Vec<ItemConflictRecord>, StorageError> {
+        PostgresStorage::list_open_item_conflicts(self, vault_id).await
+    }
+
+    async fn find_item_conflict(
+        &self,
+        vault_id: VaultId,
+        conflict_id: Uuid,
+    ) -> Result<ItemConflictRecord, StorageError> {
+        PostgresStorage::find_item_conflict(self, vault_id, conflict_id).await
+    }
+
+    async fn resolve_item_conflict(
+        &self,
+        input: ResolveItemConflict,
+    ) -> Result<ResolvedItemConflictRecord, StorageError> {
+        PostgresStorage::resolve_item_conflict(self, input).await
     }
 
     async fn append_audit_log(
@@ -803,6 +850,35 @@ impl StorageBackend for crate::sqlite::SqliteStorage {
             since_vault_revision,
         )
         .await
+    }
+
+    async fn create_item_conflict(
+        &self,
+        input: CreateItemConflict,
+    ) -> Result<ItemConflictRecord, StorageError> {
+        crate::sqlite::SqliteStorage::create_item_conflict(self, input).await
+    }
+
+    async fn list_open_item_conflicts(
+        &self,
+        vault_id: VaultId,
+    ) -> Result<Vec<ItemConflictRecord>, StorageError> {
+        crate::sqlite::SqliteStorage::list_open_item_conflicts(self, vault_id).await
+    }
+
+    async fn find_item_conflict(
+        &self,
+        vault_id: VaultId,
+        conflict_id: Uuid,
+    ) -> Result<ItemConflictRecord, StorageError> {
+        crate::sqlite::SqliteStorage::find_item_conflict(self, vault_id, conflict_id).await
+    }
+
+    async fn resolve_item_conflict(
+        &self,
+        input: ResolveItemConflict,
+    ) -> Result<ResolvedItemConflictRecord, StorageError> {
+        crate::sqlite::SqliteStorage::resolve_item_conflict(self, input).await
     }
 
     async fn append_audit_log(

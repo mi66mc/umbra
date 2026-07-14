@@ -3,6 +3,7 @@ use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
     middleware,
+    response::{IntoResponse, Response},
     routing::{delete, get, post},
 };
 use chrono::{Duration, Utc};
@@ -21,21 +22,23 @@ use umbra_protocol::{
     AcceptInviteRequest, AddOrgMemberRequest, AddVaultMemberRequest, ApprovalLookupRequest,
     ApproveDeviceRequest, CreateItemRequest, CreateOrgRequest, CreateOrgVaultRequest,
     CreateVaultRequest, DeleteItemRequest, DeviceBootstrapResponse, DeviceResponse,
-    InviteMemberRequest, InviteResponse, ItemRevisionResponse, OpaqueLoginFinishRequest,
-    OpaqueLoginFinishResponse, OpaqueLoginStartRequest, OpaqueLoginStartResponse,
-    OpaqueRegisterFinishRequest, OpaqueRegisterStartRequest, OpaqueRegisterStartResponse,
-    OrgMemberResponse, OrgResponse, PROTOCOL_VERSION, PendingDeviceResponse, PendingDeviceSummary,
-    PendingInviteResponse, RecoverTrustRequest, RecoverTrustResponse,
-    RecoveryChallengeStartRequest, RecoveryChallengeStartResponse, RejectInviteRequest,
+    InviteMemberRequest, InviteResponse, ItemConflictResponse, ItemRevisionResponse,
+    OpaqueLoginFinishRequest, OpaqueLoginFinishResponse, OpaqueLoginStartRequest,
+    OpaqueLoginStartResponse, OpaqueRegisterFinishRequest, OpaqueRegisterStartRequest,
+    OpaqueRegisterStartResponse, OrgMemberResponse, OrgResponse, PROTOCOL_VERSION,
+    PendingDeviceResponse, PendingDeviceSummary, PendingInviteResponse, RecoverTrustRequest,
+    RecoverTrustResponse, RecoveryChallengeStartRequest, RecoveryChallengeStartResponse,
+    RejectInviteRequest, ResolveItemConflictRequest, ResolveItemConflictResponse,
     RotateVaultKeyRequest, RotationStatusResponse, SyncRequest, SyncResponse, SyncStatusRequest,
     SyncStatusResponse, UpdateItemRequest, UserLookupRequest, UserLookupResponse,
     VaultKeyWrappingResponse, VaultMemberResponse, VaultResponse, VaultStatus, VaultSyncChanges,
 };
 use umbra_storage::{
     AcceptVaultInvite, AppendAuditLog, ApprovePendingDevice, CreateDevice, CreateEncryptedItem,
-    CreateItemRevision, CreateOrg, CreateRecoveryChallenge, CreateSession, CreateUser, CreateVault,
-    CreateVaultInvite, CreateVaultKeyWrapping, DeviceRecord, FinishVaultKeyRotation,
-    RotationItemRevisionInput, UpsertOrgMember, UpsertUserAuth, UpsertVaultMember,
+    CreateItemConflict, CreateItemRevision, CreateOrg, CreateRecoveryChallenge, CreateSession,
+    CreateUser, CreateVault, CreateVaultInvite, CreateVaultKeyWrapping, DeviceRecord,
+    FinishVaultKeyRotation, ResolveItemConflict, RotationItemRevisionInput, UpsertOrgMember,
+    UpsertUserAuth, UpsertVaultMember,
 };
 use uuid::Uuid;
 
@@ -108,6 +111,18 @@ pub(crate) fn router(state: AppState) -> Router {
         .route(
             "/api/v1/vaults/:vault_id/rotation-status",
             get(rotation_status),
+        )
+        .route(
+            "/api/v1/vaults/:vault_id/conflicts",
+            get(list_item_conflicts),
+        )
+        .route(
+            "/api/v1/vaults/:vault_id/conflicts/:conflict_id",
+            get(get_item_conflict),
+        )
+        .route(
+            "/api/v1/vaults/:vault_id/conflicts/:conflict_id/resolve",
+            post(resolve_item_conflict),
         )
         .route("/api/v1/vaults/:vault_id/rotate-key", post(rotate_key))
         .route_layer(middleware::from_fn_with_state(
@@ -1103,7 +1118,7 @@ async fn update_item(
     headers: HeaderMap,
     Path((vault_id, item_id)): Path<(Uuid, Uuid)>,
     Json(request): Json<UpdateItemRequest>,
-) -> Result<Json<ItemRevisionResponse>, ServerError> {
+) -> Result<Response, ServerError> {
     ensure_protocol(request.protocol_version)?;
     if request.vault_id != vault_id || request.item_id != item_id {
         return Err(ServerError::BadRequest("item path mismatch"));
@@ -1114,6 +1129,7 @@ async fn update_item(
         .user_id;
     ensure_vault_writer(&state, vault_id, user_id).await?;
 
+    let envelope = request.envelope;
     let revision = state
         .storage
         .create_item_revision(CreateItemRevision {
@@ -1122,11 +1138,38 @@ async fn update_item(
             vault_id,
             expected_revision: request.expected_revision,
             author_user_id: Some(user_id),
-            envelope: request.envelope,
+            envelope: envelope.clone(),
         })
-        .await?;
+        .await;
 
-    Ok(Json(item_revision_response(revision)))
+    let revision = match revision {
+        Ok(revision) => revision,
+        Err(umbra_storage::StorageError::Conflict) => {
+            let conflict = state
+                .storage
+                .create_item_conflict(CreateItemConflict {
+                    id: None,
+                    vault_id,
+                    item_id,
+                    base_revision: request.expected_revision,
+                    candidate_kind: "update".to_owned(),
+                    candidate_envelope: Some(envelope),
+                    author_user_id: Some(user_id),
+                })
+                .await?;
+            state.storage.append_audit_log(AppendAuditLog {
+                id: None, actor_user_id: Some(user_id), vault_id: Some(vault_id),
+                action: "item_conflict.create".to_owned(), target_type: Some("item_conflict".to_owned()), target_id: Some(conflict.id),
+                metadata: json!({"item_id": item_id, "base_revision": request.expected_revision, "current_revision": conflict.current_revision, "candidate_kind": "update"}),
+            }).await?;
+            return Ok(
+                (StatusCode::CONFLICT, Json(item_conflict_response(conflict))).into_response(),
+            );
+        }
+        Err(error) => return Err(error.into()),
+    };
+
+    Ok(Json(item_revision_response(revision)).into_response())
 }
 
 async fn delete_item(
@@ -1134,7 +1177,7 @@ async fn delete_item(
     headers: HeaderMap,
     Path((vault_id, item_id)): Path<(Uuid, Uuid)>,
     Json(request): Json<DeleteItemRequest>,
-) -> Result<StatusCode, ServerError> {
+) -> Result<Response, ServerError> {
     ensure_protocol(request.protocol_version)?;
     if request.vault_id != vault_id || request.item_id != item_id {
         return Err(ServerError::BadRequest("item path mismatch"));
@@ -1145,7 +1188,7 @@ async fn delete_item(
         .user_id;
     ensure_vault_writer(&state, vault_id, user_id).await?;
 
-    state
+    let deleted = state
         .storage
         .delete_item(umbra_storage::DeleteItem {
             item_id,
@@ -1153,9 +1196,130 @@ async fn delete_item(
             expected_revision: request.expected_revision,
             author_user_id: Some(user_id),
         })
-        .await?;
+        .await;
 
-    Ok(StatusCode::NO_CONTENT)
+    match deleted {
+        Ok(_) => Ok(StatusCode::NO_CONTENT.into_response()),
+        Err(umbra_storage::StorageError::Conflict) => {
+            let conflict = state
+                .storage
+                .create_item_conflict(CreateItemConflict {
+                    id: None,
+                    vault_id,
+                    item_id,
+                    base_revision: request.expected_revision,
+                    candidate_kind: "delete".to_owned(),
+                    candidate_envelope: None,
+                    author_user_id: Some(user_id),
+                })
+                .await?;
+            state.storage.append_audit_log(AppendAuditLog {
+                id: None, actor_user_id: Some(user_id), vault_id: Some(vault_id),
+                action: "item_conflict.create".to_owned(), target_type: Some("item_conflict".to_owned()), target_id: Some(conflict.id),
+                metadata: json!({"item_id": item_id, "base_revision": request.expected_revision, "current_revision": conflict.current_revision, "candidate_kind": "delete"}),
+            }).await?;
+            Ok((StatusCode::CONFLICT, Json(item_conflict_response(conflict))).into_response())
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+async fn list_item_conflicts(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(vault_id): Path<Uuid>,
+) -> Result<Json<Vec<ItemConflictResponse>>, ServerError> {
+    let user_id = authenticate_trusted_context(&state, &headers)
+        .await?
+        .user_id;
+    ensure_vault_member(&state, vault_id, user_id).await?;
+    let conflicts = state
+        .storage
+        .list_open_item_conflicts(vault_id)
+        .await?
+        .into_iter()
+        .map(item_conflict_response)
+        .collect();
+    Ok(Json(conflicts))
+}
+
+async fn get_item_conflict(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((vault_id, conflict_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<ItemConflictResponse>, ServerError> {
+    let user_id = authenticate_trusted_context(&state, &headers)
+        .await?
+        .user_id;
+    ensure_vault_member(&state, vault_id, user_id).await?;
+    Ok(Json(item_conflict_response(
+        state
+            .storage
+            .find_item_conflict(vault_id, conflict_id)
+            .await?,
+    )))
+}
+
+async fn resolve_item_conflict(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((vault_id, conflict_id)): Path<(Uuid, Uuid)>,
+    Json(request): Json<ResolveItemConflictRequest>,
+) -> Result<Json<ResolveItemConflictResponse>, ServerError> {
+    ensure_protocol(request.protocol_version)?;
+    if request.conflict_id != conflict_id {
+        return Err(ServerError::BadRequest("conflict id mismatch"));
+    }
+    let user_id = authenticate_trusted_context(&state, &headers)
+        .await?
+        .user_id;
+    ensure_vault_writer(&state, vault_id, user_id).await?;
+    let conflict = state
+        .storage
+        .find_item_conflict(vault_id, conflict_id)
+        .await?;
+    let envelope = match request.resolution.as_str() {
+        "remote" => None,
+        "local" if conflict.candidate_kind == "delete" => None,
+        "local" => Some(
+            conflict
+                .candidate_envelope
+                .clone()
+                .ok_or(ServerError::BadRequest(
+                    "update conflict has no candidate envelope",
+                ))?,
+        ),
+        "merge" if conflict.candidate_kind == "update" => Some(request.envelope.clone().ok_or(
+            ServerError::BadRequest("merge requires an encrypted envelope"),
+        )?),
+        "merge" => return Err(ServerError::BadRequest("delete conflicts cannot be merged")),
+        _ => return Err(ServerError::BadRequest("invalid conflict resolution")),
+    };
+    let resolved = state
+        .storage
+        .resolve_item_conflict(ResolveItemConflict {
+            vault_id,
+            conflict_id,
+            expected_current_revision: request.expected_current_revision,
+            resolution: request.resolution.clone(),
+            envelope,
+            author_user_id: Some(user_id),
+        })
+        .await?;
+    state.storage.append_audit_log(AppendAuditLog {
+        id: None,
+        actor_user_id: Some(user_id),
+        vault_id: Some(vault_id),
+        action: "item_conflict.resolve".to_owned(),
+        target_type: Some("item_conflict".to_owned()),
+        target_id: Some(conflict_id),
+        metadata: json!({"item_id": conflict.item_id, "base_revision": conflict.base_revision, "current_revision": request.expected_current_revision, "resolution": request.resolution}),
+    }).await?;
+    Ok(Json(ResolveItemConflictResponse {
+        conflict: item_conflict_response(resolved.conflict),
+        revision: resolved.revision.map(item_revision_response),
+        deleted_item_id: resolved.deleted.map(|record| record.item_id),
+    }))
 }
 
 async fn sync(
@@ -1194,6 +1358,13 @@ async fn sync(
             .into_iter()
             .map(|deleted| deleted.item_id)
             .collect();
+        let conflicts = state
+            .storage
+            .list_open_item_conflicts(cursor.vault_id)
+            .await?
+            .into_iter()
+            .map(item_conflict_response)
+            .collect();
 
         vaults.push(VaultSyncChanges {
             vault_id: cursor.vault_id,
@@ -1202,6 +1373,7 @@ async fn sync(
             items,
             deleted_items,
             key_wrappings,
+            conflicts,
         });
     }
 
@@ -1387,6 +1559,20 @@ fn item_revision_response(revision: umbra_storage::ItemRevisionRecord) -> ItemRe
         key_generation: revision.key_generation,
         author_user_id: revision.author_user_id,
         envelope: revision.envelope,
+    }
+}
+
+fn item_conflict_response(conflict: umbra_storage::ItemConflictRecord) -> ItemConflictResponse {
+    ItemConflictResponse {
+        conflict_id: conflict.id,
+        vault_id: conflict.vault_id,
+        item_id: conflict.item_id,
+        base_revision: conflict.base_revision,
+        current_revision: conflict.current_revision,
+        candidate_kind: conflict.candidate_kind,
+        candidate_envelope: conflict.candidate_envelope,
+        author_user_id: conflict.author_user_id,
+        state: conflict.state,
     }
 }
 

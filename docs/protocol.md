@@ -328,3 +328,14 @@ The client may persist:
 - item ids, vault ids, revision numbers, and key generation metadata.
 
 The server remains the source of truth. The cache is a local acceleration and offline inspection layer, not an authority for membership or writes. Online CLI reads compare cached revisions with sync status and full-sync only when item data or access metadata changed.
+# Conflitos de item
+
+`UpdateItemRequest` e `DeleteItemRequest` podem retornar HTTP `409` com `ItemConflictResponse`. A resposta inclui o ID da candidata, item, revisão-base, revisão atual, tipo, estado e envelope cifrado opcional; não inclui plaintext.
+
+`VaultSyncChanges.conflicts` contém todas as candidatas abertas da vault. As rotas autenticadas são:
+
+- `GET /api/v1/vaults/:vault_id/conflicts`
+- `GET /api/v1/vaults/:vault_id/conflicts/:conflict_id`
+- `POST /api/v1/vaults/:vault_id/conflicts/:conflict_id/resolve`
+
+O pedido de resolução inclui `expected_current_revision` e `resolution` (`remote`, `local` ou `merge`). `merge` traz somente o envelope final cifrado. A resolução de conflito de delete aceita apenas `remote` ou `local`.

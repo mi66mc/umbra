@@ -389,6 +389,35 @@ pub struct DeleteItemRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ItemConflictResponse {
+    pub conflict_id: uuid::Uuid,
+    pub vault_id: VaultId,
+    pub item_id: ItemId,
+    pub base_revision: RevisionId,
+    pub current_revision: RevisionId,
+    pub candidate_kind: String,
+    pub candidate_envelope: Option<serde_json::Value>,
+    pub author_user_id: Option<UserId>,
+    pub state: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolveItemConflictRequest {
+    pub protocol_version: u16,
+    pub conflict_id: uuid::Uuid,
+    pub expected_current_revision: RevisionId,
+    pub resolution: String,
+    pub envelope: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolveItemConflictResponse {
+    pub conflict: ItemConflictResponse,
+    pub revision: Option<ItemRevisionResponse>,
+    pub deleted_item_id: Option<ItemId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ItemRevisionResponse {
     pub item_id: ItemId,
     pub vault_id: VaultId,
@@ -467,6 +496,8 @@ pub struct VaultSyncChanges {
     pub items: Vec<ItemRevisionResponse>,
     pub deleted_items: Vec<ItemId>,
     pub key_wrappings: Vec<VaultKeyWrappingResponse>,
+    #[serde(default)]
+    pub conflicts: Vec<ItemConflictResponse>,
 }
 
 #[cfg(test)]
@@ -650,6 +681,7 @@ mod tests {
                     envelope: json!({"wrapped": true}),
                     key_generation: 1,
                 }],
+                conflicts: vec![],
             }],
         };
 
@@ -662,6 +694,24 @@ mod tests {
             encoded["vaults"][0]["key_wrappings"][0]["wrapping_type"],
             json!("user_public_key")
         );
+    }
+
+    #[test]
+    fn conflict_response_serializes_only_the_encrypted_candidate() {
+        let conflict = ItemConflictResponse {
+            conflict_id: Uuid::new_v4(),
+            vault_id: Uuid::new_v4(),
+            item_id: Uuid::new_v4(),
+            base_revision: 3,
+            current_revision: 5,
+            candidate_kind: "update".to_owned(),
+            candidate_envelope: Some(json!({"ciphertext":"sealed"})),
+            author_user_id: None,
+            state: "open".to_owned(),
+        };
+        let encoded = serde_json::to_value(&conflict).unwrap();
+        assert_eq!(encoded["candidate_envelope"]["ciphertext"], json!("sealed"));
+        assert!(encoded.get("plaintext").is_none());
     }
 
     #[test]

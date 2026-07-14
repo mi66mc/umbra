@@ -3,8 +3,8 @@ use umbra_core::{OrgRole, VaultRole};
 
 use crate::config::{CliConfig, ProfileConfig};
 use crate::{
-    AuthCommand, CacheCommand, Cli, Command, CryptoCommand, DeviceCommand, InviteCommand,
-    ItemCommand, ProfileCommand, SecretCommand, TokenCommand, VaultCommand,
+    AuthCommand, CacheCommand, Cli, Command, ConflictCommand, CryptoCommand, DeviceCommand,
+    InviteCommand, ItemCommand, ProfileCommand, SecretCommand, TokenCommand, VaultCommand,
 };
 
 #[test]
@@ -13,6 +13,30 @@ fn parses_global_json_flag() {
 
     assert!(cli.json);
     assert!(matches!(cli.command, Command::Vault(VaultCommand::List)));
+}
+
+#[test]
+fn parses_conflict_resolution_commands() {
+    let id = "00000000-0000-0000-0000-000000000001";
+    let cli = Cli::parse_from([
+        "umbra", "conflict", "resolve", id, "--use", "local", "--vault", "Personal",
+    ]);
+    assert!(
+        matches!(cli.command, Command::Conflict(ConflictCommand::Resolve { use_version: Some(ref value), merge_from: None, .. }) if value == "local")
+    );
+    let cli = Cli::parse_from([
+        "umbra",
+        "conflict",
+        "resolve",
+        id,
+        "--merge-from",
+        "remote",
+        "--field",
+        "user=alice",
+    ]);
+    assert!(
+        matches!(cli.command, Command::Conflict(ConflictCommand::Resolve { use_version: None, merge_from: Some(ref value), fields, .. }) if value == "remote" && fields == vec!["user=alice"])
+    );
 }
 
 #[test]

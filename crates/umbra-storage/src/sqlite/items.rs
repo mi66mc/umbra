@@ -80,6 +80,11 @@ impl SqliteStorage {
         if current_revision != input.expected_revision {
             return Err(StorageError::Conflict);
         }
+        let unresolved: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM item_conflicts WHERE vault_id = ?1 AND item_id = ?2 AND state = 'open')")
+            .bind(input.vault_id.to_string()).bind(input.item_id.to_string()).fetch_one(&mut *tx).await?;
+        if unresolved {
+            return Err(StorageError::Conflict);
+        }
 
         let next_revision = current_revision + 1;
         let vault_revision: i64 = sqlx::query_scalar(
@@ -133,6 +138,11 @@ impl SqliteStorage {
         .ok_or(StorageError::NotFound)?;
 
         if current_revision != input.expected_revision {
+            return Err(StorageError::Conflict);
+        }
+        let unresolved: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM item_conflicts WHERE vault_id = ?1 AND item_id = ?2 AND state = 'open')")
+            .bind(input.vault_id.to_string()).bind(input.item_id.to_string()).fetch_one(&mut *tx).await?;
+        if unresolved {
             return Err(StorageError::Conflict);
         }
 

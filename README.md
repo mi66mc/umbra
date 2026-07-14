@@ -122,6 +122,22 @@ The CLI encrypts item plaintext locally before upload. The server receives only 
 
 Deleting an item is a metadata operation on the server. The server marks the encrypted item as deleted, increments the vault revision, and future sync responses include the deleted item id so clients remove it from local encrypted cache.
 
+### Conflicts de sincronização
+
+Uma edição offline nunca substitui silenciosamente uma revisão mais nova. Quando uma atualização ou exclusão usa uma revisão-base divergente, o servidor preserva a tentativa como uma candidata de conflito e responde `409`. Candidatas e sincronização contêm somente envelopes cifrados e metadata de revisão; a comparação e qualquer merge acontecem no cliente com a vault desbloqueada.
+
+Enquanto houver conflito aberto, resolva-o explicitamente. Não há last-write-wins nem merge automático:
+
+```powershell
+umbra conflict list --vault Personal
+umbra conflict show <conflict-id> --vault Personal
+umbra conflict resolve <conflict-id> --use remote --vault Personal
+umbra conflict resolve <conflict-id> --use local --vault Personal
+umbra conflict resolve <conflict-id> --merge-from remote --field username=alice --notes "revisado" --vault Personal
+```
+
+`show` desbloqueia a vault e apresenta as versões remota e candidata; `list` não mostra plaintext. Para conflitos de exclusão, as únicas escolhas são manter a versão remota ou confirmar a exclusão local. A resolução fecha todas as candidatas abertas daquele item.
+
 `vault create` stores the first created vault as the profile default. `--vault Personal` resolves a vault name from the local cache populated by `umbra vault list` or `umbra vault create`. If a name is ambiguous, pass `--vault-id`.
 
 `umbra unlock` decrypts the account private key once, unwraps selected vault keys from the local encrypted-envelope cache, and writes an encrypted local unlock state. The random key for that unlock state is stored in the OS keychain. `umbra lock` removes both the keychain entry and the encrypted unlock state file.

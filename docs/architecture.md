@@ -225,3 +225,9 @@ item_revision
 ```
 
 A global `server_revision` can be added later if multi-vault sync needs it. The model must allow conflict records later, even if early behavior is conservative.
+
+### Conflitos cifrados
+
+`item_conflicts` preserva candidatos concorrentes por item: revisão-base, revisão atual, tipo (`update` ou `delete`), autor, estado e, para updates, o envelope cifrado. O servidor nunca abre esse envelope. A sincronização entrega conflitos abertos a todos os membros ativos e o cache local os substitui atomicamente a cada resposta de sync, removendo entradas que já foram resolvidas.
+
+Uma resolução usa a revisão atual como precondição. Manter remoto apenas fecha as candidatas; manter local promove o envelope candidato; merge manual recebe do cliente um novo envelope já cifrado. A transação fecha o conjunto de candidatas abertas do item e, quando aplicável, cria a próxima revisão ou a exclusão. Auditoria registra IDs, revisões e decisão, sem envelope nem plaintext.

@@ -187,6 +187,113 @@ async fn sqlite_item_deletion_flow() {
 }
 
 #[tokio::test]
+async fn sqlite_conflicts_preserve_candidates_and_resolve_them_together() {
+    let storage = crate::sqlite::SqliteStorage::connect("sqlite::memory:", 1)
+        .await
+        .unwrap();
+    umbra_migrations::run_sqlite(storage.pool()).await.unwrap();
+    let user = create_test_user_on(&storage, "conflict-owner@example.com").await;
+    let vault = storage
+        .create_vault(CreateVault {
+            id: None,
+            org_id: None,
+            name: "Conflicts".to_owned(),
+            kind: VaultKind::Personal,
+            created_by: Some(user.id),
+            crypto_policy: serde_json::json!({}),
+        })
+        .await
+        .unwrap();
+    let created = storage
+        .create_encrypted_item(CreateEncryptedItem {
+            item_id: None,
+            revision_id: None,
+            vault_id: vault.id,
+            kind: ItemKind::Login,
+            author_user_id: Some(user.id),
+            envelope: serde_json::json!({"ciphertext":"v1"}),
+        })
+        .await
+        .unwrap();
+    let current = storage
+        .create_item_revision(CreateItemRevision {
+            revision_id: None,
+            item_id: created.item_id,
+            vault_id: vault.id,
+            expected_revision: 1,
+            author_user_id: Some(user.id),
+            envelope: serde_json::json!({"ciphertext":"v2"}),
+        })
+        .await
+        .unwrap();
+    let first = storage
+        .create_item_conflict(CreateItemConflict {
+            id: None,
+            vault_id: vault.id,
+            item_id: created.item_id,
+            base_revision: 1,
+            candidate_kind: "update".to_owned(),
+            candidate_envelope: Some(serde_json::json!({"ciphertext":"offline-a"})),
+            author_user_id: Some(user.id),
+        })
+        .await
+        .unwrap();
+    storage
+        .create_item_conflict(CreateItemConflict {
+            id: None,
+            vault_id: vault.id,
+            item_id: created.item_id,
+            base_revision: 1,
+            candidate_kind: "update".to_owned(),
+            candidate_envelope: Some(serde_json::json!({"ciphertext":"offline-b"})),
+            author_user_id: Some(user.id),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        storage
+            .list_open_item_conflicts(vault.id)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(matches!(
+        storage
+            .create_item_revision(CreateItemRevision {
+                revision_id: None,
+                item_id: created.item_id,
+                vault_id: vault.id,
+                expected_revision: current.revision,
+                author_user_id: Some(user.id),
+                envelope: serde_json::json!({"ciphertext":"blocked"}),
+            })
+            .await,
+        Err(StorageError::Conflict)
+    ));
+    let resolved = storage
+        .resolve_item_conflict(ResolveItemConflict {
+            vault_id: vault.id,
+            conflict_id: first.id,
+            expected_current_revision: current.revision,
+            resolution: "remote".to_owned(),
+            envelope: None,
+            author_user_id: Some(user.id),
+        })
+        .await
+        .unwrap();
+    assert_eq!(resolved.conflict.state, "resolved");
+    assert!(resolved.revision.is_none());
+    assert!(
+        storage
+            .list_open_item_conflicts(vault.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn sqlite_vault_invite_lifecycle() {
     let storage = crate::sqlite::SqliteStorage::connect("sqlite::memory:", 1)
         .await

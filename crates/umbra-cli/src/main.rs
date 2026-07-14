@@ -99,6 +99,8 @@ pub enum Command {
     Secret(SecretCommand),
     #[command(subcommand)]
     Env(EnvCommand),
+    #[command(subcommand)]
+    Conflict(ConflictCommand),
     Run {
         project_env: String,
         #[arg(long)]
@@ -131,6 +133,42 @@ pub enum ProfileCommand {
 #[derive(Debug, Subcommand)]
 pub enum CacheCommand {
     Status,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ConflictCommand {
+    List {
+        #[arg(long)]
+        vault_id: Option<VaultId>,
+        #[arg(long)]
+        vault: Option<String>,
+    },
+    Show {
+        conflict_id: uuid::Uuid,
+        #[arg(long)]
+        vault_id: Option<VaultId>,
+        #[arg(long)]
+        vault: Option<String>,
+    },
+    Resolve {
+        conflict_id: uuid::Uuid,
+        #[arg(long = "use", value_parser = ["local", "remote"])]
+        use_version: Option<String>,
+        #[arg(long, value_parser = ["local", "remote"])]
+        merge_from: Option<String>,
+        #[arg(long = "field")]
+        fields: Vec<String>,
+        #[arg(long = "remove-field")]
+        remove_fields: Vec<String>,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        notes: Option<String>,
+        #[arg(long)]
+        vault_id: Option<VaultId>,
+        #[arg(long)]
+        vault: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]

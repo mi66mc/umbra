@@ -310,6 +310,49 @@ pub struct ItemRevisionRecord {
 }
 
 #[derive(Debug, Clone)]
+pub struct CreateItemConflict {
+    pub id: Option<Uuid>,
+    pub vault_id: VaultId,
+    pub item_id: ItemId,
+    pub base_revision: RevisionId,
+    pub candidate_kind: String,
+    pub candidate_envelope: Option<Value>,
+    pub author_user_id: Option<UserId>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ItemConflictRecord {
+    pub id: Uuid,
+    pub vault_id: VaultId,
+    pub item_id: ItemId,
+    pub base_revision: RevisionId,
+    pub current_revision: RevisionId,
+    pub candidate_kind: String,
+    pub candidate_envelope: Option<Value>,
+    pub author_user_id: Option<UserId>,
+    pub state: String,
+    pub resolved_revision: Option<RevisionId>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolveItemConflict {
+    pub vault_id: VaultId,
+    pub conflict_id: Uuid,
+    pub expected_current_revision: RevisionId,
+    pub resolution: String,
+    pub envelope: Option<Value>,
+    pub author_user_id: Option<UserId>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedItemConflictRecord {
+    pub conflict: ItemConflictRecord,
+    pub revision: Option<ItemRevisionRecord>,
+    pub deleted: Option<DeletedItemRecord>,
+}
+
+#[derive(Debug, Clone)]
 pub struct RotationStatusRecord {
     pub vault_id: VaultId,
     pub current_key_generation: RevisionId,

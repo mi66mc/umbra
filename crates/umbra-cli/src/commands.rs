@@ -25,9 +25,10 @@ use umbra_protocol::{
     InviteMemberRequest, InviteResponse, ItemRevisionResponse, OrgMemberResponse, OrgResponse,
     PROTOCOL_VERSION, PendingDeviceSummary, PendingInviteResponse, RecoverTrustRequest,
     RecoverTrustResponse, RecoveryChallengeStartRequest, RecoveryChallengeStartResponse,
-    RejectInviteRequest, RotateVaultKeyRequest, RotationItemRevision, RotationStatusResponse,
-    RotationVaultKeyWrapping, SyncRequest, SyncResponse, UpdateItemRequest, UserLookupRequest,
-    UserLookupResponse, VaultMemberResponse, VaultResponse, VaultSyncChanges, VaultSyncCursor,
+    RejectInviteRequest, ResolveItemConflictRequest, ResolveItemConflictResponse,
+    RotateVaultKeyRequest, RotationItemRevision, RotationStatusResponse, RotationVaultKeyWrapping,
+    SyncRequest, SyncResponse, UpdateItemRequest, UserLookupRequest, UserLookupResponse,
+    VaultMemberResponse, VaultResponse, VaultSyncChanges, VaultSyncCursor,
 };
 use uuid::Uuid;
 
@@ -39,9 +40,9 @@ use crate::http::{PublicHttpClient, UmbraHttpClient};
 use crate::keys::DeviceSigningKey;
 use crate::output::{OutputMode, print_json};
 use crate::{
-    AuthCommand, CacheCommand, Command, CryptoCommand, DeviceCommand, EmergencyKitCommand,
-    EnvCommand, InviteCommand, ItemCommand, OrgCommand, ProfileCommand, SecretCommand, SyncCommand,
-    TokenCommand, VaultCommand,
+    AuthCommand, CacheCommand, Command, ConflictCommand, CryptoCommand, DeviceCommand,
+    EmergencyKitCommand, EnvCommand, InviteCommand, ItemCommand, OrgCommand, ProfileCommand,
+    SecretCommand, SyncCommand, TokenCommand, VaultCommand,
 };
 
 trait OutputModeExt {
@@ -66,6 +67,216 @@ pub async fn run(
     output: OutputMode,
 ) -> Result<(), CliError> {
     match command {
+        Command::Conflict(ConflictCommand::List { vault_id, vault }) => {
+            let profile = active_profile(&config)?;
+            require_login(profile)?;
+            let mut cache = crate::cache::LocalCache::open(&config.active_profile)?;
+            let vault_id =
+                resolve_vault_id_for_output(profile, &cache, vault_id, vault.as_deref(), output)?;
+            crate::sync::ensure_vault_synced(
+                profile,
+                &mut cache,
+                vault_id,
+                crate::sync::SyncMode::Always,
+            )
+            .await?;
+            let conflicts = cache.list_item_conflicts(vault_id)?;
+            if output.is_json() {
+                print_json(&conflicts)
+            } else {
+                let rows = conflicts
+                    .iter()
+                    .map(|conflict| {
+                        vec![
+                            conflict.conflict_id.to_string(),
+                            conflict.item_id.to_string(),
+                            conflict.base_revision.to_string(),
+                            conflict.current_revision.to_string(),
+                            conflict.candidate_kind.clone(),
+                            conflict.state.clone(),
+                        ]
+                    })
+                    .collect::<Vec<_>>();
+                crate::output::print_table(
+                    &["conflict_id", "item_id", "base", "current", "kind", "state"],
+                    &rows,
+                );
+                Ok(())
+            }
+        }
+        Command::Conflict(ConflictCommand::Show {
+            conflict_id,
+            vault_id,
+            vault,
+        }) => {
+            let profile = active_profile(&config)?;
+            require_login(profile)?;
+            let mut cache = crate::cache::LocalCache::open(&config.active_profile)?;
+            let vault_id =
+                resolve_vault_id_for_output(profile, &cache, vault_id, vault.as_deref(), output)?;
+            crate::sync::ensure_vault_synced(
+                profile,
+                &mut cache,
+                vault_id,
+                crate::sync::SyncMode::Always,
+            )
+            .await?;
+            let conflict = cache
+                .item_conflict(vault_id, conflict_id)?
+                .ok_or(CliError::Input("conflict not found in synced cache"))?;
+            let current = cache
+                .latest_item_revision(vault_id, conflict.item_id)?
+                .ok_or(CliError::Input("remote item is not in cache"))?;
+            let vault_key = unlock_vault_key(&config.active_profile, profile, &cache, vault_id)?;
+            let remote = decrypt_cached_item(&vault_key, &current)?;
+            let candidate = match conflict.candidate_envelope.clone() {
+                Some(envelope) => {
+                    let candidate_revision = crate::cache::CachedItemRevision {
+                        vault_id,
+                        item_id: conflict.item_id,
+                        revision: conflict.base_revision + 1,
+                        vault_revision: current.vault_revision,
+                        key_generation: current.key_generation,
+                        author_user_id: conflict.author_user_id,
+                        envelope,
+                    };
+                    Some(decrypt_cached_item(&vault_key, &candidate_revision)?.plaintext)
+                }
+                None => None,
+            };
+            if output.is_json() {
+                print_json(
+                    &serde_json::json!({"conflict": conflict, "remote": remote.plaintext, "candidate": candidate, "candidate_kind": conflict.candidate_kind}),
+                )
+            } else {
+                println!("conflict: {conflict_id}\nremote:");
+                render_item_plaintext(OutputMode::Human, conflict.item_id, &remote.plaintext)?;
+                if let Some(candidate) = candidate {
+                    println!("\ncandidate:");
+                    render_item_plaintext(OutputMode::Human, conflict.item_id, &candidate)?;
+                } else {
+                    println!("\ncandidate: delete");
+                }
+                Ok(())
+            }
+        }
+        Command::Conflict(ConflictCommand::Resolve {
+            conflict_id,
+            use_version,
+            merge_from,
+            fields,
+            remove_fields,
+            title,
+            notes,
+            vault_id,
+            vault,
+        }) => {
+            if use_version.is_some() == merge_from.is_some() {
+                return Err(CliError::Input("pass exactly one of --use or --merge-from"));
+            }
+            let profile = active_profile(&config)?;
+            require_login(profile)?;
+            let mut cache = crate::cache::LocalCache::open(&config.active_profile)?;
+            let vault_id =
+                resolve_vault_id_for_output(profile, &cache, vault_id, vault.as_deref(), output)?;
+            crate::sync::ensure_vault_synced(
+                profile,
+                &mut cache,
+                vault_id,
+                crate::sync::SyncMode::Always,
+            )
+            .await?;
+            let conflict = cache
+                .item_conflict(vault_id, conflict_id)?
+                .ok_or(CliError::Input("conflict not found in synced cache"))?;
+            let current = cache
+                .latest_item_revision(vault_id, conflict.item_id)?
+                .ok_or(CliError::Input("remote item is not in cache"))?;
+            let (resolution, envelope) = if let Some(choice) = use_version {
+                if choice == "remote" {
+                    ("remote".to_owned(), None)
+                } else if conflict.candidate_kind == "delete" {
+                    ("local".to_owned(), None)
+                } else {
+                    ("local".to_owned(), conflict.candidate_envelope.clone())
+                }
+            } else {
+                if conflict.candidate_kind == "delete" {
+                    return Err(CliError::Input(
+                        "a delete conflict supports only --use local or --use remote",
+                    ));
+                }
+                let vault_key =
+                    unlock_vault_key(&config.active_profile, profile, &cache, vault_id)?;
+                let mut source = if merge_from.as_deref() == Some("remote") {
+                    decrypt_cached_item(&vault_key, &current)?
+                } else {
+                    let envelope = conflict
+                        .candidate_envelope
+                        .clone()
+                        .ok_or(CliError::Input("candidate envelope missing"))?;
+                    let candidate_revision = crate::cache::CachedItemRevision {
+                        vault_id,
+                        item_id: conflict.item_id,
+                        revision: conflict.base_revision + 1,
+                        vault_revision: current.vault_revision,
+                        key_generation: current.key_generation,
+                        author_user_id: conflict.author_user_id,
+                        envelope,
+                    };
+                    decrypt_cached_item(&vault_key, &candidate_revision)?
+                };
+                if let Some(title) = title {
+                    source.plaintext.title = title;
+                }
+                if let Some(notes) = notes {
+                    source.plaintext.notes = Some(notes);
+                }
+                for (name, value) in parse_field_pairs(fields)? {
+                    crate::item_plaintext::set_plaintext_field(&mut source.plaintext, &name, value);
+                }
+                for name in remove_fields {
+                    crate::item_plaintext::remove_plaintext_field(&mut source.plaintext, &name);
+                }
+                (
+                    "merge".to_owned(),
+                    Some(encrypt_item_plaintext(
+                        vault_id,
+                        conflict.item_id,
+                        current.revision + 1,
+                        source.kind,
+                        &vault_key,
+                        &source.plaintext,
+                    )?),
+                )
+            };
+            let client = UmbraHttpClient::new(profile)?;
+            let response: ResolveItemConflictResponse = client
+                .post(
+                    &format!("/api/v1/vaults/{vault_id}/conflicts/{conflict_id}/resolve"),
+                    &ResolveItemConflictRequest {
+                        protocol_version: PROTOCOL_VERSION,
+                        conflict_id,
+                        expected_current_revision: current.revision,
+                        resolution,
+                        envelope,
+                    },
+                )
+                .await?;
+            crate::sync::ensure_vault_synced(
+                profile,
+                &mut cache,
+                vault_id,
+                crate::sync::SyncMode::Always,
+            )
+            .await?;
+            if output.is_json() {
+                print_json(&response)
+            } else {
+                println!("resolved conflict {conflict_id}");
+                Ok(())
+            }
+        }
         Command::Register {
             server,
             email,
