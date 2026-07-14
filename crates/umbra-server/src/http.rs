@@ -44,6 +44,7 @@ use crate::authz::{
     ensure_org_vault_creator, ensure_vault_admin, ensure_vault_member, ensure_vault_writer,
 };
 use crate::error::ServerError;
+use crate::rate_limit::public_rate_limit;
 use crate::signed_auth::auth_middleware;
 use crate::state::{AppState, MigrationPool, OpaqueCipherSuite, PendingLogin};
 use crate::util::{decode_b64, encode_b64, ensure_protocol, random_token, token_hash};
@@ -122,6 +123,10 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/api/v1/auth/login/start", post(auth_login_start))
         .route("/api/v1/auth/login/finish", post(auth_login_finish))
         .merge(protected)
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            public_rate_limit,
+        ))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

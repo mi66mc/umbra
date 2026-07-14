@@ -2168,6 +2168,7 @@ fn test_state_with_storage(storage: Storage) -> AppState {
         storage: Arc::new(storage),
         migration_pool: MigrationPool::Postgres(postgres_pool),
         pending_logins: Arc::new(Mutex::new(HashMap::new())),
+        rate_limiter: Arc::new(crate::rate_limit::RateLimiter::default()),
     }
 }
 

@@ -10,12 +10,16 @@ pub(crate) struct AppConfig {
     pub(crate) migrations: MigrationSettings,
     pub(crate) security: SecuritySettings,
     pub(crate) auth: AuthSettings,
+    #[serde(default)]
+    pub(crate) rate_limit: RateLimitSettings,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ServerSettings {
     pub(crate) bind: String,
     pub(crate) public_url: Option<String>,
+    #[serde(default)]
+    pub(crate) trusted_proxy_cidrs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,6 +48,14 @@ pub(crate) struct SecuritySettings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct RateLimitSettings {
+    pub(crate) registration_per_hour: u32,
+    pub(crate) auth_per_minute: u32,
+    pub(crate) authenticated_per_minute: u32,
+    pub(crate) write_per_minute: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct AuthSettings {
     pub(crate) opaque: OpaqueSettings,
 }
@@ -60,6 +72,7 @@ impl Default for AppConfig {
             server: ServerSettings {
                 bind: "127.0.0.1:8080".to_owned(),
                 public_url: None,
+                trusted_proxy_cidrs: Vec::new(),
             },
             database: DatabaseSettings {
                 backend: DatabaseBackend::Postgres,
@@ -79,7 +92,19 @@ impl Default for AppConfig {
                     allow_ephemeral_setup: false,
                 },
             },
+            rate_limit: RateLimitSettings {
+                registration_per_hour: 3,
+                auth_per_minute: 5,
+                authenticated_per_minute: 120,
+                write_per_minute: 30,
+            },
         }
+    }
+}
+
+impl Default for RateLimitSettings {
+    fn default() -> Self {
+        AppConfig::default().rate_limit
     }
 }
 
@@ -105,6 +130,22 @@ pub(crate) fn load_config(path: Option<&str>) -> Result<AppConfig, ServerError> 
         .set_default(
             "auth.opaque.allow_ephemeral_setup",
             defaults.auth.opaque.allow_ephemeral_setup,
+        )?
+        .set_default(
+            "rate_limit.registration_per_hour",
+            defaults.rate_limit.registration_per_hour,
+        )?
+        .set_default(
+            "rate_limit.auth_per_minute",
+            defaults.rate_limit.auth_per_minute,
+        )?
+        .set_default(
+            "rate_limit.authenticated_per_minute",
+            defaults.rate_limit.authenticated_per_minute,
+        )?
+        .set_default(
+            "rate_limit.write_per_minute",
+            defaults.rate_limit.write_per_minute,
         )?;
 
     if let Some(path) = path {

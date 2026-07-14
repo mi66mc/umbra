@@ -17,7 +17,12 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: Option<MigrateCommand>,
     },
-    Doctor,
+    Doctor {
+        #[arg(long)]
+        json: bool,
+        #[arg(long)]
+        strict: bool,
+    },
     Config {
         #[command(subcommand)]
         command: ConfigCommand,

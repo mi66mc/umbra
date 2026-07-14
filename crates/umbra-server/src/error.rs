@@ -34,6 +34,8 @@ pub(crate) enum ServerError {
     Forbidden,
     #[error("bad request: {0}")]
     BadRequest(&'static str),
+    #[error("unsafe production configuration: {0}")]
+    UnsafeConfiguration(String),
 }
 
 impl IntoResponse for ServerError {

@@ -3,6 +3,7 @@ mod cli;
 mod config;
 mod error;
 mod http;
+mod rate_limit;
 mod server;
 mod signed_auth;
 mod state;
@@ -34,7 +35,7 @@ async fn main() -> Result<(), ServerError> {
         Command::Migrate {
             command: Some(MigrateCommand::Status),
         } => migrate_status(config).await,
-        Command::Doctor => doctor(config).await,
+        Command::Doctor { json, strict } => doctor(config, json, strict).await,
         Command::Config {
             command: ConfigCommand::Print,
         } => {

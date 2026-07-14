@@ -9,6 +9,7 @@ use chrono::Utc;
 use umbra_core::DeviceState;
 use uuid::Uuid;
 
+use crate::rate_limit::check_authenticated;
 use crate::state::AppState;
 use crate::util::token_hash;
 use umbra_auth::{
@@ -58,6 +59,10 @@ pub(crate) async fn auth_middleware(
         } else {
             authenticate_signed(&state, &parts, &body_bytes).await?
         };
+
+    check_authenticated(&state, authenticated.device_id, &parts.method)
+        .await
+        .map_err(|_| StatusCode::TOO_MANY_REQUESTS)?;
 
     let user_header_value = authenticated
         .user_id

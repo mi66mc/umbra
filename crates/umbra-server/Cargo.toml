@@ -17,6 +17,7 @@ base64ct.workspace = true
 chrono.workspace = true
 clap.workspace = true
 config.workspace = true
+ipnet.workspace = true
 opaque-ke.workspace = true
 rand_core.workspace = true
 serde.workspace = true

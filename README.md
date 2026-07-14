@@ -49,6 +49,21 @@ Set it as:
 UMBRA__AUTH__OPAQUE__SERVER_SETUP=<generated-secret>
 ```
 
+## Production Operations
+
+Run the production gate before deployment or after restoring a backup:
+
+```bash
+umbra-server doctor --strict
+umbra-server migrate status
+```
+
+`doctor --json` is suitable for deployment automation. Strict mode rejects ephemeral or missing OPAQUE setup, automatic migrations, stale-migration bypasses, missing/insecure public URLs, and public binds without an HTTPS public URL. For a reverse proxy, configure only proxy networks you operate with `server.trusted_proxy_cidrs`; forwarded client IP headers are ignored for all other peers.
+
+Rate limits are local to each server instance: registration is limited per client IP per hour, OPAQUE authentication per client IP per minute, and authenticated traffic per device per minute. A restart resets these counters; multi-instance deployments need a shared limiter in front of Umbra.
+
+Back up PostgreSQL with `pg_dump` and validate restores into a separate database with `pg_restore`. For SQLite, stop Umbra before copying the database or use SQLite's consistent backup facility. Backups contain encrypted envelopes and operational metadata, never decrypted vault items or vault keys. After a restore, run migration status, `doctor --strict`, and `/health` plus `/ready`.
+
 ## Current CLI Happy Path
 
 This stage supports a developer remote flow with OPAQUE login, signed HTTP sessions, client-side vault key wrapping, encrypted item upload, sync, and cached decrypt:
