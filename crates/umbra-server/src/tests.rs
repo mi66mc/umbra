@@ -12,6 +12,7 @@ use opaque_ke::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use serial_test::serial;
+use sqlx::Row;
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::Mutex;
 use tower::ServiceExt;
@@ -937,6 +938,151 @@ async fn stale_update_returns_encrypted_conflict_candidate() {
             .get("plaintext")
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn conflict_audit_metadata_omits_envelopes_and_plaintext() {
+    let (state, sqlite_pool) = test_state_with_sqlite_and_pool().await;
+    let app = router(state);
+    let login = register_and_signed_login(
+        app.clone(),
+        "conflict-audit@example.com",
+        b"conflict audit password",
+        "conflict-audit",
+    )
+    .await;
+
+    let (status, vault): (StatusCode, VaultResponse) = signed_json_request(
+        app.clone(),
+        Method::POST,
+        "/api/v1/vaults",
+        login.auth("conflict-audit-create-vault"),
+        &CreateVaultRequest {
+            protocol_version: PROTOCOL_VERSION,
+            vault_id: None,
+            name: "Conflict Audit".to_owned(),
+            kind: VaultKind::Personal,
+            initial_key_wrapping: json!({"ciphertext": "owner-wrapping"}),
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, created): (StatusCode, ItemRevisionResponse) = signed_json_request(
+        app.clone(),
+        Method::POST,
+        &format!("/api/v1/vaults/{}/items", vault.vault_id),
+        login.auth("conflict-audit-create-item"),
+        &CreateItemRequest {
+            protocol_version: PROTOCOL_VERSION,
+            vault_id: vault.vault_id,
+            item_id: None,
+            kind: umbra_core::ItemKind::ApiKey,
+            envelope: json!({"ciphertext": "revision-one"}),
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, current): (StatusCode, ItemRevisionResponse) = signed_json_request(
+        app.clone(),
+        Method::PUT,
+        &format!(
+            "/api/v1/vaults/{}/items/{}",
+            vault.vault_id, created.item_id
+        ),
+        login.auth("conflict-audit-advance-item"),
+        &UpdateItemRequest {
+            protocol_version: PROTOCOL_VERSION,
+            vault_id: vault.vault_id,
+            item_id: created.item_id,
+            expected_revision: created.revision,
+            envelope: json!({"ciphertext": "revision-two"}),
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, conflict): (StatusCode, ItemConflictResponse) = signed_json_request(
+        app.clone(),
+        Method::PUT,
+        &format!(
+            "/api/v1/vaults/{}/items/{}",
+            vault.vault_id, created.item_id
+        ),
+        login.auth("conflict-audit-stale-update"),
+        &UpdateItemRequest {
+            protocol_version: PROTOCOL_VERSION,
+            vault_id: vault.vault_id,
+            item_id: created.item_id,
+            expected_revision: created.revision,
+            envelope: json!({"ciphertext": "candidate"}),
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    let (status, _resolved): (StatusCode, umbra_protocol::ResolveItemConflictResponse) =
+        signed_json_request(
+            app.clone(),
+            Method::POST,
+            &format!(
+                "/api/v1/vaults/{}/conflicts/{}/resolve",
+                vault.vault_id, conflict.conflict_id
+            ),
+            login.auth("conflict-audit-resolve"),
+            &ResolveItemConflictRequest {
+                protocol_version: PROTOCOL_VERSION,
+                conflict_id: conflict.conflict_id,
+                expected_current_revision: current.revision,
+                resolution: "remote".to_owned(),
+                envelope: None,
+            },
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let records = sqlx::query(
+        "SELECT action, metadata FROM audit_logs WHERE action IN (?1, ?2) ORDER BY action",
+    )
+    .bind("item_conflict.create")
+    .bind("item_conflict.resolve")
+    .fetch_all(&sqlite_pool)
+    .await
+    .unwrap();
+    assert_eq!(records.len(), 2);
+
+    let metadata_by_action: HashMap<String, serde_json::Value> = records
+        .into_iter()
+        .map(|record| {
+            (
+                record.get::<String, _>("action"),
+                serde_json::from_str(record.get::<String, _>("metadata").as_str()).unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        metadata_by_action.get("item_conflict.create"),
+        Some(&json!({
+            "item_id": created.item_id,
+            "base_revision": created.revision,
+            "current_revision": current.revision,
+            "candidate_kind": "update",
+        }))
+    );
+    assert_eq!(
+        metadata_by_action.get("item_conflict.resolve"),
+        Some(&json!({
+            "item_id": created.item_id,
+            "base_revision": created.revision,
+            "current_revision": current.revision,
+            "resolution": "remote",
+        }))
+    );
+    for metadata in metadata_by_action.values() {
+        assert!(metadata.get("envelope").is_none());
+        assert!(metadata.get("plaintext").is_none());
+    }
 }
 
 #[tokio::test]
@@ -2863,6 +3009,10 @@ fn test_state_with_storage(storage: Storage) -> AppState {
 }
 
 async fn test_state_with_sqlite() -> AppState {
+    test_state_with_sqlite_and_pool().await.0
+}
+
+async fn test_state_with_sqlite_and_pool() -> (AppState, sqlx::SqlitePool) {
     let mut config = AppConfig::default();
     config.database.backend = DatabaseBackend::Sqlite;
     config.database.url = "sqlite::memory:".to_owned();
@@ -2875,16 +3025,23 @@ async fn test_state_with_sqlite() -> AppState {
     let storage = crate::server::connect_storage(&config).await.unwrap();
     crate::server::run_migrations(&storage).await.unwrap();
     let migration_pool = storage.migration_pool();
+    let sqlite_pool = match &migration_pool {
+        MigrationPool::Sqlite(pool) => pool.clone(),
+        MigrationPool::Postgres(_) => unreachable!("sqlite test state must use SQLite"),
+    };
     let storage = storage.backend();
 
-    AppState {
-        opaque_server_setup: Arc::new(opaque_server_setup_from_config(&config).unwrap()),
-        config,
-        storage,
-        migration_pool,
-        pending_logins: Arc::new(Mutex::new(HashMap::new())),
-        rate_limiter: Arc::new(crate::rate_limit::RateLimiter::default()),
-    }
+    (
+        AppState {
+            opaque_server_setup: Arc::new(opaque_server_setup_from_config(&config).unwrap()),
+            config,
+            storage,
+            migration_pool,
+            pending_logins: Arc::new(Mutex::new(HashMap::new())),
+            rate_limiter: Arc::new(crate::rate_limit::RateLimiter::default()),
+        },
+        sqlite_pool,
+    )
 }
 
 async fn test_storage_without_migrations() -> Option<Storage> {
