@@ -187,7 +187,7 @@ async fn sqlite_item_deletion_flow() {
 }
 
 #[tokio::test]
-async fn sqlite_conflicts_preserve_candidates_and_resolve_them_together() {
+async fn sqlite_remote_conflict_resolution_advances_vault_revision() {
     let storage = crate::sqlite::SqliteStorage::connect("sqlite::memory:", 1)
         .await
         .unwrap();
@@ -271,6 +271,11 @@ async fn sqlite_conflicts_preserve_candidates_and_resolve_them_together() {
             .await,
         Err(StorageError::Conflict)
     ));
+    let vault_revision_before_resolution = storage
+        .find_vault_by_id(vault.id)
+        .await
+        .unwrap()
+        .vault_revision;
     let resolved = storage
         .resolve_item_conflict(ResolveItemConflict {
             vault_id: vault.id,
@@ -290,6 +295,172 @@ async fn sqlite_conflicts_preserve_candidates_and_resolve_them_together() {
             .await
             .unwrap()
             .is_empty()
+    );
+    assert!(
+        storage
+            .find_vault_by_id(vault.id)
+            .await
+            .unwrap()
+            .vault_revision
+            > vault_revision_before_resolution
+    );
+}
+
+#[tokio::test]
+async fn sqlite_local_update_conflict_resolution_creates_candidate_revision_and_closes_candidates()
+{
+    let storage = crate::sqlite::SqliteStorage::connect("sqlite::memory:", 1)
+        .await
+        .unwrap();
+    umbra_migrations::run_sqlite(storage.pool()).await.unwrap();
+    let user = create_test_user_on(&storage, "conflict-local-update@example.com").await;
+    let vault = storage
+        .create_vault(CreateVault {
+            id: None,
+            org_id: None,
+            name: "Local update conflicts".to_owned(),
+            kind: VaultKind::Personal,
+            created_by: Some(user.id),
+            crypto_policy: serde_json::json!({}),
+        })
+        .await
+        .unwrap();
+    let created = storage
+        .create_encrypted_item(CreateEncryptedItem {
+            item_id: None,
+            revision_id: None,
+            vault_id: vault.id,
+            kind: ItemKind::Login,
+            author_user_id: Some(user.id),
+            envelope: serde_json::json!({"ciphertext":"v1"}),
+        })
+        .await
+        .unwrap();
+    let current = storage
+        .create_item_revision(CreateItemRevision {
+            revision_id: None,
+            item_id: created.item_id,
+            vault_id: vault.id,
+            expected_revision: created.revision,
+            author_user_id: Some(user.id),
+            envelope: serde_json::json!({"ciphertext":"v2"}),
+        })
+        .await
+        .unwrap();
+    let candidate_envelope = serde_json::json!({"ciphertext":"candidate"});
+    let selected = storage
+        .create_item_conflict(CreateItemConflict {
+            id: None,
+            vault_id: vault.id,
+            item_id: created.item_id,
+            base_revision: created.revision,
+            candidate_kind: "update".to_owned(),
+            candidate_envelope: Some(candidate_envelope.clone()),
+            author_user_id: Some(user.id),
+        })
+        .await
+        .unwrap();
+    storage
+        .create_item_conflict(CreateItemConflict {
+            id: None,
+            vault_id: vault.id,
+            item_id: created.item_id,
+            base_revision: created.revision,
+            candidate_kind: "update".to_owned(),
+            candidate_envelope: Some(serde_json::json!({"ciphertext":"discarded"})),
+            author_user_id: Some(user.id),
+        })
+        .await
+        .unwrap();
+
+    let resolved = storage
+        .resolve_item_conflict(ResolveItemConflict {
+            vault_id: vault.id,
+            conflict_id: selected.id,
+            expected_current_revision: current.revision,
+            resolution: "local".to_owned(),
+            envelope: Some(candidate_envelope.clone()),
+            author_user_id: Some(user.id),
+        })
+        .await
+        .unwrap();
+
+    let revision = resolved.revision.unwrap();
+    assert_eq!(revision.revision, current.revision + 1);
+    assert_eq!(revision.envelope, candidate_envelope);
+    assert!(
+        storage
+            .list_open_item_conflicts(vault.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn sqlite_local_delete_conflict_resolution_returns_deleted_item_for_sync() {
+    let storage = crate::sqlite::SqliteStorage::connect("sqlite::memory:", 1)
+        .await
+        .unwrap();
+    umbra_migrations::run_sqlite(storage.pool()).await.unwrap();
+    let user = create_test_user_on(&storage, "conflict-local-delete@example.com").await;
+    let vault = storage
+        .create_vault(CreateVault {
+            id: None,
+            org_id: None,
+            name: "Local delete conflicts".to_owned(),
+            kind: VaultKind::Personal,
+            created_by: Some(user.id),
+            crypto_policy: serde_json::json!({}),
+        })
+        .await
+        .unwrap();
+    let created = storage
+        .create_encrypted_item(CreateEncryptedItem {
+            item_id: None,
+            revision_id: None,
+            vault_id: vault.id,
+            kind: ItemKind::Login,
+            author_user_id: Some(user.id),
+            envelope: serde_json::json!({"ciphertext":"v1"}),
+        })
+        .await
+        .unwrap();
+    let selected = storage
+        .create_item_conflict(CreateItemConflict {
+            id: None,
+            vault_id: vault.id,
+            item_id: created.item_id,
+            base_revision: created.revision,
+            candidate_kind: "delete".to_owned(),
+            candidate_envelope: None,
+            author_user_id: Some(user.id),
+        })
+        .await
+        .unwrap();
+
+    let resolved = storage
+        .resolve_item_conflict(ResolveItemConflict {
+            vault_id: vault.id,
+            conflict_id: selected.id,
+            expected_current_revision: created.revision,
+            resolution: "local".to_owned(),
+            envelope: None,
+            author_user_id: Some(user.id),
+        })
+        .await
+        .unwrap();
+
+    let deleted = resolved.deleted.unwrap();
+    assert_eq!(deleted.item_id, created.item_id);
+    assert_eq!(deleted.vault_id, vault.id);
+    assert!(
+        storage
+            .list_deleted_item_ids_since(vault.id, created.vault_revision)
+            .await
+            .unwrap()
+            .iter()
+            .any(|record| record.item_id == created.item_id)
     );
 }
 
