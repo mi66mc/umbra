@@ -842,10 +842,11 @@ async fn owner_can_create_update_and_sync_item_revisions() {
 #[tokio::test]
 #[serial(postgres)]
 async fn stale_update_returns_encrypted_conflict_candidate() {
-    let Some(storage) = fresh_test_storage().await else {
-        return;
+    let app = if let Some(storage) = fresh_test_storage().await {
+        router(test_state_with_storage(storage))
+    } else {
+        router(test_state_with_sqlite().await)
     };
-    let app = router(test_state_with_storage(storage));
     let login = register_and_signed_login(
         app.clone(),
         "conflict-update@example.com",
@@ -1205,10 +1206,11 @@ async fn two_devices_converge_after_conflict_resolution() {
 #[tokio::test]
 #[serial(postgres)]
 async fn conflict_authorization_delete_contract_and_sync_convergence() {
-    let Some(storage) = fresh_test_storage().await else {
-        return;
+    let app = if let Some(storage) = fresh_test_storage().await {
+        router(test_state_with_storage(storage))
+    } else {
+        router(test_state_with_sqlite().await)
     };
-    let app = router(test_state_with_storage(storage));
     let owner = register_and_signed_login(
         app.clone(),
         "conflict-owner@example.com",

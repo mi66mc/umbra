@@ -68,6 +68,7 @@ struct ConflictListEntry {
     base_revision: i64,
     current_revision: i64,
     candidate_kind: String,
+    author_user_id: Option<Uuid>,
     state: String,
 }
 
@@ -80,6 +81,7 @@ fn conflict_list_json(conflicts: &[crate::cache::CachedItemConflict]) -> Vec<Con
             base_revision: conflict.base_revision,
             current_revision: conflict.current_revision,
             candidate_kind: conflict.candidate_kind.clone(),
+            author_user_id: conflict.author_user_id,
             state: conflict.state.clone(),
         })
         .collect()
@@ -95,6 +97,10 @@ fn conflict_list_table_rows(conflicts: &[crate::cache::CachedItemConflict]) -> V
                 conflict.base_revision.to_string(),
                 conflict.current_revision.to_string(),
                 conflict.candidate_kind,
+                conflict
+                    .author_user_id
+                    .map(|author| author.to_string())
+                    .unwrap_or_default(),
                 conflict.state,
             ]
         })
@@ -126,7 +132,15 @@ pub async fn run(
             } else {
                 let rows = conflict_list_table_rows(&conflicts);
                 crate::output::print_table(
-                    &["conflict_id", "item_id", "base", "current", "kind", "state"],
+                    &[
+                        "conflict_id",
+                        "item_id",
+                        "base",
+                        "current",
+                        "kind",
+                        "author_user_id",
+                        "state",
+                    ],
                     &rows,
                 );
                 Ok(())
@@ -3254,7 +3268,7 @@ mod tests {
             current_revision: 5,
             candidate_kind: "update".to_owned(),
             candidate_envelope: Some(serde_json::json!({"ciphertext": "AAECAwQFBgcICQ"})),
-            author_user_id: None,
+            author_user_id: Some(Uuid::parse_str("00000000-0000-0000-0000-000000000804").unwrap()),
             state: "open".to_owned(),
         };
 
@@ -3266,6 +3280,7 @@ mod tests {
                 "4".to_owned(),
                 "5".to_owned(),
                 "update".to_owned(),
+                "00000000-0000-0000-0000-000000000804".to_owned(),
                 "open".to_owned(),
             ]]
         );
@@ -3277,6 +3292,7 @@ mod tests {
                 "base_revision": 4,
                 "current_revision": 5,
                 "candidate_kind": "update",
+                "author_user_id": "00000000-0000-0000-0000-000000000804",
                 "state": "open",
             }])
         );
