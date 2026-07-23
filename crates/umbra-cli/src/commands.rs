@@ -3253,34 +3253,33 @@ mod tests {
             base_revision: 4,
             current_revision: 5,
             candidate_kind: "update".to_owned(),
-            candidate_envelope: Some(serde_json::json!({
-                "ciphertext": "sealed-candidate",
-                "plaintext": "secret-value"
-            })),
+            candidate_envelope: Some(serde_json::json!({"ciphertext": "AAECAwQFBgcICQ"})),
             author_user_id: None,
             state: "open".to_owned(),
         };
 
-        let human = conflict_list_table_rows(std::slice::from_ref(&conflict))
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>()
-            .join(" ");
-        let json =
-            serde_json::to_string(&conflict_list_json(std::slice::from_ref(&conflict))).unwrap();
-
-        for output in [&human, &json] {
-            assert!(output.contains(&conflict_id.to_string()));
-            assert!(output.contains(&item_id.to_string()));
-            assert!(output.contains('4'));
-            assert!(output.contains('5'));
-            assert!(output.contains("update"));
-            assert!(output.contains("open"));
-            assert!(!output.contains("candidate_envelope"));
-            assert!(!output.contains("ciphertext"));
-            assert!(!output.contains("sealed-candidate"));
-            assert!(!output.contains("secret-value"));
-        }
+        assert_eq!(
+            conflict_list_table_rows(std::slice::from_ref(&conflict)),
+            vec![vec![
+                conflict_id.to_string(),
+                item_id.to_string(),
+                "4".to_owned(),
+                "5".to_owned(),
+                "update".to_owned(),
+                "open".to_owned(),
+            ]]
+        );
+        assert_eq!(
+            serde_json::to_value(conflict_list_json(std::slice::from_ref(&conflict))).unwrap(),
+            serde_json::json!([{
+                "conflict_id": conflict_id,
+                "item_id": item_id,
+                "base_revision": 4,
+                "current_revision": 5,
+                "candidate_kind": "update",
+                "state": "open",
+            }])
+        );
     }
 
     #[test]
