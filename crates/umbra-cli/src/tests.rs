@@ -18,11 +18,22 @@ fn parses_global_json_flag() {
 #[test]
 fn parses_conflict_resolution_commands() {
     let id = "00000000-0000-0000-0000-000000000001";
+    let list = Cli::parse_from(["umbra", "conflict", "list"]);
+    assert!(matches!(
+        list.command,
+        Command::Conflict(ConflictCommand::List { .. })
+    ));
+
+    let show = Cli::parse_from(["umbra", "conflict", "show", id, "--vault", "Personal"]);
+    assert!(
+        matches!(show.command, Command::Conflict(ConflictCommand::Show { vault: Some(ref value), .. }) if value == "Personal")
+    );
+
     let cli = Cli::parse_from([
-        "umbra", "conflict", "resolve", id, "--use", "local", "--vault", "Personal",
+        "umbra", "conflict", "resolve", id, "--use", "remote", "--vault", "Personal",
     ]);
     assert!(
-        matches!(cli.command, Command::Conflict(ConflictCommand::Resolve { use_version: Some(ref value), merge_from: None, .. }) if value == "local")
+        matches!(cli.command, Command::Conflict(ConflictCommand::Resolve { use_version: Some(ref value), merge_from: None, .. }) if value == "remote")
     );
     let cli = Cli::parse_from([
         "umbra",
@@ -30,12 +41,18 @@ fn parses_conflict_resolution_commands() {
         "resolve",
         id,
         "--merge-from",
-        "remote",
+        "local",
         "--field",
-        "user=alice",
+        "NAME=VALUE",
+        "--remove-field",
+        "NAME",
+        "--title",
+        "T",
+        "--notes",
+        "N",
     ]);
     assert!(
-        matches!(cli.command, Command::Conflict(ConflictCommand::Resolve { use_version: None, merge_from: Some(ref value), fields, .. }) if value == "remote" && fields == vec!["user=alice"])
+        matches!(cli.command, Command::Conflict(ConflictCommand::Resolve { use_version: None, merge_from: Some(ref value), fields, remove_fields, title: Some(ref title), notes: Some(ref notes), .. }) if value == "local" && fields == vec!["NAME=VALUE"] && remove_fields == vec!["NAME"] && title == "T" && notes == "N")
     );
 }
 
