@@ -26,13 +26,13 @@ use umbra_protocol::{
     ItemRevisionResponse, OpaqueLoginFinishRequest, OpaqueLoginFinishResponse,
     OpaqueLoginStartRequest, OpaqueLoginStartResponse, OpaqueRegisterFinishRequest,
     OpaqueRegisterStartRequest, OpaqueRegisterStartResponse, OrgMemberResponse, OrgResponse,
-    PROTOCOL_VERSION, PendingDeviceResponse, PendingDeviceSummary, PendingInviteResponse,
-    RecoverTrustRequest, RecoverTrustResponse, RecoveryChallengeStartRequest,
-    RecoveryChallengeStartResponse, RejectInviteRequest, ResolveItemConflictRequest,
-    ResolveItemConflictResponse, RotateVaultKeyRequest, RotationStatusResponse,
-    SYNC_INTEGRITY_PROTOCOL_VERSION, SyncCheckpoint, SyncRequest, SyncResponse, SyncStatusRequest,
-    SyncStatusResponse, UpdateItemRequest, UserLookupRequest, UserLookupResponse,
-    VaultKeyWrappingResponse, VaultMemberResponse, VaultResponse, VaultStatus, VaultSyncChanges,
+    PendingDeviceResponse, PendingDeviceSummary, PendingInviteResponse, RecoverTrustRequest,
+    RecoverTrustResponse, RecoveryChallengeStartRequest, RecoveryChallengeStartResponse,
+    RejectInviteRequest, ResolveItemConflictRequest, ResolveItemConflictResponse,
+    RotateVaultKeyRequest, RotationStatusResponse, SYNC_INTEGRITY_PROTOCOL_VERSION, SyncCheckpoint,
+    SyncRequest, SyncResponse, SyncStatusRequest, SyncStatusResponse, UpdateItemRequest,
+    UserLookupRequest, UserLookupResponse, VaultKeyWrappingResponse, VaultMemberResponse,
+    VaultResponse, VaultStatus, VaultSyncChanges,
 };
 use umbra_storage::{
     AcceptVaultInvite, AppendAuditLog, ApprovePendingDevice, CreateDevice, CreateEncryptedItem,
@@ -1505,7 +1505,7 @@ async fn sync_status(
     }
 
     Ok(Json(SyncStatusResponse {
-        protocol_version: PROTOCOL_VERSION,
+        protocol_version: request.protocol_version,
         vaults,
     }))
 }

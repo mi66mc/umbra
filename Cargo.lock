@@ -3577,6 +3577,7 @@ dependencies = [
  "argon2",
  "base64ct",
  "chacha20poly1305",
+ "ed25519-dalek",
  "hkdf",
  "rand_core 0.6.4",
  "serde",
@@ -3585,6 +3586,8 @@ dependencies = [
  "subtle",
  "thiserror 2.0.18",
  "umbra-core",
+ "umbra-protocol",
+ "uuid",
  "x25519-dalek",
  "zeroize",
 ]

@@ -2,7 +2,6 @@ use base64ct::{Base64UrlUnpadded, Encoding};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use sha2::{Digest, Sha256};
 use umbra_protocol::SyncCheckpoint;
-use uuid::Uuid;
 
 const DOMAIN: &[u8] = b"UMBRA-SYNC-CHECKPOINT-V1";
 
@@ -89,6 +88,7 @@ pub fn state_commitment(entries: impl IntoIterator<Item = Vec<u8>>) -> String {
 mod tests {
     use super::*;
     use rand_core::OsRng;
+    use uuid::Uuid;
 
     #[test]
     fn signed_checkpoint_rejects_a_changed_revision() {
