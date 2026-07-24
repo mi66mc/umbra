@@ -684,7 +684,7 @@ fn parses_env_and_run_commands() {
             output,
             yes: true,
             ..
-        }) if project_env == "pulzar/dev" && output == std::path::PathBuf::from(".env")
+        }) if project_env == "pulzar/dev" && output == std::path::Path::new(".env")
     ));
 
     let run = Cli::parse_from([
@@ -1111,7 +1111,7 @@ fn parses_device_commands() {
         Command::Device(DeviceCommand::Recover {
             device_id: Some(_),
             emergency_kit: Some(path),
-        }) if path == std::path::PathBuf::from("umbra-emergency-kit.json")
+        }) if path == std::path::Path::new("umbra-emergency-kit.json")
     ));
 }
 

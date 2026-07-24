@@ -79,8 +79,8 @@ pub(crate) async fn public_rate_limit(
         "/api/v1/auth/login/start" | "/api/v1/auth/login/finish" => Some(LimitClass::Auth),
         _ => None,
     };
-    if let Some(class) = class {
-        if let Err(retry_after) = state
+    if let Some(class) = class
+        && let Err(retry_after) = state
             .rate_limiter
             .check(
                 client_key(request.extensions(), request.headers(), &state),
@@ -88,10 +88,9 @@ pub(crate) async fn public_rate_limit(
                 &state.config.rate_limit,
             )
             .await
-        {
-            tracing::warn!(decision = "rate_limited", class = ?class, "request rejected");
-            return too_many_requests(retry_after);
-        }
+    {
+        tracing::warn!(decision = "rate_limited", class = ?class, "request rejected");
+        return too_many_requests(retry_after);
     }
     next.run(request).await
 }
@@ -125,15 +124,14 @@ fn client_key(
         .get::<ConnectInfo<SocketAddr>>()
         .map(|value| value.0.ip());
     let trusted = direct.is_some_and(|ip| state.server_trusted_proxy(ip));
-    if trusted {
-        if let Some(ip) = headers
+    if trusted
+        && let Some(ip) = headers
             .get("x-forwarded-for")
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.split(',').next())
             .and_then(|value| value.trim().parse::<IpAddr>().ok())
-        {
-            return format!("ip:{ip}");
-        }
+    {
+        return format!("ip:{ip}");
     }
     direct
         .map(|ip| format!("ip:{ip}"))

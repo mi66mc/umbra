@@ -53,7 +53,7 @@ pub fn print_kv(rows: &[(&str, String)]) {
         .max()
         .unwrap_or(0);
     for (key, value) in rows {
-        println!("{key:width$}  {value}", width = width);
+        println!("{key:width$}  {value}");
     }
 }
 

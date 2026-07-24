@@ -2729,6 +2729,7 @@ async fn login_pending_device_existing_user(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn register_user_with_device(
     app: Router,
     email: &str,
