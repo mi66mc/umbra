@@ -55,6 +55,99 @@ async fn sqlite_migrations_create_required_schema() {
 }
 
 #[tokio::test]
+async fn sqlite_sync_checkpoint_persistence_is_opaque_idempotent_and_ordered() {
+    let storage = crate::sqlite::SqliteStorage::connect("sqlite::memory:", 1)
+        .await
+        .unwrap();
+    umbra_migrations::run_sqlite(storage.pool()).await.unwrap();
+
+    let columns: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info('sync_checkpoints')")
+            .fetch_all(storage.pool())
+            .await
+            .unwrap();
+    assert!(columns.contains(&"state_commitment".to_owned()));
+    assert!(columns.contains(&"checkpoint_hash".to_owned()));
+    assert!(columns.contains(&"signature".to_owned()));
+    assert!(!columns.iter().any(|column| column.contains("envelope")));
+    assert!(!columns.iter().any(|column| column.contains("plaintext")));
+
+    sync_checkpoint_persistence_on(&storage).await;
+}
+
+#[tokio::test]
+async fn sqlite_concurrent_duplicate_sync_checkpoints_are_idempotent() {
+    let database_url = format!(
+        "sqlite:file:checkpoint-concurrent-{}?mode=memory&cache=shared",
+        uuid::Uuid::new_v4()
+    );
+    let storage = crate::sqlite::SqliteStorage::connect(&database_url, 2)
+        .await
+        .unwrap();
+    umbra_migrations::run_sqlite(storage.pool()).await.unwrap();
+
+    let user = create_test_user_on(&storage, "checkpoint-concurrent@example.com").await;
+    let vault = storage
+        .create_vault(CreateVault {
+            id: None,
+            org_id: None,
+            name: "Concurrent Checkpoint Vault".to_owned(),
+            kind: VaultKind::Personal,
+            created_by: Some(user.id),
+            crypto_policy: serde_json::json!({}),
+        })
+        .await
+        .unwrap();
+    let device = storage
+        .create_device(CreateDevice {
+            id: None,
+            user_id: user.id,
+            name: "concurrent checkpoint device".to_owned(),
+            public_key: Some("concurrent-device-public-key".to_owned()),
+            fingerprint: "SHA256:checkpoint-concurrent".to_owned(),
+            state: DeviceState::Trusted,
+            approval_code_hash: None,
+            approval_expires_at: None,
+            bootstrap_public_key: None,
+        })
+        .await
+        .unwrap();
+    let checkpoint = CreateSyncCheckpoint {
+        vault_id: vault.id,
+        vault_revision: 1,
+        state_commitment: "state-commitment-concurrent".to_owned(),
+        checkpoint_hash: "checkpoint-hash-concurrent".to_owned(),
+        previous_checkpoint_hash: None,
+        author_device_id: device.id,
+        signature: "signature-concurrent".to_owned(),
+    };
+
+    let first_storage = storage.clone();
+    let second_storage = storage.clone();
+    let first_checkpoint = checkpoint.clone();
+    let (first, second) = tokio::join!(
+        async move { first_storage.append_sync_checkpoint(first_checkpoint).await },
+        async move { second_storage.append_sync_checkpoint(checkpoint).await },
+    );
+
+    assert!(first.is_ok(), "first concurrent append failed: {first:?}");
+    assert!(
+        second.is_ok(),
+        "second concurrent append failed: {second:?}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn postgres_sync_checkpoint_persistence_is_opaque_idempotent_and_ordered() {
+    let Some(storage) = fresh_test_storage().await else {
+        return;
+    };
+
+    sync_checkpoint_persistence_on(&storage).await;
+}
+
+#[tokio::test]
 async fn sqlite_users_devices_and_sessions_flow() {
     let storage = crate::sqlite::SqliteStorage::connect("sqlite::memory:", 1)
         .await
@@ -1142,6 +1235,132 @@ async fn vault_invite_lifecycle_on<S: StorageBackend + ?Sized>(storage: &S) {
         })
         .await;
     assert!(matches!(second_accept, Err(StorageError::NotFound)));
+}
+
+async fn sync_checkpoint_persistence_on<S: StorageBackend + ?Sized>(storage: &S) {
+    let user = create_test_user_on(storage, "checkpoint-owner@example.com").await;
+    let vault = storage
+        .create_vault(CreateVault {
+            id: None,
+            org_id: None,
+            name: "Checkpoint Vault".to_owned(),
+            kind: VaultKind::Personal,
+            created_by: Some(user.id),
+            crypto_policy: serde_json::json!({}),
+        })
+        .await
+        .unwrap();
+    let device = storage
+        .create_device(CreateDevice {
+            id: None,
+            user_id: user.id,
+            name: "checkpoint device".to_owned(),
+            public_key: Some("checkpoint-device-public-key".to_owned()),
+            fingerprint: "SHA256:checkpoint".to_owned(),
+            state: DeviceState::Trusted,
+            approval_code_hash: None,
+            approval_expires_at: None,
+            bootstrap_public_key: None,
+        })
+        .await
+        .unwrap();
+
+    let first_input = CreateSyncCheckpoint {
+        vault_id: vault.id,
+        vault_revision: 1,
+        state_commitment: "state-commitment-1".to_owned(),
+        checkpoint_hash: "checkpoint-hash-1".to_owned(),
+        previous_checkpoint_hash: None,
+        author_device_id: device.id,
+        signature: "signature-1".to_owned(),
+    };
+    let first = storage
+        .append_sync_checkpoint(first_input.clone())
+        .await
+        .unwrap();
+    assert_eq!(first.vault_id, vault.id);
+    assert_eq!(first.vault_revision, 1);
+    assert_eq!(first.state_commitment, "state-commitment-1");
+    assert_eq!(first.checkpoint_hash, "checkpoint-hash-1");
+    assert_eq!(first.previous_checkpoint_hash, None);
+    assert_eq!(first.author_device_id, device.id);
+    assert_eq!(first.signature, "signature-1");
+
+    let duplicate = storage.append_sync_checkpoint(first_input).await.unwrap();
+    assert_eq!(duplicate.checkpoint_hash, first.checkpoint_hash);
+    assert_eq!(duplicate.created_at, first.created_at);
+
+    let competing = storage
+        .append_sync_checkpoint(CreateSyncCheckpoint {
+            vault_id: vault.id,
+            vault_revision: 1,
+            state_commitment: "state-commitment-conflict".to_owned(),
+            checkpoint_hash: "checkpoint-hash-conflict".to_owned(),
+            previous_checkpoint_hash: None,
+            author_device_id: device.id,
+            signature: "signature-conflict".to_owned(),
+        })
+        .await;
+    assert!(matches!(
+        competing,
+        Err(StorageError::CheckpointConflict(CheckpointConflict {
+            vault_id,
+            vault_revision: 1,
+            ref existing_checkpoint_hash,
+            ref checkpoint_hash,
+        })) if vault_id == vault.id
+            && existing_checkpoint_hash == "checkpoint-hash-1"
+            && checkpoint_hash == "checkpoint-hash-conflict"
+    ));
+
+    let second = storage
+        .append_sync_checkpoint(CreateSyncCheckpoint {
+            vault_id: vault.id,
+            vault_revision: 2,
+            state_commitment: "state-commitment-2".to_owned(),
+            checkpoint_hash: "checkpoint-hash-2".to_owned(),
+            previous_checkpoint_hash: Some(first.checkpoint_hash.clone()),
+            author_device_id: device.id,
+            signature: "signature-2".to_owned(),
+        })
+        .await
+        .unwrap();
+
+    let all = storage
+        .list_sync_checkpoints_since(vault.id, 0)
+        .await
+        .unwrap();
+    assert_eq!(
+        all.iter()
+            .map(|checkpoint| checkpoint.vault_revision)
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    assert_eq!(all[1].checkpoint_hash, second.checkpoint_hash);
+
+    let after_first = storage
+        .list_sync_checkpoints_since(vault.id, 1)
+        .await
+        .unwrap();
+    assert_eq!(after_first.len(), 1);
+    assert_eq!(after_first[0].checkpoint_hash, second.checkpoint_hash);
+
+    assert_eq!(
+        storage
+            .find_sync_checkpoint(vault.id, 1)
+            .await
+            .unwrap()
+            .unwrap()
+            .checkpoint_hash,
+        first.checkpoint_hash
+    );
+    assert!(
+        storage
+            .find_sync_checkpoint(vault.id, 3)
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 async fn create_test_user_on<S: StorageBackend + ?Sized>(storage: &S, email: &str) -> UserRecord {

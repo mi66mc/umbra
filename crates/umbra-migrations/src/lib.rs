@@ -1,5 +1,7 @@
 use sqlx::{PgPool, SqlitePool, migrate::Migrator};
 
+pub const LATEST_MIGRATION_VERSION: i64 = 9;
+
 pub static POSTGRES_MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 pub static SQLITE_MIGRATOR: Migrator = sqlx::migrate!("./sqlite");
 
@@ -93,8 +95,8 @@ mod tests {
         let migrations = POSTGRES_MIGRATOR.iter().collect::<Vec<_>>();
         let sqlite_migrations = SQLITE_MIGRATOR.iter().collect::<Vec<_>>();
 
-        assert_eq!(migrations.len(), 8);
-        assert_eq!(sqlite_migrations.len(), 8);
+        assert_eq!(migrations.len(), 9);
+        assert_eq!(sqlite_migrations.len(), 9);
         assert!(migrations.iter().any(|migration| {
             migration.version == 4 && migration.description == "vault access revision"
         }));
@@ -124,6 +126,12 @@ mod tests {
         }));
         assert!(sqlite_migrations.iter().any(|migration| {
             migration.version == 8 && migration.description == "item conflicts"
+        }));
+        assert!(migrations.iter().any(|migration| {
+            migration.version == 9 && migration.description == "sync checkpoints"
+        }));
+        assert!(sqlite_migrations.iter().any(|migration| {
+            migration.version == 9 && migration.description == "sync checkpoints"
         }));
     }
 

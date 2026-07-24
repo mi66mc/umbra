@@ -1,4 +1,5 @@
 mod audit;
+mod checkpoints;
 mod conflicts;
 mod convert;
 mod devices;

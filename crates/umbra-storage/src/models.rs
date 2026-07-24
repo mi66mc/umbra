@@ -136,6 +136,37 @@ pub struct VaultSyncStatusRecord {
 }
 
 #[derive(Debug, Clone)]
+pub struct CreateSyncCheckpoint {
+    pub vault_id: VaultId,
+    pub vault_revision: RevisionId,
+    pub state_commitment: String,
+    pub checkpoint_hash: String,
+    pub previous_checkpoint_hash: Option<String>,
+    pub author_device_id: DeviceId,
+    pub signature: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct StoredSyncCheckpoint {
+    pub vault_id: VaultId,
+    pub vault_revision: RevisionId,
+    pub state_commitment: String,
+    pub checkpoint_hash: String,
+    pub previous_checkpoint_hash: Option<String>,
+    pub author_device_id: DeviceId,
+    pub signature: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckpointConflict {
+    pub vault_id: VaultId,
+    pub vault_revision: RevisionId,
+    pub existing_checkpoint_hash: String,
+    pub checkpoint_hash: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct CreateOrg {
     pub id: Option<OrgId>,
     pub name: String,

@@ -1,3 +1,5 @@
+use crate::CheckpointConflict;
+
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
     #[error("database error: {0}")]
@@ -6,6 +8,8 @@ pub enum StorageError {
     NotFound,
     #[error("record conflict")]
     Conflict,
+    #[error("sync checkpoint conflict")]
+    CheckpointConflict(CheckpointConflict),
     #[error("forbidden")]
     Forbidden,
     #[error("invalid database value for {field}: {value}")]
