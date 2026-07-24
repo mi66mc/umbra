@@ -5,6 +5,7 @@ use umbra_core::{
 };
 
 pub const PROTOCOL_VERSION: u16 = 1;
+pub const SYNC_INTEGRITY_PROTOCOL_VERSION: u16 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegisterRequest {
@@ -482,6 +483,20 @@ pub struct VaultSyncCursor {
     pub since_vault_revision: RevisionId,
 }
 
+/// Signed, ciphertext-safe evidence that binds a vault revision to its state.
+/// The signature is generated and verified by clients; the server only stores
+/// and transports this public metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncCheckpoint {
+    pub vault_id: VaultId,
+    pub vault_revision: RevisionId,
+    pub state_commitment: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_checkpoint_hash: Option<String>,
+    pub author_device_id: DeviceId,
+    pub signature: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SyncResponse {
     pub protocol_version: u16,
@@ -543,6 +558,27 @@ mod tests {
 
         let decoded: DeleteItemRequest = serde_json::from_value(encoded).unwrap();
         assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn sync_checkpoint_roundtrips_without_envelopes() {
+        let checkpoint = SyncCheckpoint {
+            vault_id: Uuid::parse_str("00000000-0000-0000-0000-000000000101").unwrap(),
+            vault_revision: 7,
+            state_commitment: "state-hash".to_owned(),
+            previous_checkpoint_hash: Some("previous-hash".to_owned()),
+            author_device_id: Uuid::parse_str("00000000-0000-0000-0000-000000000102").unwrap(),
+            signature: "signature".to_owned(),
+        };
+
+        let value = serde_json::to_value(&checkpoint).unwrap();
+        assert_eq!(value["vault_revision"], json!(7));
+        assert!(value.get("envelope").is_none());
+        assert!(value.get("plaintext").is_none());
+        assert_eq!(
+            serde_json::from_value::<SyncCheckpoint>(value).unwrap(),
+            checkpoint
+        );
     }
 
     #[test]
