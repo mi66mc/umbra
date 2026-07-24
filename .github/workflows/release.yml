@@ -29,6 +29,10 @@ jobs:
           test "$(git cat-file -t "${GITHUB_REF_NAME}")" = tag
           git verify-tag "${GITHUB_REF_NAME}"
           test "${GITHUB_REF_NAME#v}" = "$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "umbra-cli") | .version')"
+      - name: Block releases with known dependency vulnerabilities
+        run: |
+          cargo install --locked cargo-audit --version 0.22.2
+          cargo audit
 
   cli:
     needs: validate-tag
