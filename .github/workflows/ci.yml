@@ -35,10 +35,10 @@ jobs:
           toolchain: 1.88.0
           components: rustfmt, clippy
 
-      - name: Install PostgreSQL client
+      - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y postgresql-client
+          sudo apt-get install -y postgresql-client libdbus-1-dev pkg-config
 
       - name: Create test database
         run: |
