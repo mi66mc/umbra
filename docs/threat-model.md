@@ -36,6 +36,16 @@
 - Future WebAuthn/passkeys.
 - Future signed builds.
 
+## Sync rollback and equivocation
+
+Protocol v2 signed checkpoints help a client detect a server that returns an older vault revision, omits a required checkpoint, alters encrypted-state metadata, or shows different checkpoint histories at the same revision. The server remains zero-knowledge: it stores and transports signed public metadata and hashes, not signing keys, plaintext, vault keys, or raw encrypted envelopes.
+
+Detection is client-local. Each client keeps trusted checkpoint-device public keys and a verified checkpoint head. A server response cannot add or replace those trust anchors. Therefore a new client needs an authenticated local/device-to-device trust-anchor transfer; a valid signature by an unknown device does not establish trust.
+
+On a failed signature, untrusted/revoked signer, broken predecessor, revision rollback, commitment mismatch, or observed equivocation, the client preserves the signed evidence and quarantines the vault. It will not automatically reset its cursor, discard evidence, accept `--force-full`, or silently downgrade to v1. Forensic export is deliberately redacted to checkpoint metadata and findings, excluding ciphertext/envelopes, key wrappings, plaintext, keys, passwords, tokens, and private keys.
+
+This does not guarantee detection for every bootstrap or availability scenario. A client with no independently trusted anchor cannot distinguish a malicious first history from a genuine one. A server can deny service or withhold all updates, and a fully compromised trusted writer can sign harmful but internally consistent checkpoint state. Compare forensic evidence with another trusted device and protect client devices and trust-anchor transfer paths.
+
 ## Plain HTTP With Signed Requests
 
 Signed requests avoid sending reusable bearer tokens over plain HTTP and prevent basic replay.

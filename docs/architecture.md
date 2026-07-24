@@ -226,6 +226,16 @@ item_revision
 
 A global `server_revision` can be added later if multi-vault sync needs it. The model must allow conflict records later, even if early behavior is conservative.
 
+### Signed integrity checkpoints (protocol v2)
+
+Protocol v2 layers a checkpoint chain over the existing encrypted-revision sync model. For each checkpoint, a trusted vault writer signs a canonical, domain-separated payload containing the vault ID, vault revision, deterministic encrypted-state commitment, prior checkpoint hash, and author device ID. The commitment is calculated from encrypted-state metadata only: item IDs and revisions, deletion markers, conflict IDs/state/revisions, ciphertext-envelope hashes, and key-generation metadata.
+
+The client is the verifier and holds the trust anchors: durable trusted checkpoint-device public keys plus the last verified head for each vault. Server-provided device identities are authorization metadata only and never replace those local anchors. A new client must receive anchors through an authenticated local transfer; the server cannot establish first trust merely by returning a public key.
+
+The server persists and returns only opaque public checkpoint metadata: vault/device IDs, revision, state commitment, predecessor and checkpoint hashes, signature, and timestamps. Persistence is append-only. It detects competing checkpoint hashes at a vault revision, but it does not sign checkpoints or decide whether a signature is trusted. Audit records retain only IDs, revision, checkpoint hash, and author device ID.
+
+Before applying v2 sync changes, the client verifies signer trust and revocation, signature, predecessor chain, revision monotonicity, commitment, and same-revision consistency. A failure produces durable local evidence and quarantines the vault; normal sync and status must stop accepting data. There is intentionally no automatic reset, downgrade to v1, force-full override, or evidence deletion.
+
 ### Conflitos cifrados
 
 `item_conflicts` preserva candidatos concorrentes por item: revisão-base, revisão atual, tipo (`update` ou `delete`), autor, estado e, para updates, o envelope cifrado. O servidor nunca abre esse envelope. A sincronização entrega conflitos abertos a todos os membros ativos e o cache local os substitui atomicamente a cada resposta de sync, removendo entradas que já foram resolvidas.
