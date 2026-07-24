@@ -20,7 +20,7 @@ jobs:
           toolchain: 1.88.0
       - name: Install dependency policy tools
         run: |
-          cargo install --locked cargo-audit --version 0.21.2
+          cargo install --locked cargo-audit --version 0.22.2
           cargo install --locked cargo-deny --version 0.18.3
       - run: cargo audit
       - run: cargo deny check advisories bans sources
