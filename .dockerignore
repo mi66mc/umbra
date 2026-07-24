@@ -1,0 +1,11 @@
+.git
+.github
+.worktrees
+target
+*.db
+*.sqlite
+.env
+.env.*
+!/.env.example
+docs
+docker

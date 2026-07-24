@@ -1,0 +1,30 @@
+name: Reproducibility
+
+on:
+  pull_request:
+    paths: ["Cargo.lock", "Cargo.toml", "crates/**", ".github/workflows/reproducibility.yml"]
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  cli:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88.0
+      - name: Build twice from the locked dependency graph
+        shell: bash
+        run: |
+          set -euo pipefail
+          export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          export RUSTFLAGS="--remap-path-prefix=${GITHUB_WORKSPACE}=."
+          cargo build --locked --release -p umbra-cli
+          sha256sum target/release/umbra > first.sha256
+          cargo clean -p umbra-cli
+          cargo build --locked --release -p umbra-cli
+          sha256sum --check first.sha256

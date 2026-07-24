@@ -16,6 +16,14 @@ fn parses_global_json_flag() {
 }
 
 #[test]
+fn cli_exposes_the_package_version() {
+    let error = Cli::try_parse_from(["umbra", "--version"]).unwrap_err();
+
+    assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
+    assert!(error.to_string().contains(env!("CARGO_PKG_VERSION")));
+}
+
+#[test]
 fn parses_conflict_resolution_commands() {
     let id = "00000000-0000-0000-0000-000000000001";
     let list = Cli::parse_from(["umbra", "conflict", "list"]);

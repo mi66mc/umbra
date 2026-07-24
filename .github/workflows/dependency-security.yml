@@ -1,0 +1,26 @@
+name: Dependency security
+
+on:
+  pull_request:
+    paths: ["Cargo.lock", "Cargo.toml", "crates/**/Cargo.toml", "deny.toml"]
+  push:
+    branches: [main]
+    paths: ["Cargo.lock", "Cargo.toml", "crates/**/Cargo.toml", "deny.toml"]
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88.0
+      - name: Install dependency policy tools
+        run: |
+          cargo install --locked cargo-audit --version 0.21.2
+          cargo install --locked cargo-deny --version 0.18.3
+      - run: cargo audit
+      - run: cargo deny check advisories bans sources
