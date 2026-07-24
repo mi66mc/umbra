@@ -10,6 +10,8 @@ use subtle::ConstantTimeEq;
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+pub mod checkpoints;
+
 pub const ENVELOPE_VERSION_V1: u16 = 1;
 pub const DEFAULT_SUITE: &str = "UMBRA_XCHACHA20POLY1305_HKDFSHA256_V1";
 pub const XCHACHA20_POLY1305_ALG: &str = "xchacha20-poly1305";
