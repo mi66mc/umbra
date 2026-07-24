@@ -16,41 +16,46 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tower_http::trace::TraceLayer;
 use umbra_core::{DeviceState, MemberState, OrgRole, VaultKind, VaultRole};
-use umbra_crypto::{AadV1, UserPublicKey};
+use umbra_crypto::{AadV1, UserPublicKey, checkpoints::checkpoint_hash};
 use umbra_migrations::MigrationStatus;
 use umbra_protocol::{
     AcceptInviteRequest, AddOrgMemberRequest, AddVaultMemberRequest, ApprovalLookupRequest,
     ApproveDeviceRequest, CreateItemRequest, CreateOrgRequest, CreateOrgVaultRequest,
-    CreateVaultRequest, DeleteItemRequest, DeviceBootstrapResponse, DeviceResponse,
-    InviteMemberRequest, InviteResponse, ItemConflictResponse, ItemRevisionResponse,
-    OpaqueLoginFinishRequest, OpaqueLoginFinishResponse, OpaqueLoginStartRequest,
-    OpaqueLoginStartResponse, OpaqueRegisterFinishRequest, OpaqueRegisterStartRequest,
-    OpaqueRegisterStartResponse, OrgMemberResponse, OrgResponse, PROTOCOL_VERSION,
-    PendingDeviceResponse, PendingDeviceSummary, PendingInviteResponse, RecoverTrustRequest,
-    RecoverTrustResponse, RecoveryChallengeStartRequest, RecoveryChallengeStartResponse,
-    RejectInviteRequest, ResolveItemConflictRequest, ResolveItemConflictResponse,
-    RotateVaultKeyRequest, RotationStatusResponse, SyncRequest, SyncResponse, SyncStatusRequest,
+    CreateSyncCheckpointRequest, CreateVaultRequest, DeleteItemRequest, DeviceBootstrapResponse,
+    DeviceResponse, InviteMemberRequest, InviteResponse, ItemConflictResponse,
+    ItemRevisionResponse, OpaqueLoginFinishRequest, OpaqueLoginFinishResponse,
+    OpaqueLoginStartRequest, OpaqueLoginStartResponse, OpaqueRegisterFinishRequest,
+    OpaqueRegisterStartRequest, OpaqueRegisterStartResponse, OrgMemberResponse, OrgResponse,
+    PROTOCOL_VERSION, PendingDeviceResponse, PendingDeviceSummary, PendingInviteResponse,
+    RecoverTrustRequest, RecoverTrustResponse, RecoveryChallengeStartRequest,
+    RecoveryChallengeStartResponse, RejectInviteRequest, ResolveItemConflictRequest,
+    ResolveItemConflictResponse, RotateVaultKeyRequest, RotationStatusResponse,
+    SYNC_INTEGRITY_PROTOCOL_VERSION, SyncCheckpoint, SyncRequest, SyncResponse, SyncStatusRequest,
     SyncStatusResponse, UpdateItemRequest, UserLookupRequest, UserLookupResponse,
     VaultKeyWrappingResponse, VaultMemberResponse, VaultResponse, VaultStatus, VaultSyncChanges,
 };
 use umbra_storage::{
     AcceptVaultInvite, AppendAuditLog, ApprovePendingDevice, CreateDevice, CreateEncryptedItem,
     CreateItemConflict, CreateItemRevision, CreateOrg, CreateRecoveryChallenge, CreateSession,
-    CreateUser, CreateVault, CreateVaultInvite, CreateVaultKeyWrapping, DeviceRecord,
-    FinishVaultKeyRotation, ResolveItemConflict, RotationItemRevisionInput, UpsertOrgMember,
-    UpsertUserAuth, UpsertVaultMember,
+    CreateSyncCheckpoint, CreateUser, CreateVault, CreateVaultInvite, CreateVaultKeyWrapping,
+    DeviceRecord, FinishVaultKeyRotation, ResolveItemConflict, RotationItemRevisionInput,
+    StoredSyncCheckpoint, UpsertOrgMember, UpsertUserAuth, UpsertVaultMember,
 };
 use uuid::Uuid;
 
 use crate::authz::{
-    authenticate_context, authenticate_trusted_context, ensure_org_manager,
-    ensure_org_vault_creator, ensure_vault_admin, ensure_vault_member, ensure_vault_writer,
+    authenticate_context, authenticate_signed_trusted_context, authenticate_trusted_context,
+    ensure_org_manager, ensure_org_vault_creator, ensure_vault_admin, ensure_vault_member,
+    ensure_vault_writer,
 };
 use crate::error::ServerError;
 use crate::rate_limit::public_rate_limit;
 use crate::signed_auth::auth_middleware;
 use crate::state::{AppState, MigrationPool, OpaqueCipherSuite, PendingLogin};
-use crate::util::{decode_b64, encode_b64, ensure_protocol, random_token, token_hash};
+use crate::util::{
+    decode_b64, encode_b64, ensure_protocol, ensure_sync_integrity_protocol, random_token,
+    token_hash,
+};
 
 pub(crate) fn router(state: AppState) -> Router {
     let protected = Router::new()
@@ -88,6 +93,10 @@ pub(crate) fn router(state: AppState) -> Router {
         )
         .route("/api/v1/sync", post(sync))
         .route("/api/v1/sync/status", post(sync_status))
+        .route(
+            "/api/v1/vaults/:vault_id/checkpoints",
+            post(create_sync_checkpoint),
+        )
         .route("/api/v1/vaults/:vault_id/items", post(create_item))
         .route(
             "/api/v1/vaults/:vault_id/items/:item_id",
@@ -1323,16 +1332,86 @@ async fn resolve_item_conflict(
     }))
 }
 
+async fn create_sync_checkpoint(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(vault_id): Path<Uuid>,
+    Json(request): Json<CreateSyncCheckpointRequest>,
+) -> Result<Json<SyncCheckpoint>, ServerError> {
+    ensure_sync_integrity_protocol(request.protocol_version)?;
+    let checkpoint = request.checkpoint;
+    if checkpoint.vault_id != vault_id {
+        return Err(ServerError::BadRequest("checkpoint vault id mismatch"));
+    }
+
+    let context = authenticate_signed_trusted_context(&state, &headers).await?;
+    let device_id = context.device_id.ok_or(ServerError::Forbidden)?;
+    if checkpoint.author_device_id != device_id {
+        return Err(ServerError::BadRequest("checkpoint author device mismatch"));
+    }
+    ensure_vault_writer(&state, vault_id, context.user_id).await?;
+    if state
+        .storage
+        .find_vault_by_id(vault_id)
+        .await?
+        .vault_revision
+        != checkpoint.vault_revision
+    {
+        return Err(ServerError::BadRequest("checkpoint revision mismatch"));
+    }
+
+    // The server derives an opaque identifier for persistence and audit, but
+    // deliberately does not verify client signatures or make trust decisions.
+    let checkpoint_hash = checkpoint_hash(&checkpoint)
+        .map_err(|_| ServerError::BadRequest("invalid sync checkpoint"))?;
+    let stored = state
+        .storage
+        .append_sync_checkpoint(CreateSyncCheckpoint {
+            vault_id,
+            vault_revision: checkpoint.vault_revision,
+            state_commitment: checkpoint.state_commitment,
+            checkpoint_hash: checkpoint_hash.clone(),
+            previous_checkpoint_hash: checkpoint.previous_checkpoint_hash,
+            author_device_id: device_id,
+            signature: checkpoint.signature,
+        })
+        .await?;
+    state
+        .storage
+        .append_audit_log(AppendAuditLog {
+            id: None,
+            actor_user_id: Some(context.user_id),
+            vault_id: Some(vault_id),
+            action: "sync_checkpoint.create".to_owned(),
+            target_type: Some("sync_checkpoint".to_owned()),
+            target_id: None,
+            metadata: json!({
+                "vault_id": vault_id,
+                "revision": stored.vault_revision,
+                "checkpoint_hash": stored.checkpoint_hash,
+                "author_device_id": stored.author_device_id,
+            }),
+        })
+        .await?;
+
+    Ok(Json(sync_checkpoint_response(stored)))
+}
+
 async fn sync(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(request): Json<SyncRequest>,
 ) -> Result<Json<SyncResponse>, ServerError> {
     ensure_protocol(request.protocol_version)?;
-    let user_id = authenticate_trusted_context(&state, &headers)
-        .await?
-        .user_id;
+    let context = authenticate_trusted_context(&state, &headers).await?;
+    if request.protocol_version == SYNC_INTEGRITY_PROTOCOL_VERSION
+        && context.device_id != Some(request.device_id)
+    {
+        return Err(ServerError::BadRequest("sync device id mismatch"));
+    }
+    let user_id = context.user_id;
     let mut vaults = Vec::with_capacity(request.vaults.len());
+    let mut checkpoints = Vec::new();
 
     for cursor in request.vaults {
         ensure_vault_member(&state, cursor.vault_id, user_id).await?;
@@ -1367,6 +1446,17 @@ async fn sync(
             .map(item_conflict_response)
             .collect();
 
+        if request.protocol_version == SYNC_INTEGRITY_PROTOCOL_VERSION {
+            checkpoints.extend(
+                state
+                    .storage
+                    .list_sync_checkpoints_since(cursor.vault_id, cursor.since_vault_revision)
+                    .await?
+                    .into_iter()
+                    .map(sync_checkpoint_response),
+            );
+        }
+
         vaults.push(VaultSyncChanges {
             vault_id: cursor.vault_id,
             latest_vault_revision: vault.vault_revision,
@@ -1379,8 +1469,9 @@ async fn sync(
     }
 
     Ok(Json(SyncResponse {
-        protocol_version: PROTOCOL_VERSION,
+        protocol_version: request.protocol_version,
         vaults,
+        checkpoints,
     }))
 }
 
@@ -1497,6 +1588,17 @@ fn vault_response(vault: umbra_storage::VaultRecord) -> VaultResponse {
         access_revision: vault.access_revision,
         current_key_generation: vault.current_key_generation,
         needs_key_rotation: vault.needs_key_rotation,
+    }
+}
+
+fn sync_checkpoint_response(checkpoint: StoredSyncCheckpoint) -> SyncCheckpoint {
+    SyncCheckpoint {
+        vault_id: checkpoint.vault_id,
+        vault_revision: checkpoint.vault_revision,
+        state_commitment: checkpoint.state_commitment,
+        previous_checkpoint_hash: checkpoint.previous_checkpoint_hash,
+        author_device_id: checkpoint.author_device_id,
+        signature: checkpoint.signature,
     }
 }
 

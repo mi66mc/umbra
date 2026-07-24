@@ -23,18 +23,18 @@ use umbra_auth::{
 use umbra_core::{DeviceState, VaultKind, VaultRole};
 use umbra_protocol::{
     AcceptInviteRequest, AddVaultMemberRequest, ApprovalLookupRequest, ApproveDeviceRequest,
-    CreateItemRequest, CreateOrgRequest, CreateVaultRequest, DeleteItemRequest,
-    DeviceBootstrapResponse, DeviceRegisterRequest, DeviceResponse, InviteMemberRequest,
-    InviteResponse, ItemConflictResponse, ItemRevisionResponse, OpaqueLoginFinishRequest,
-    OpaqueLoginFinishResponse, OpaqueLoginStartRequest, OpaqueLoginStartResponse,
-    OpaqueRegisterFinishRequest, OpaqueRegisterStartRequest, OpaqueRegisterStartResponse,
-    OrgResponse, PROTOCOL_VERSION, PendingDeviceRequest, PendingDeviceSummary,
-    PendingInviteResponse, RecoverTrustRequest, RecoverTrustResponse,
+    CreateItemRequest, CreateOrgRequest, CreateSyncCheckpointRequest, CreateVaultRequest,
+    DeleteItemRequest, DeviceBootstrapResponse, DeviceRegisterRequest, DeviceResponse,
+    InviteMemberRequest, InviteResponse, ItemConflictResponse, ItemRevisionResponse,
+    OpaqueLoginFinishRequest, OpaqueLoginFinishResponse, OpaqueLoginStartRequest,
+    OpaqueLoginStartResponse, OpaqueRegisterFinishRequest, OpaqueRegisterStartRequest,
+    OpaqueRegisterStartResponse, OrgResponse, PROTOCOL_VERSION, PendingDeviceRequest,
+    PendingDeviceSummary, PendingInviteResponse, RecoverTrustRequest, RecoverTrustResponse,
     RecoveryChallengeStartRequest, RecoveryChallengeStartResponse, RegisterResponse,
     RejectInviteRequest, ResolveItemConflictRequest, RotateVaultKeyRequest, RotationStatusResponse,
-    RotationVaultKeyWrapping, SyncRequest, SyncResponse, SyncStatusRequest, SyncStatusResponse,
-    UpdateItemRequest, UserLookupRequest, UserLookupResponse, VaultMemberResponse, VaultResponse,
-    VaultStatusCursor, VaultSyncCursor,
+    RotationVaultKeyWrapping, SYNC_INTEGRITY_PROTOCOL_VERSION, SyncCheckpoint, SyncRequest,
+    SyncResponse, SyncStatusRequest, SyncStatusResponse, UpdateItemRequest, UserLookupRequest,
+    UserLookupResponse, VaultMemberResponse, VaultResponse, VaultStatusCursor, VaultSyncCursor,
 };
 use umbra_storage::Storage;
 use uuid::Uuid;
@@ -1638,6 +1638,165 @@ async fn conflict_authorization_delete_contract_and_sync_convergence() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn checkpoint_endpoint_requires_v2_and_a_signed_writer_device() {
+    let (state, sqlite_pool) = test_state_with_sqlite_and_pool().await;
+    let storage = state.storage.clone();
+    let app = router(state);
+    let writer = register_and_signed_login(
+        app.clone(),
+        "checkpoint-writer@example.com",
+        b"checkpoint writer password",
+        "checkpoint-writer",
+    )
+    .await;
+    let (status, vault): (StatusCode, VaultResponse) = signed_json_request(
+        app.clone(),
+        Method::POST,
+        "/api/v1/vaults",
+        writer.auth("checkpoint-create-vault"),
+        &CreateVaultRequest {
+            protocol_version: PROTOCOL_VERSION,
+            vault_id: None,
+            name: "Checkpoint vault".to_owned(),
+            kind: VaultKind::Personal,
+            initial_key_wrapping: json!({"ciphertext": "wrapped-key"}),
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, item): (StatusCode, ItemRevisionResponse) = signed_json_request(
+        app.clone(),
+        Method::POST,
+        &format!("/api/v1/vaults/{}/items", vault.vault_id),
+        writer.auth("checkpoint-create-item"),
+        &CreateItemRequest {
+            protocol_version: PROTOCOL_VERSION,
+            vault_id: vault.vault_id,
+            item_id: None,
+            kind: umbra_core::ItemKind::SecureNote,
+            envelope: json!({"ciphertext": "checkpoint-item"}),
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let checkpoint = SyncCheckpoint {
+        vault_id: vault.vault_id,
+        vault_revision: item.vault_revision,
+        state_commitment: encode_b64(&[7; 32]),
+        previous_checkpoint_hash: None,
+        author_device_id: writer.device_id,
+        signature: encode_b64(&[3; 64]),
+    };
+    let path = format!("/api/v1/vaults/{}/checkpoints", vault.vault_id);
+    let (status, _): (StatusCode, serde_json::Value) = signed_json_request(
+        app.clone(),
+        Method::POST,
+        &path,
+        writer.auth("checkpoint-v1-rejected"),
+        &CreateSyncCheckpointRequest {
+            protocol_version: PROTOCOL_VERSION,
+            checkpoint: checkpoint.clone(),
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, _): (StatusCode, serde_json::Value) = signed_json_request(
+        app.clone(),
+        Method::POST,
+        &path,
+        writer.auth("checkpoint-author-mismatch"),
+        &CreateSyncCheckpointRequest {
+            protocol_version: SYNC_INTEGRITY_PROTOCOL_VERSION,
+            checkpoint: SyncCheckpoint {
+                author_device_id: Uuid::new_v4(),
+                ..checkpoint.clone()
+            },
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, stored): (StatusCode, SyncCheckpoint) = signed_json_request(
+        app.clone(),
+        Method::POST,
+        &path,
+        writer.auth("checkpoint-v2-create"),
+        &CreateSyncCheckpointRequest {
+            protocol_version: SYNC_INTEGRITY_PROTOCOL_VERSION,
+            checkpoint: checkpoint.clone(),
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(stored, checkpoint);
+
+    let (status, sync): (StatusCode, SyncResponse) = signed_json_request(
+        app.clone(),
+        Method::POST,
+        "/api/v1/sync",
+        writer.auth("checkpoint-v2-sync"),
+        &SyncRequest {
+            protocol_version: SYNC_INTEGRITY_PROTOCOL_VERSION,
+            device_id: writer.device_id,
+            vaults: vec![VaultSyncCursor {
+                vault_id: vault.vault_id,
+                since_vault_revision: 0,
+            }],
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(sync.protocol_version, SYNC_INTEGRITY_PROTOCOL_VERSION);
+    assert_eq!(sync.checkpoints, vec![checkpoint.clone()]);
+    let transport = serde_json::to_string(&sync.checkpoints).unwrap();
+    assert!(!transport.contains("wrapped-key"));
+    assert!(!transport.contains("plaintext"));
+
+    let (status, _): (StatusCode, serde_json::Value) = signed_json_request(
+        app.clone(),
+        Method::POST,
+        "/api/v1/sync",
+        writer.auth("checkpoint-sync-device-mismatch"),
+        &SyncRequest {
+            protocol_version: SYNC_INTEGRITY_PROTOCOL_VERSION,
+            device_id: Uuid::new_v4(),
+            vaults: vec![],
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let audit_metadata: String = sqlx::query_scalar(
+        "SELECT metadata FROM audit_logs WHERE action = 'sync_checkpoint.create'",
+    )
+    .fetch_one(&sqlite_pool)
+    .await
+    .unwrap();
+    assert!(audit_metadata.contains("checkpoint_hash"));
+    assert!(audit_metadata.contains(&writer.device_id.to_string()));
+    assert!(!audit_metadata.contains(&checkpoint.signature));
+    assert!(!audit_metadata.contains("wrapped-key"));
+    assert!(!audit_metadata.contains("plaintext"));
+
+    storage.revoke_device(writer.device_id).await.unwrap();
+    let (status, _): (StatusCode, serde_json::Value) = signed_json_request(
+        app,
+        Method::POST,
+        &path,
+        writer.auth("checkpoint-revoked-device"),
+        &CreateSyncCheckpointRequest {
+            protocol_version: SYNC_INTEGRITY_PROTOCOL_VERSION,
+            checkpoint,
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]

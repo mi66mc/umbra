@@ -47,6 +47,7 @@ impl IntoResponse for ServerError {
             ServerError::MigrationsPending => StatusCode::SERVICE_UNAVAILABLE,
             ServerError::Storage(StorageError::NotFound) => StatusCode::NOT_FOUND,
             ServerError::Storage(StorageError::Conflict) => StatusCode::CONFLICT,
+            ServerError::Storage(StorageError::CheckpointConflict(_)) => StatusCode::CONFLICT,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         let body = Json(json!({ "error": self.to_string() }));

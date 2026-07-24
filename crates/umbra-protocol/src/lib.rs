@@ -7,6 +7,14 @@ use umbra_core::{
 pub const PROTOCOL_VERSION: u16 = 1;
 pub const SYNC_INTEGRITY_PROTOCOL_VERSION: u16 = 2;
 
+pub const fn is_supported_protocol_version(version: u16) -> bool {
+    matches!(version, PROTOCOL_VERSION | SYNC_INTEGRITY_PROTOCOL_VERSION)
+}
+
+pub const fn is_sync_integrity_protocol_version(version: u16) -> bool {
+    version == SYNC_INTEGRITY_PROTOCOL_VERSION
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegisterRequest {
     pub protocol_version: u16,
@@ -497,10 +505,22 @@ pub struct SyncCheckpoint {
     pub signature: String,
 }
 
+/// A client-authored, device-signed checkpoint. This endpoint is available
+/// only to protocol-v2 clients; the server persists it as opaque metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateSyncCheckpointRequest {
+    pub protocol_version: u16,
+    pub checkpoint: SyncCheckpoint,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SyncResponse {
     pub protocol_version: u16,
     pub vaults: Vec<VaultSyncChanges>,
+    /// Present only in protocol-v2 responses. Kept top-level so a checkpoint
+    /// history can be transported independently from ciphertext sync changes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checkpoints: Vec<SyncCheckpoint>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -579,6 +599,52 @@ mod tests {
             serde_json::from_value::<SyncCheckpoint>(value).unwrap(),
             checkpoint
         );
+    }
+
+    #[test]
+    fn v2_checkpoint_transport_is_explicit_and_v1_omits_it() {
+        let vault_id = Uuid::parse_str("00000000-0000-0000-0000-000000000101").unwrap();
+        let device_id = Uuid::parse_str("00000000-0000-0000-0000-000000000102").unwrap();
+        let checkpoint = SyncCheckpoint {
+            vault_id,
+            vault_revision: 7,
+            state_commitment: "state-hash".to_owned(),
+            previous_checkpoint_hash: Some("previous-hash".to_owned()),
+            author_device_id: device_id,
+            signature: "signature".to_owned(),
+        };
+        let request = CreateSyncCheckpointRequest {
+            protocol_version: SYNC_INTEGRITY_PROTOCOL_VERSION,
+            checkpoint: checkpoint.clone(),
+        };
+        let v2 = SyncResponse {
+            protocol_version: SYNC_INTEGRITY_PROTOCOL_VERSION,
+            vaults: vec![],
+            checkpoints: vec![checkpoint],
+        };
+        let v1 = SyncResponse {
+            protocol_version: PROTOCOL_VERSION,
+            vaults: vec![],
+            checkpoints: vec![],
+        };
+
+        let request_json = serde_json::to_value(&request).unwrap();
+        let v2_json = serde_json::to_value(&v2).unwrap();
+        let v1_json = serde_json::to_value(&v1).unwrap();
+
+        assert_eq!(
+            request_json["protocol_version"],
+            json!(SYNC_INTEGRITY_PROTOCOL_VERSION)
+        );
+        assert_eq!(
+            request_json["checkpoint"]["author_device_id"],
+            json!(device_id)
+        );
+        assert_eq!(v2_json["checkpoints"], json!([v2.checkpoints[0].clone()]));
+        assert!(v1_json.get("checkpoints").is_none());
+        assert!(v2_json.to_string().contains("state-hash"));
+        assert!(!v2_json.to_string().contains("plaintext"));
+        assert!(!v2_json.to_string().contains("envelope"));
     }
 
     #[test]
@@ -719,6 +785,7 @@ mod tests {
                 }],
                 conflicts: vec![],
             }],
+            checkpoints: vec![],
         };
 
         let encoded = serde_json::to_value(&response).unwrap();
