@@ -56,4 +56,13 @@ pub enum CliError {
         status: reqwest::StatusCode,
         body: String,
     },
+    #[error(
+        "sync integrity check failed for vault {vault_id} at revision {revision} \
+         (checkpoint {checkpoint_id}); export forensic evidence before retrying"
+    )]
+    SyncIntegrity {
+        vault_id: uuid::Uuid,
+        revision: i64,
+        checkpoint_id: String,
+    },
 }

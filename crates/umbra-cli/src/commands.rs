@@ -27,8 +27,8 @@ use umbra_protocol::{
     RecoverTrustResponse, RecoveryChallengeStartRequest, RecoveryChallengeStartResponse,
     RejectInviteRequest, ResolveItemConflictRequest, ResolveItemConflictResponse,
     RotateVaultKeyRequest, RotationItemRevision, RotationStatusResponse, RotationVaultKeyWrapping,
-    SyncRequest, SyncResponse, UpdateItemRequest, UserLookupRequest, UserLookupResponse,
-    VaultMemberResponse, VaultResponse, VaultSyncChanges, VaultSyncCursor,
+    SYNC_INTEGRITY_PROTOCOL_VERSION, SyncRequest, SyncResponse, UpdateItemRequest,
+    UserLookupRequest, UserLookupResponse, VaultMemberResponse, VaultResponse, VaultSyncCursor,
 };
 use uuid::Uuid;
 
@@ -42,7 +42,7 @@ use crate::output::{OutputMode, print_json};
 use crate::{
     AuthCommand, CacheCommand, Command, ConflictCommand, CryptoCommand, DeviceCommand,
     EmergencyKitCommand, EnvCommand, InviteCommand, ItemCommand, OrgCommand, ProfileCommand,
-    SecretCommand, SyncCommand, TokenCommand, VaultCommand,
+    SecretCommand, SyncCommand, SyncIntegrityCommand, TokenCommand, VaultCommand,
 };
 
 trait OutputModeExt {
@@ -845,6 +845,10 @@ pub async fn run(
             let mut cache = crate::cache::LocalCache::open(&profile_name)?;
             let vault_id =
                 resolve_vault_id_for_output(profile, &cache, vault_id, vault.as_deref(), output)?;
+            crate::sync::record_local_trust_anchor(profile, &cache)?;
+            if cache.is_sync_unsafe(vault_id)? {
+                return Err(cache.integrity_error(vault_id)?);
+            }
             let status: RotationStatusResponse = client
                 .get(&format!("/api/v1/vaults/{vault_id}/rotation-status"))
                 .await?;
@@ -873,7 +877,7 @@ pub async fn run(
                 .post(
                     "/api/v1/sync",
                     &SyncRequest {
-                        protocol_version: PROTOCOL_VERSION,
+                        protocol_version: SYNC_INTEGRITY_PROTOCOL_VERSION,
                         device_id,
                         vaults: vec![VaultSyncCursor {
                             vault_id,
@@ -882,14 +886,41 @@ pub async fn run(
                     },
                 )
                 .await?;
-            let snapshot_item_ids = sync_changes_for_vault(&full_sync, vault_id)?
+            if full_sync.protocol_version != SYNC_INTEGRITY_PROTOCOL_VERSION {
+                cache.quarantine_transport_failure(
+                    vault_id,
+                    0,
+                    &format!("protocol-version-{}", full_sync.protocol_version),
+                    "protocol_downgrade",
+                )?;
+                return Err(cache.integrity_error(vault_id)?);
+            }
+            let matching_full_changes = full_sync
+                .vaults
+                .iter()
+                .filter(|changes| changes.vault_id == vault_id)
+                .collect::<Vec<_>>();
+            let [full_changes] = matching_full_changes.as_slice() else {
+                let code = if matching_full_changes.is_empty() {
+                    "missing_vault_response"
+                } else {
+                    "duplicate_vault_response"
+                };
+                cache.quarantine_transport_failure(vault_id, 0, "missing", code)?;
+                return Err(cache.integrity_error(vault_id)?);
+            };
+            let snapshot_item_ids = full_changes
                 .items
                 .iter()
                 .map(|item| item.item_id)
                 .collect::<Vec<_>>();
-            for vault_changes in &full_sync.vaults {
-                cache.apply_sync_changes(vault_changes)?;
-            }
+            let full_checkpoints = full_sync
+                .checkpoints
+                .iter()
+                .filter(|checkpoint| checkpoint.vault_id == vault_id)
+                .cloned()
+                .collect::<Vec<_>>();
+            cache.verify_and_record_checkpoints(full_changes, &full_checkpoints)?;
             let members: Vec<VaultMemberResponse> = client
                 .get(&format!("/api/v1/vaults/{vault_id}/members"))
                 .await?;
@@ -920,11 +951,17 @@ pub async fn run(
             let completed: RotationStatusResponse = client
                 .post(&format!("/api/v1/vaults/{vault_id}/rotate-key"), &request)
                 .await?;
+            save_rotated_vault_key_to_unlock_store(
+                &profile_name,
+                profile,
+                vault_id,
+                new_vault_key.clone(),
+            )?;
             let refresh: SyncResponse = client
                 .post(
                     "/api/v1/sync",
                     &SyncRequest {
-                        protocol_version: PROTOCOL_VERSION,
+                        protocol_version: SYNC_INTEGRITY_PROTOCOL_VERSION,
                         device_id,
                         vaults: vec![VaultSyncCursor {
                             vault_id,
@@ -933,17 +970,37 @@ pub async fn run(
                     },
                 )
                 .await?;
-            sync_changes_for_vault(&refresh, vault_id)?;
-            for vault_changes in &refresh.vaults {
-                cache.apply_sync_changes(vault_changes)?;
+            if refresh.protocol_version != SYNC_INTEGRITY_PROTOCOL_VERSION {
+                cache.quarantine_transport_failure(
+                    vault_id,
+                    0,
+                    &format!("protocol-version-{}", refresh.protocol_version),
+                    "protocol_downgrade",
+                )?;
+                return Err(cache.integrity_error(vault_id)?);
             }
+            let matching_refresh_changes = refresh
+                .vaults
+                .iter()
+                .filter(|changes| changes.vault_id == vault_id)
+                .collect::<Vec<_>>();
+            let [refresh_changes] = matching_refresh_changes.as_slice() else {
+                let code = if matching_refresh_changes.is_empty() {
+                    "missing_vault_response"
+                } else {
+                    "duplicate_vault_response"
+                };
+                cache.quarantine_transport_failure(vault_id, 0, "missing", code)?;
+                return Err(cache.integrity_error(vault_id)?);
+            };
+            let refresh_checkpoints = refresh
+                .checkpoints
+                .iter()
+                .filter(|checkpoint| checkpoint.vault_id == vault_id)
+                .cloned()
+                .collect::<Vec<_>>();
+            cache.verify_and_record_checkpoints(refresh_changes, &refresh_checkpoints)?;
             refresh_cached_vault_metadata(&client, &cache, vault_id).await?;
-            save_rotated_vault_key_to_unlock_store(
-                &profile_name,
-                profile,
-                vault_id,
-                new_vault_key,
-            )?;
             render_rotation_complete(output, &completed, &summary)
         }
         Command::Vault(VaultCommand::List) => {
@@ -1784,21 +1841,32 @@ pub async fn run(
             let mut cache = crate::cache::LocalCache::open(&config.active_profile)?;
             let vault_id =
                 resolve_vault_id_for_output(profile, &cache, vault_id, vault.as_deref(), output)?;
+            crate::sync::record_local_trust_anchor(profile, &cache)?;
+            if cache.is_sync_unsafe(vault_id)? {
+                return Err(cache.integrity_error(vault_id)?);
+            }
+            let verified_revision = cache
+                .integrity_state(vault_id)?
+                .verified_head
+                .map(|head| head.checkpoint.vault_revision)
+                .unwrap_or(0);
             let since_vault_revision = if force_full {
                 0
             } else if let Some(value) = since_vault_revision {
+                if value != verified_revision {
+                    return Err(CliError::Input(
+                        "--since-vault-revision must match the locally verified checkpoint head",
+                    ));
+                }
                 value
             } else {
-                cache
-                    .sync_state(vault_id)?
-                    .map(|state| state.latest_vault_revision)
-                    .unwrap_or(0)
+                verified_revision
             };
             let response: SyncResponse = client
                 .post(
                     "/api/v1/sync",
                     &SyncRequest {
-                        protocol_version: PROTOCOL_VERSION,
+                        protocol_version: SYNC_INTEGRITY_PROTOCOL_VERSION,
                         device_id,
                         vaults: vec![VaultSyncCursor {
                             vault_id,
@@ -1807,10 +1875,83 @@ pub async fn run(
                     },
                 )
                 .await?;
-            for vault in &response.vaults {
-                cache.apply_sync_changes(vault)?;
+            if response.protocol_version != SYNC_INTEGRITY_PROTOCOL_VERSION {
+                cache.quarantine_transport_failure(
+                    vault_id,
+                    since_vault_revision,
+                    &format!("protocol-version-{}", response.protocol_version),
+                    "protocol_downgrade",
+                )?;
+                return Err(cache.integrity_error(vault_id)?);
             }
+            let matching_changes = response
+                .vaults
+                .iter()
+                .filter(|changes| changes.vault_id == vault_id)
+                .collect::<Vec<_>>();
+            let [changes] = matching_changes.as_slice() else {
+                let code = if matching_changes.is_empty() {
+                    "missing_vault_response"
+                } else {
+                    "duplicate_vault_response"
+                };
+                cache.quarantine_transport_failure(
+                    vault_id,
+                    since_vault_revision,
+                    "missing",
+                    code,
+                )?;
+                return Err(cache.integrity_error(vault_id)?);
+            };
+            let checkpoints = response
+                .checkpoints
+                .iter()
+                .filter(|checkpoint| checkpoint.vault_id == vault_id)
+                .cloned()
+                .collect::<Vec<_>>();
+            cache.verify_and_record_checkpoints(changes, &checkpoints)?;
             render_sync_response(output, &response)
+        }
+        Command::Sync(SyncCommand::Integrity(command)) => {
+            let profile = active_profile(&config)?;
+            let cache = crate::cache::LocalCache::open(&config.active_profile)?;
+            match command {
+                SyncIntegrityCommand::Status { vault_id, vault } => {
+                    let vault_id = resolve_vault_id_for_output(
+                        profile,
+                        &cache,
+                        vault_id,
+                        vault.as_deref(),
+                        output,
+                    )?;
+                    render_integrity_status(output, &cache.integrity_state(vault_id)?)
+                }
+                SyncIntegrityCommand::Export {
+                    vault_id,
+                    vault,
+                    output: destination,
+                } => {
+                    let vault_id = resolve_vault_id_for_output(
+                        profile,
+                        &cache,
+                        vault_id,
+                        vault.as_deref(),
+                        output,
+                    )?;
+                    let bundle = cache.export_checkpoint_evidence(vault_id)?;
+                    write_forensics_bundle(&destination, &bundle)?;
+                    if output.is_json() {
+                        print_json(&serde_json::json!({
+                            "vault_id": vault_id,
+                            "output": destination,
+                            "exported": true
+                        }))
+                    } else {
+                        println!("integrity evidence written: {}", destination.display());
+                        Ok(())
+                    }
+                }
+            }
         }
     }
 }
@@ -2131,17 +2272,6 @@ async fn lookup_user_by_email(
             },
         )
         .await
-}
-
-fn sync_changes_for_vault(
-    response: &SyncResponse,
-    vault_id: VaultId,
-) -> Result<&VaultSyncChanges, CliError> {
-    response
-        .vaults
-        .iter()
-        .find(|changes| changes.vault_id == vault_id)
-        .ok_or(CliError::Input("full sync did not return selected vault"))
 }
 
 async fn refresh_cached_vault_metadata(
@@ -2615,6 +2745,99 @@ fn render_sync_response(output: OutputMode, response: &SyncResponse) -> Result<(
         &["vault_id", "vault_rev", "access_rev", "items", "wrappings"],
         &rows,
     );
+    Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct IntegrityStatusOutput {
+    vault_id: VaultId,
+    state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verified_revision: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    checkpoint_id: Option<String>,
+    finding_count: usize,
+}
+
+fn integrity_status_output(state: &crate::cache::VaultIntegrityState) -> IntegrityStatusOutput {
+    let finding = state.findings.last();
+    IntegrityStatusOutput {
+        vault_id: state.vault_id,
+        state: if state.unsafe_sync {
+            "unsafe"
+        } else if state.verified_head.is_some() {
+            "verified"
+        } else {
+            "uninitialized"
+        },
+        error_code: finding.map(|finding| finding.code.clone()),
+        verified_revision: state
+            .verified_head
+            .as_ref()
+            .map(|head| head.checkpoint.vault_revision),
+        checkpoint_id: finding
+            .map(|finding| finding.checkpoint_hash.clone())
+            .or_else(|| {
+                state
+                    .verified_head
+                    .as_ref()
+                    .map(|head| head.checkpoint_hash.clone())
+            }),
+        finding_count: state.findings.len(),
+    }
+}
+
+fn render_integrity_status(
+    output: OutputMode,
+    state: &crate::cache::VaultIntegrityState,
+) -> Result<(), CliError> {
+    let status = integrity_status_output(state);
+    if output.is_json() {
+        return print_json(&status);
+    }
+    crate::output::print_kv(&[
+        ("vault_id", status.vault_id.to_string()),
+        ("state", status.state.to_owned()),
+        (
+            "error_code",
+            status.error_code.unwrap_or_else(|| "-".to_owned()),
+        ),
+        (
+            "verified_revision",
+            status
+                .verified_revision
+                .map(|revision| revision.to_string())
+                .unwrap_or_else(|| "-".to_owned()),
+        ),
+        (
+            "checkpoint_id",
+            status.checkpoint_id.unwrap_or_else(|| "-".to_owned()),
+        ),
+        ("findings", status.finding_count.to_string()),
+    ]);
+    Ok(())
+}
+
+fn write_forensics_bundle(
+    path: &Path,
+    bundle: &crate::cache::CheckpointForensicsBundle,
+) -> Result<(), CliError> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(path).map_err(|error| {
+        if error.kind() == ErrorKind::AlreadyExists {
+            CliError::Input("integrity export destination already exists")
+        } else {
+            CliError::Io(error)
+        }
+    })?;
+    serde_json::to_writer_pretty(&mut file, bundle)?;
+    file.write_all(b"\n")?;
+    file.sync_all()?;
     Ok(())
 }
 
@@ -4232,6 +4455,52 @@ mod tests {
             std::fs::read_to_string(&path).unwrap(),
             "DATABASE_URL=old\n"
         );
+    }
+
+    #[test]
+    fn sync_integrity_export_writer_refuses_overwrite_and_uses_safe_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("evidence.json");
+        let vault_id = uuid::Uuid::from_u128(1);
+        let bundle = crate::cache::CheckpointForensicsBundle {
+            version: 1,
+            vault_id,
+            unsafe_sync: true,
+            verified_checkpoints: vec![],
+            observed_checkpoints: vec![],
+            findings: vec![crate::cache::IntegrityFinding {
+                vault_id,
+                revision: 3,
+                checkpoint_hash: "public-checkpoint-id".to_owned(),
+                code: "equivocation".to_owned(),
+                conflicting_checkpoint_hash: Some("other-public-checkpoint-id".to_owned()),
+                observed_at: "2026-07-24T00:00:00Z".to_owned(),
+            }],
+        };
+
+        write_forensics_bundle(&path, &bundle).unwrap();
+        let encoded = std::fs::read_to_string(&path).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(value["vault_id"], vault_id.to_string());
+        assert_eq!(value["findings"][0]["code"], "equivocation");
+        for forbidden in [
+            "envelope",
+            "plaintext",
+            "wrapping",
+            "token",
+            "private_key",
+            "vault_key",
+        ] {
+            assert!(!encoded.contains(forbidden));
+        }
+
+        let result = write_forensics_bundle(&path, &bundle);
+        assert!(matches!(
+            result,
+            Err(CliError::Input(
+                "integrity export destination already exists"
+            ))
+        ));
     }
 
     #[test]

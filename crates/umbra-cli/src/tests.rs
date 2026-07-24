@@ -431,6 +431,49 @@ fn parses_sync_vault_name_and_default() {
 }
 
 #[test]
+fn sync_integrity_commands_parse_status_and_export() {
+    let vault_id = "00000000-0000-0000-0000-000000000001";
+    let status = Cli::parse_from([
+        "umbra",
+        "sync",
+        "integrity",
+        "status",
+        "--vault-id",
+        vault_id,
+    ]);
+    assert!(matches!(
+        status.command,
+        Command::Sync(crate::SyncCommand::Integrity(
+            crate::SyncIntegrityCommand::Status {
+                vault_id: Some(_),
+                ..
+            }
+        ))
+    ));
+
+    let export = Cli::parse_from([
+        "umbra",
+        "sync",
+        "integrity",
+        "export",
+        "--vault",
+        "Personal",
+        "--output",
+        "evidence.json",
+    ]);
+    assert!(matches!(
+        export.command,
+        Command::Sync(crate::SyncCommand::Integrity(
+            crate::SyncIntegrityCommand::Export {
+                vault: Some(name),
+                output,
+                ..
+            }
+        )) if name == "Personal" && output == std::path::Path::new("evidence.json")
+    ));
+}
+
+#[test]
 fn parses_cached_item_commands() {
     let list = Cli::parse_from([
         "umbra",
