@@ -4,6 +4,7 @@ use axum::{
     http::{Method, Request, StatusCode, header},
     response::IntoResponse,
 };
+use clap::Parser;
 use opaque_ke::rand::rngs::OsRng;
 use opaque_ke::{
     ClientLogin, ClientLoginFinishParameters, ClientRegistration,
@@ -59,6 +60,17 @@ fn opaque_setup_secret_roundtrips() {
     let encoded = encode_b64(setup.serialize().as_slice());
 
     assert_eq!(secret, encoded);
+}
+
+#[test]
+fn server_exposes_the_package_version() {
+    let error = match crate::cli::Cli::try_parse_from(["umbra-server", "--version"]) {
+        Ok(_) => panic!("--version must exit before parsing a command"),
+        Err(error) => error,
+    };
+
+    assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
+    assert!(error.to_string().contains(env!("CARGO_PKG_VERSION")));
 }
 
 #[test]

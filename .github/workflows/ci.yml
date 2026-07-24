@@ -5,6 +5,9 @@ on:
     branches: ["main"]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   rust:
     runs-on: ubuntu-latest
@@ -28,9 +31,9 @@ jobs:
       UMBRA_TEST_DATABASE_URL: postgres://umbra:umbra@localhost:5432/umbra_test
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           toolchain: 1.88.0
           components: rustfmt, clippy
@@ -50,8 +53,19 @@ jobs:
       - name: Test
         run: cargo test --all
 
+      - name: Exercise SQLite migration path
+        run: cargo test -p umbra-migrations sqlite_
+
+      - name: Exercise PostgreSQL integration path
+        run: cargo test -p umbra-server -- --test-threads=1
+
       - name: Build
         run: cargo build
 
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Build final server image and require strict production doctor
+        run: |
+          docker build --tag umbra-server:ci --file crates/umbra-server/Dockerfile .
+          bash scripts/release/doctor-strict.sh umbra-server:ci

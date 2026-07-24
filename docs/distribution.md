@@ -25,6 +25,10 @@ docker run ghcr.io/umbra/umbra-server
 docker compose up -d
 ```
 
+## Verified releases
+
+Release archives are accompanied by `SHA256SUMS` and a Sigstore bundle. Container images are signed and must be consumed by digest after verification. Follow [verification.md](verification.md) before executing a downloaded CLI or deploying an image. The release workflow publishes only version tags; it does not publish a mutable `latest` image.
+
 ## Self-hosted production checklist
 
 - Configure a persistent `UMBRA__AUTH__OPAQUE__SERVER_SETUP`; never enable ephemeral setup in production.

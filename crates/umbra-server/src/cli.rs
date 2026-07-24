@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(name = "umbra-server")]
 #[command(about = "Umbra HTTP server and administration commands")]
+#[command(version)]
 pub(crate) struct Cli {
     #[arg(long, global = true)]
     pub(crate) config: Option<String>,

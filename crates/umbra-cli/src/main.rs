@@ -32,6 +32,7 @@ use crate::error::CliError;
 #[derive(Debug, Parser)]
 #[command(name = "umbra")]
 #[command(about = "Umbra command line client")]
+#[command(version)]
 pub struct Cli {
     #[arg(long, global = true, help = "Print machine-readable JSON output")]
     pub json: bool,
