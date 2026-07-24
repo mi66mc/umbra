@@ -984,7 +984,8 @@ async fn create_vault_invite(
         .user_id;
     ensure_vault_admin(&state, vault_id, user_id).await?;
     let vault = state.storage.find_vault_by_id(vault_id).await?;
-    state.storage.find_user_by_email(&request.email).await?;
+    let email = request.email.to_ascii_lowercase();
+    state.storage.find_user_by_email(&email).await?;
 
     let invite = state
         .storage
@@ -992,7 +993,7 @@ async fn create_vault_invite(
             id: None,
             vault_id,
             org_id: vault.org_id,
-            email: request.email,
+            email,
             role: request.role,
             invited_by: Some(user_id),
             vault_key_wrapping: request.vault_key_wrapping,

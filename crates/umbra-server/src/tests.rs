@@ -446,7 +446,7 @@ async fn signed_rotation_endpoint_accepts_client_side_wrappings() {
         &json!({}),
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(status, StatusCode::NO_CONTENT);
 
     let (status, rotation_needed): (StatusCode, RotationStatusResponse) = signed_json_request(
         app.clone(),
