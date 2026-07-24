@@ -12,6 +12,7 @@ use opaque_ke::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use serial_test::serial;
+use sqlx::Row;
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::Mutex;
 use tower::ServiceExt;
@@ -24,12 +25,13 @@ use umbra_protocol::{
     AcceptInviteRequest, AddVaultMemberRequest, ApprovalLookupRequest, ApproveDeviceRequest,
     CreateItemRequest, CreateOrgRequest, CreateVaultRequest, DeleteItemRequest,
     DeviceBootstrapResponse, DeviceRegisterRequest, DeviceResponse, InviteMemberRequest,
-    InviteResponse, ItemRevisionResponse, OpaqueLoginFinishRequest, OpaqueLoginFinishResponse,
-    OpaqueLoginStartRequest, OpaqueLoginStartResponse, OpaqueRegisterFinishRequest,
-    OpaqueRegisterStartRequest, OpaqueRegisterStartResponse, OrgResponse, PROTOCOL_VERSION,
-    PendingDeviceRequest, PendingDeviceSummary, PendingInviteResponse, RecoverTrustRequest,
-    RecoverTrustResponse, RecoveryChallengeStartRequest, RecoveryChallengeStartResponse,
-    RegisterResponse, RejectInviteRequest, RotateVaultKeyRequest, RotationStatusResponse,
+    InviteResponse, ItemConflictResponse, ItemRevisionResponse, OpaqueLoginFinishRequest,
+    OpaqueLoginFinishResponse, OpaqueLoginStartRequest, OpaqueLoginStartResponse,
+    OpaqueRegisterFinishRequest, OpaqueRegisterStartRequest, OpaqueRegisterStartResponse,
+    OrgResponse, PROTOCOL_VERSION, PendingDeviceRequest, PendingDeviceSummary,
+    PendingInviteResponse, RecoverTrustRequest, RecoverTrustResponse,
+    RecoveryChallengeStartRequest, RecoveryChallengeStartResponse, RegisterResponse,
+    RejectInviteRequest, ResolveItemConflictRequest, RotateVaultKeyRequest, RotationStatusResponse,
     RotationVaultKeyWrapping, SyncRequest, SyncResponse, SyncStatusRequest, SyncStatusResponse,
     UpdateItemRequest, UserLookupRequest, UserLookupResponse, VaultMemberResponse, VaultResponse,
     VaultStatusCursor, VaultSyncCursor,
@@ -836,6 +838,806 @@ async fn owner_can_create_update_and_sync_item_revisions() {
         json!({"ciphertext": "v2"})
     );
     assert_eq!(sync.vaults[0].key_wrappings.len(), 1);
+}
+
+#[tokio::test]
+#[serial(postgres)]
+async fn stale_update_returns_encrypted_conflict_candidate() {
+    let app = if let Some(storage) = fresh_test_storage().await {
+        router(test_state_with_storage(storage))
+    } else {
+        router(test_state_with_sqlite().await)
+    };
+    let login = register_and_signed_login(
+        app.clone(),
+        "conflict-update@example.com",
+        b"conflict update password",
+        "conflict-update",
+    )
+    .await;
+
+    let (_status, vault): (StatusCode, VaultResponse) = signed_json_request(
+        app.clone(),
+        Method::POST,
+        "/api/v1/vaults",
+        login.auth("conflict-update-create-vault"),
+        &CreateVaultRequest {
+            protocol_version: PROTOCOL_VERSION,
+            vault_id: None,
+            name: "Conflict Update".to_owned(),
+            kind: VaultKind::Personal,
+            initial_key_wrapping: json!({"wrapped": "owner"}),
+        },
+    )
+    .await;
+
+    let (status, created): (StatusCode, ItemRevisionResponse) = signed_json_request(
+        app.clone(),
+        Method::POST,
+        &format!("/api/v1/vaults/{}/items", vault.vault_id),
+        login.auth("conflict-update-create-item"),
+        &CreateItemRequest {
+            protocol_version: PROTOCOL_VERSION,
+            vault_id: vault.vault_id,
+            item_id: None,
+            kind: umbra_core::ItemKind::ApiKey,
+            envelope: json!({"ciphertext": "revision-one"}),
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, updated): (StatusCode, ItemRevisionResponse) = signed_json_request(
+        app.clone(),
+        Method::PUT,
+        &format!(
+            "/api/v1/vaults/{}/items/{}",
+            vault.vault_id, created.item_id
+        ),
+        login.auth("conflict-update-advance-item"),
+        &UpdateItemRequest {
+            protocol_version: PROTOCOL_VERSION,
+            vault_id: vault.vault_id,
+            item_id: created.item_id,
+            expected_revision: 1,
+            envelope: json!({"ciphertext": "revision-two"}),
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(updated.revision, 2);
+
+    let candidate_envelope = json!({"ciphertext": "candidate"});
+    let (status, conflict): (StatusCode, ItemConflictResponse) = signed_json_request(
+        app.clone(),
+        Method::PUT,
+        &format!(
+            "/api/v1/vaults/{}/items/{}",
+            vault.vault_id, created.item_id
+        ),
+        login.auth("conflict-update-stale-item"),
+        &UpdateItemRequest {
+            protocol_version: PROTOCOL_VERSION,
+            vault_id: vault.vault_id,
+            item_id: created.item_id,
+            expected_revision: 1,
+            envelope: candidate_envelope.clone(),
+        },
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(conflict.base_revision, 1);
+    assert_eq!(conflict.current_revision, 2);
+    assert_eq!(conflict.candidate_envelope, Some(candidate_envelope));
+    assert!(
+        serde_json::to_value(conflict)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .get("plaintext")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn conflict_audit_metadata_omits_envelopes_and_plaintext() {
+    let (state, sqlite_pool) = test_state_with_sqlite_and_pool().await;
+    let app = router(state);
+    let login = register_and_signed_login(
+        app.clone(),
+        "conflict-audit@example.com",
+        b"conflict audit password",
+        "conflict-audit",
+    )
+    .await;
+
+    let (status, vault): (StatusCode, VaultResponse) = signed_json_request(
+        app.clone(),
+        Method::POST,
+        "/api/v1/vaults",
+        login.auth("conflict-audit-create-vault"),
+        &CreateVaultRequest {
+            protocol_version: PROTOCOL_VERSION,
+            vault_id: None,
+            name: "Conflict Audit".to_owned(),
+            kind: VaultKind::Personal,
+            initial_key_wrapping: json!({"ciphertext": "owner-wrapping"}),
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, created): (StatusCode, ItemRevisionResponse) = signed_json_request(
+        app.clone(),
+        Method::POST,
+        &format!("/api/v1/vaults/{}/items", vault.vault_id),
+        login.auth("conflict-audit-create-item"),
+        &CreateItemRequest {
+            protocol_version: PROTOCOL_VERSION,
+            vault_id: vault.vault_id,
+            item_id: None,
+            kind: umbra_core::ItemKind::ApiKey,
+            envelope: json!({"ciphertext": "revision-one"}),
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, current): (StatusCode, ItemRevisionResponse) = signed_json_request(
+        app.clone(),
+        Method::PUT,
+        &format!(
+            "/api/v1/vaults/{}/items/{}",
+            vault.vault_id, created.item_id
+        ),
+        login.auth("conflict-audit-advance-item"),
+        &UpdateItemRequest {
+            protocol_version: PROTOCOL_VERSION,
+            vault_id: vault.vault_id,
+            item_id: created.item_id,
+            expected_revision: created.revision,
+            envelope: json!({"ciphertext": "revision-two"}),
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, conflict): (StatusCode, ItemConflictResponse) = signed_json_request(
+        app.clone(),
+        Method::PUT,
+        &format!(
+            "/api/v1/vaults/{}/items/{}",
+            vault.vault_id, created.item_id
+        ),
+        login.auth("conflict-audit-stale-update"),
+        &UpdateItemRequest {
+            protocol_version: PROTOCOL_VERSION,
+            vault_id: vault.vault_id,
+            item_id: created.item_id,
+            expected_revision: created.revision,
+            envelope: json!({"ciphertext": "candidate"}),
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    let (status, _resolved): (StatusCode, umbra_protocol::ResolveItemConflictResponse) =
+        signed_json_request(
+            app.clone(),
+            Method::POST,
+            &format!(
+                "/api/v1/vaults/{}/conflicts/{}/resolve",
+                vault.vault_id, conflict.conflict_id
+            ),
+            login.auth("conflict-audit-resolve"),
+            &ResolveItemConflictRequest {
+                protocol_version: PROTOCOL_VERSION,
+                conflict_id: conflict.conflict_id,
+                expected_current_revision: current.revision,
+                resolution: "remote".to_owned(),
+                envelope: None,
+            },
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let records = sqlx::query(
+        "SELECT action, metadata FROM audit_logs WHERE action IN (?1, ?2) ORDER BY action",
+    )
+    .bind("item_conflict.create")
+    .bind("item_conflict.resolve")
+    .fetch_all(&sqlite_pool)
+    .await
+    .unwrap();
+    assert_eq!(records.len(), 2);
+
+    let metadata_by_action: HashMap<String, serde_json::Value> = records
+        .into_iter()
+        .map(|record| {
+            (
+                record.get::<String, _>("action"),
+                serde_json::from_str(record.get::<String, _>("metadata").as_str()).unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        metadata_by_action.get("item_conflict.create"),
+        Some(&json!({
+            "item_id": created.item_id,
+            "base_revision": created.revision,
+            "current_revision": current.revision,
+            "candidate_kind": "update",
+        }))
+    );
+    assert_eq!(
+        metadata_by_action.get("item_conflict.resolve"),
+        Some(&json!({
+            "item_id": created.item_id,
+            "base_revision": created.revision,
+            "current_revision": current.revision,
+            "resolution": "remote",
+        }))
+    );
+    for metadata in metadata_by_action.values() {
+        assert!(metadata.get("envelope").is_none());
+        assert!(metadata.get("plaintext").is_none());
+    }
+}
+
+#[tokio::test]
+#[serial(postgres)]
+async fn two_devices_converge_after_conflict_resolution() {
+    let app = if let Some(storage) = fresh_test_storage().await {
+        router(test_state_with_storage(storage))
+    } else {
+        router(test_state_with_sqlite().await)
+    };
+    let device_a = register_and_signed_login(
+        app.clone(),
+        "convergence-a@example.com",
+        b"convergence a password",
+        "convergence-a",
+    )
+    .await;
+    let device_b = register_and_signed_login(
+        app.clone(),
+        "convergence-b@example.com",
+        b"convergence b password",
+        "convergence-b",
+    )
+    .await;
+
+    let (status, vault): (StatusCode, VaultResponse) = signed_json_request(
+        app.clone(),
+        Method::POST,
+        "/api/v1/vaults",
+        device_a.auth("convergence-create-vault"),
+        &CreateVaultRequest {
+            protocol_version: PROTOCOL_VERSION,
+            vault_id: None,
+            name: "Convergence".to_owned(),
+            kind: VaultKind::Shared,
+            initial_key_wrapping: json!({"ciphertext": "owner-wrapping"}),
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _member): (StatusCode, VaultMemberResponse) = signed_json_request(
+        app.clone(),
+        Method::POST,
+        &format!("/api/v1/vaults/{}/members", vault.vault_id),
+        device_a.auth("convergence-add-device-b"),
+        &AddVaultMemberRequest {
+            protocol_version: PROTOCOL_VERSION,
+            user_id: device_b.user_id,
+            role: VaultRole::Editor,
+            vault_key_wrapping: json!({"ciphertext": "device-b-wrapping"}),
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, created): (StatusCode, ItemRevisionResponse) = signed_json_request(
+        app.clone(),
+        Method::POST,
+        &format!("/api/v1/vaults/{}/items", vault.vault_id),
+        device_a.auth("convergence-create-item"),
+        &CreateItemRequest {
+            protocol_version: PROTOCOL_VERSION,
+            vault_id: vault.vault_id,
+            item_id: None,
+            kind: umbra_core::ItemKind::Login,
+            envelope: json!({"ciphertext": "revision-one"}),
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(created.revision, 1);
+
+    let mut cache_a = DeviceSyncCache::default();
+    let mut cache_b = DeviceSyncCache::default();
+    for (device, cache, nonce) in [
+        (&device_a, &mut cache_a, "convergence-initial-sync-a"),
+        (&device_b, &mut cache_b, "convergence-initial-sync-b"),
+    ] {
+        let (status, sync): (StatusCode, SyncResponse) = signed_json_request(
+            app.clone(),
+            Method::POST,
+            "/api/v1/sync",
+            device.auth(nonce),
+            &SyncRequest {
+                protocol_version: PROTOCOL_VERSION,
+                device_id: device.device_id,
+                vaults: vec![VaultSyncCursor {
+                    vault_id: vault.vault_id,
+                    since_vault_revision: 0,
+                }],
+            },
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        cache.apply(&sync.vaults[0]);
+        assert_eq!(cache.item_revision(created.item_id), Some(1));
+        assert!(cache.open_conflicts.is_empty());
+    }
+
+    let (status, updated): (StatusCode, ItemRevisionResponse) = signed_json_request(
+        app.clone(),
+        Method::PUT,
+        &format!(
+            "/api/v1/vaults/{}/items/{}",
+            vault.vault_id, created.item_id
+        ),
+        device_a.auth("convergence-device-a-update"),
+        &UpdateItemRequest {
+            protocol_version: PROTOCOL_VERSION,
+            vault_id: vault.vault_id,
+            item_id: created.item_id,
+            expected_revision: 1,
+            envelope: json!({"ciphertext": "revision-two"}),
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(updated.revision, 2);
+
+    let (status, sync): (StatusCode, SyncResponse) = signed_json_request(
+        app.clone(),
+        Method::POST,
+        "/api/v1/sync",
+        device_a.auth("convergence-device-a-sync-two"),
+        &SyncRequest {
+            protocol_version: PROTOCOL_VERSION,
+            device_id: device_a.device_id,
+            vaults: vec![VaultSyncCursor {
+                vault_id: vault.vault_id,
+                since_vault_revision: cache_a.latest_vault_revision,
+            }],
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    cache_a.apply(&sync.vaults[0]);
+    assert_eq!(cache_a.item_revision(created.item_id), Some(2));
+
+    let candidate_envelope = json!({"ciphertext": "candidate"});
+    let (status, conflict): (StatusCode, ItemConflictResponse) = signed_json_request(
+        app.clone(),
+        Method::PUT,
+        &format!(
+            "/api/v1/vaults/{}/items/{}",
+            vault.vault_id, created.item_id
+        ),
+        device_b.auth("convergence-device-b-stale-update"),
+        &UpdateItemRequest {
+            protocol_version: PROTOCOL_VERSION,
+            vault_id: vault.vault_id,
+            item_id: created.item_id,
+            expected_revision: 1,
+            envelope: candidate_envelope.clone(),
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(conflict.candidate_envelope, Some(candidate_envelope));
+
+    for (device, cache, nonce) in [
+        (&device_a, &mut cache_a, "convergence-candidate-sync-a"),
+        (&device_b, &mut cache_b, "convergence-candidate-sync-b"),
+    ] {
+        let (status, sync): (StatusCode, SyncResponse) = signed_json_request(
+            app.clone(),
+            Method::POST,
+            "/api/v1/sync",
+            device.auth(nonce),
+            &SyncRequest {
+                protocol_version: PROTOCOL_VERSION,
+                device_id: device.device_id,
+                vaults: vec![VaultSyncCursor {
+                    vault_id: vault.vault_id,
+                    since_vault_revision: cache.latest_vault_revision,
+                }],
+            },
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(sync.vaults[0].conflicts, vec![conflict.clone()]);
+        cache.apply(&sync.vaults[0]);
+        assert_eq!(cache.item_revision(created.item_id), Some(2));
+        assert_eq!(cache.open_conflicts, vec![conflict.conflict_id]);
+    }
+
+    let (status, resolved): (StatusCode, umbra_protocol::ResolveItemConflictResponse) =
+        signed_json_request(
+            app.clone(),
+            Method::POST,
+            &format!(
+                "/api/v1/vaults/{}/conflicts/{}/resolve",
+                vault.vault_id, conflict.conflict_id
+            ),
+            device_a.auth("convergence-resolve"),
+            &ResolveItemConflictRequest {
+                protocol_version: PROTOCOL_VERSION,
+                conflict_id: conflict.conflict_id,
+                expected_current_revision: 2,
+                resolution: "remote".to_owned(),
+                envelope: None,
+            },
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(resolved.conflict.state, "resolved");
+
+    for (device, cache, nonce) in [
+        (&device_a, &mut cache_a, "convergence-status-a"),
+        (&device_b, &mut cache_b, "convergence-status-b"),
+    ] {
+        let (status, sync_status): (StatusCode, SyncStatusResponse) = signed_json_request(
+            app.clone(),
+            Method::POST,
+            "/api/v1/sync/status",
+            device.auth(nonce),
+            &SyncStatusRequest {
+                protocol_version: PROTOCOL_VERSION,
+                vaults: vec![VaultStatusCursor {
+                    vault_id: vault.vault_id,
+                    known_vault_revision: cache.latest_vault_revision,
+                    known_access_revision: cache.latest_access_revision,
+                }],
+            },
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(sync_status.vaults[0].items_changed);
+    }
+
+    for (device, cache, nonce) in [
+        (&device_a, &mut cache_a, "convergence-final-sync-a"),
+        (&device_b, &mut cache_b, "convergence-final-sync-b"),
+    ] {
+        let (status, sync): (StatusCode, SyncResponse) = signed_json_request(
+            app.clone(),
+            Method::POST,
+            "/api/v1/sync",
+            device.auth(nonce),
+            &SyncRequest {
+                protocol_version: PROTOCOL_VERSION,
+                device_id: device.device_id,
+                vaults: vec![VaultSyncCursor {
+                    vault_id: vault.vault_id,
+                    since_vault_revision: cache.latest_vault_revision,
+                }],
+            },
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(sync.vaults[0].items.is_empty());
+        assert!(sync.vaults[0].conflicts.is_empty());
+        cache.apply(&sync.vaults[0]);
+    }
+
+    assert_eq!(cache_a.latest_vault_revision, cache_b.latest_vault_revision);
+    assert_eq!(cache_a.latest_vault_revision, 3);
+    assert_eq!(cache_a.item_revision(created.item_id), Some(2));
+    assert_eq!(
+        cache_a.item_revision(created.item_id),
+        cache_b.item_revision(created.item_id)
+    );
+    assert!(cache_a.open_conflicts.is_empty());
+    assert!(cache_b.open_conflicts.is_empty());
+}
+
+#[tokio::test]
+#[serial(postgres)]
+async fn conflict_authorization_delete_contract_and_sync_convergence() {
+    let app = if let Some(storage) = fresh_test_storage().await {
+        router(test_state_with_storage(storage))
+    } else {
+        router(test_state_with_sqlite().await)
+    };
+    let owner = register_and_signed_login(
+        app.clone(),
+        "conflict-owner@example.com",
+        b"conflict owner password",
+        "conflict-owner",
+    )
+    .await;
+    let viewer = register_and_signed_login(
+        app.clone(),
+        "conflict-viewer@example.com",
+        b"conflict viewer password",
+        "conflict-viewer",
+    )
+    .await;
+    let editor = register_and_signed_login(
+        app.clone(),
+        "conflict-editor@example.com",
+        b"conflict editor password",
+        "conflict-editor",
+    )
+    .await;
+
+    let (status, vault): (StatusCode, VaultResponse) = signed_json_request(
+        app.clone(),
+        Method::POST,
+        "/api/v1/vaults",
+        owner.auth("conflict-access-create-vault"),
+        &CreateVaultRequest {
+            protocol_version: PROTOCOL_VERSION,
+            vault_id: None,
+            name: "Conflict Access".to_owned(),
+            kind: VaultKind::Shared,
+            initial_key_wrapping: json!({"wrapped": "owner"}),
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    for (member, role, nonce) in [
+        (&viewer, VaultRole::Viewer, "conflict-access-add-viewer"),
+        (&editor, VaultRole::Editor, "conflict-access-add-editor"),
+    ] {
+        let (status, _member): (StatusCode, VaultMemberResponse) = signed_json_request(
+            app.clone(),
+            Method::POST,
+            &format!("/api/v1/vaults/{}/members", vault.vault_id),
+            owner.auth(nonce),
+            &AddVaultMemberRequest {
+                protocol_version: PROTOCOL_VERSION,
+                user_id: member.user_id,
+                role,
+                vault_key_wrapping: json!({"wrapped": "member"}),
+            },
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    let (status, created): (StatusCode, ItemRevisionResponse) = signed_json_request(
+        app.clone(),
+        Method::POST,
+        &format!("/api/v1/vaults/{}/items", vault.vault_id),
+        owner.auth("conflict-access-create-item"),
+        &CreateItemRequest {
+            protocol_version: PROTOCOL_VERSION,
+            vault_id: vault.vault_id,
+            item_id: None,
+            kind: umbra_core::ItemKind::Login,
+            envelope: json!({"ciphertext": "revision-one"}),
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, current): (StatusCode, ItemRevisionResponse) = signed_json_request(
+        app.clone(),
+        Method::PUT,
+        &format!(
+            "/api/v1/vaults/{}/items/{}",
+            vault.vault_id, created.item_id
+        ),
+        owner.auth("conflict-access-advance-item"),
+        &UpdateItemRequest {
+            protocol_version: PROTOCOL_VERSION,
+            vault_id: vault.vault_id,
+            item_id: created.item_id,
+            expected_revision: created.revision,
+            envelope: json!({"ciphertext": "revision-two"}),
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(current.revision, 2);
+
+    let (status, update_conflict): (StatusCode, ItemConflictResponse) = signed_json_request(
+        app.clone(),
+        Method::PUT,
+        &format!(
+            "/api/v1/vaults/{}/items/{}",
+            vault.vault_id, created.item_id
+        ),
+        owner.auth("conflict-access-stale-update"),
+        &UpdateItemRequest {
+            protocol_version: PROTOCOL_VERSION,
+            vault_id: vault.vault_id,
+            item_id: created.item_id,
+            expected_revision: created.revision,
+            envelope: json!({"ciphertext": "candidate"}),
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    let (status, conflicts): (StatusCode, Vec<ItemConflictResponse>) = signed_json_request(
+        app.clone(),
+        Method::GET,
+        &format!("/api/v1/vaults/{}/conflicts", vault.vault_id),
+        viewer.auth("conflict-access-viewer-list"),
+        &json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(conflicts, vec![update_conflict.clone()]);
+
+    let (status, viewed_conflict): (StatusCode, ItemConflictResponse) = signed_json_request(
+        app.clone(),
+        Method::GET,
+        &format!(
+            "/api/v1/vaults/{}/conflicts/{}",
+            vault.vault_id, update_conflict.conflict_id
+        ),
+        viewer.auth("conflict-access-viewer-get"),
+        &json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(viewed_conflict, update_conflict);
+
+    let remote_resolution = ResolveItemConflictRequest {
+        protocol_version: PROTOCOL_VERSION,
+        conflict_id: update_conflict.conflict_id,
+        expected_current_revision: current.revision,
+        resolution: "remote".to_owned(),
+        envelope: None,
+    };
+    let (status, _body): (StatusCode, serde_json::Value) = signed_json_request(
+        app.clone(),
+        Method::POST,
+        &format!(
+            "/api/v1/vaults/{}/conflicts/{}/resolve",
+            vault.vault_id, update_conflict.conflict_id
+        ),
+        viewer.auth("conflict-access-viewer-resolve"),
+        &remote_resolution,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let (status, _body): (StatusCode, serde_json::Value) = signed_json_request(
+        app.clone(),
+        Method::POST,
+        &format!(
+            "/api/v1/vaults/{}/conflicts/{}/resolve",
+            vault.vault_id, update_conflict.conflict_id
+        ),
+        editor.auth("conflict-access-editor-stale-resolve"),
+        &ResolveItemConflictRequest {
+            protocol_version: PROTOCOL_VERSION,
+            conflict_id: update_conflict.conflict_id,
+            expected_current_revision: created.revision,
+            resolution: "remote".to_owned(),
+            envelope: None,
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    let (status, still_open): (StatusCode, ItemConflictResponse) = signed_json_request(
+        app.clone(),
+        Method::GET,
+        &format!(
+            "/api/v1/vaults/{}/conflicts/{}",
+            vault.vault_id, update_conflict.conflict_id
+        ),
+        editor.auth("conflict-access-editor-confirm-open"),
+        &json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(still_open.state, "open");
+
+    let (status, resolved): (StatusCode, umbra_protocol::ResolveItemConflictResponse) =
+        signed_json_request(
+            app.clone(),
+            Method::POST,
+            &format!(
+                "/api/v1/vaults/{}/conflicts/{}/resolve",
+                vault.vault_id, update_conflict.conflict_id
+            ),
+            editor.auth("conflict-access-editor-resolve"),
+            &remote_resolution,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(resolved.conflict.state, "resolved");
+
+    let (status, sync_status): (StatusCode, SyncStatusResponse) = signed_json_request(
+        app.clone(),
+        Method::POST,
+        "/api/v1/sync/status",
+        owner.auth("conflict-access-sync-status"),
+        &SyncStatusRequest {
+            protocol_version: PROTOCOL_VERSION,
+            vaults: vec![VaultStatusCursor {
+                vault_id: vault.vault_id,
+                known_vault_revision: current.vault_revision,
+                known_access_revision: vault.access_revision,
+            }],
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(sync_status.vaults[0].items_changed);
+
+    let (status, sync): (StatusCode, SyncResponse) = signed_json_request(
+        app.clone(),
+        Method::POST,
+        "/api/v1/sync",
+        owner.auth("conflict-access-sync"),
+        &SyncRequest {
+            protocol_version: PROTOCOL_VERSION,
+            device_id: owner.device_id,
+            vaults: vec![VaultSyncCursor {
+                vault_id: vault.vault_id,
+                since_vault_revision: current.vault_revision,
+            }],
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(sync.vaults[0].items.is_empty());
+    assert!(sync.vaults[0].conflicts.is_empty());
+
+    let (status, delete_conflict): (StatusCode, ItemConflictResponse) = signed_json_request(
+        app.clone(),
+        Method::DELETE,
+        &format!(
+            "/api/v1/vaults/{}/items/{}",
+            vault.vault_id, created.item_id
+        ),
+        owner.auth("conflict-access-stale-delete"),
+        &DeleteItemRequest {
+            protocol_version: PROTOCOL_VERSION,
+            vault_id: vault.vault_id,
+            item_id: created.item_id,
+            expected_revision: created.revision,
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(delete_conflict.candidate_kind, "delete");
+    assert_eq!(delete_conflict.candidate_envelope, None);
+
+    let (status, _body): (StatusCode, serde_json::Value) = signed_json_request(
+        app,
+        Method::POST,
+        &format!(
+            "/api/v1/vaults/{}/conflicts/{}/resolve",
+            vault.vault_id, delete_conflict.conflict_id
+        ),
+        editor.auth("conflict-access-delete-merge"),
+        &ResolveItemConflictRequest {
+            protocol_version: PROTOCOL_VERSION,
+            conflict_id: delete_conflict.conflict_id,
+            expected_current_revision: current.revision,
+            resolution: "merge".to_owned(),
+            envelope: Some(json!({"ciphertext": "merged"})),
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
@@ -1794,6 +2596,36 @@ struct SignedLogin {
     signing_key: ed25519_dalek::SigningKey,
 }
 
+#[derive(Default)]
+struct DeviceSyncCache {
+    latest_vault_revision: i64,
+    latest_access_revision: i64,
+    item_revisions: HashMap<Uuid, i64>,
+    open_conflicts: Vec<Uuid>,
+}
+
+impl DeviceSyncCache {
+    fn apply(&mut self, changes: &umbra_protocol::VaultSyncChanges) {
+        self.latest_vault_revision = changes.latest_vault_revision;
+        self.latest_access_revision = changes.latest_access_revision;
+        for item in &changes.items {
+            self.item_revisions.insert(item.item_id, item.revision);
+        }
+        for item_id in &changes.deleted_items {
+            self.item_revisions.remove(item_id);
+        }
+        self.open_conflicts = changes
+            .conflicts
+            .iter()
+            .map(|conflict| conflict.conflict_id)
+            .collect();
+    }
+
+    fn item_revision(&self, item_id: Uuid) -> Option<i64> {
+        self.item_revisions.get(&item_id).copied()
+    }
+}
+
 impl SignedLogin {
     fn auth(&self, nonce: &'static str) -> SignedRequestAuth<'_> {
         SignedRequestAuth {
@@ -2161,6 +2993,10 @@ where
 fn test_state_with_storage(storage: Storage) -> AppState {
     let mut config = AppConfig::default();
     config.auth.opaque.server_setup = Some(generate_opaque_server_setup_secret());
+    config.rate_limit.registration_per_hour = 100;
+    config.rate_limit.auth_per_minute = 100;
+    config.rate_limit.authenticated_per_minute = 100;
+    config.rate_limit.write_per_minute = 100;
     let postgres_pool = storage.pool().clone();
     AppState {
         opaque_server_setup: Arc::new(opaque_server_setup_from_config(&config).unwrap()),
@@ -2170,6 +3006,42 @@ fn test_state_with_storage(storage: Storage) -> AppState {
         pending_logins: Arc::new(Mutex::new(HashMap::new())),
         rate_limiter: Arc::new(crate::rate_limit::RateLimiter::default()),
     }
+}
+
+async fn test_state_with_sqlite() -> AppState {
+    test_state_with_sqlite_and_pool().await.0
+}
+
+async fn test_state_with_sqlite_and_pool() -> (AppState, sqlx::SqlitePool) {
+    let mut config = AppConfig::default();
+    config.database.backend = DatabaseBackend::Sqlite;
+    config.database.url = "sqlite::memory:".to_owned();
+    config.database.max_connections = 1;
+    config.auth.opaque.server_setup = Some(generate_opaque_server_setup_secret());
+    config.rate_limit.registration_per_hour = 100;
+    config.rate_limit.auth_per_minute = 100;
+    config.rate_limit.authenticated_per_minute = 100;
+    config.rate_limit.write_per_minute = 100;
+    let storage = crate::server::connect_storage(&config).await.unwrap();
+    crate::server::run_migrations(&storage).await.unwrap();
+    let migration_pool = storage.migration_pool();
+    let sqlite_pool = match &migration_pool {
+        MigrationPool::Sqlite(pool) => pool.clone(),
+        MigrationPool::Postgres(_) => unreachable!("sqlite test state must use SQLite"),
+    };
+    let storage = storage.backend();
+
+    (
+        AppState {
+            opaque_server_setup: Arc::new(opaque_server_setup_from_config(&config).unwrap()),
+            config,
+            storage,
+            migration_pool,
+            pending_logins: Arc::new(Mutex::new(HashMap::new())),
+            rate_limiter: Arc::new(crate::rate_limit::RateLimiter::default()),
+        },
+        sqlite_pool,
+    )
 }
 
 async fn test_storage_without_migrations() -> Option<Storage> {

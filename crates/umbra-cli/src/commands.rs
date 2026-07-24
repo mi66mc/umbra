@@ -61,6 +61,52 @@ struct ItemEnvelopeWrapper {
     crypto: CryptoEnvelopeV1,
 }
 
+#[derive(Serialize)]
+struct ConflictListEntry {
+    conflict_id: Uuid,
+    item_id: Uuid,
+    base_revision: i64,
+    current_revision: i64,
+    candidate_kind: String,
+    author_user_id: Option<Uuid>,
+    state: String,
+}
+
+fn conflict_list_json(conflicts: &[crate::cache::CachedItemConflict]) -> Vec<ConflictListEntry> {
+    conflicts
+        .iter()
+        .map(|conflict| ConflictListEntry {
+            conflict_id: conflict.conflict_id,
+            item_id: conflict.item_id,
+            base_revision: conflict.base_revision,
+            current_revision: conflict.current_revision,
+            candidate_kind: conflict.candidate_kind.clone(),
+            author_user_id: conflict.author_user_id,
+            state: conflict.state.clone(),
+        })
+        .collect()
+}
+
+fn conflict_list_table_rows(conflicts: &[crate::cache::CachedItemConflict]) -> Vec<Vec<String>> {
+    conflict_list_json(conflicts)
+        .into_iter()
+        .map(|conflict| {
+            vec![
+                conflict.conflict_id.to_string(),
+                conflict.item_id.to_string(),
+                conflict.base_revision.to_string(),
+                conflict.current_revision.to_string(),
+                conflict.candidate_kind,
+                conflict
+                    .author_user_id
+                    .map(|author| author.to_string())
+                    .unwrap_or_default(),
+                conflict.state,
+            ]
+        })
+        .collect()
+}
+
 pub async fn run(
     command: Command,
     mut config: CliConfig,
@@ -82,23 +128,19 @@ pub async fn run(
             .await?;
             let conflicts = cache.list_item_conflicts(vault_id)?;
             if output.is_json() {
-                print_json(&conflicts)
+                print_json(&conflict_list_json(&conflicts))
             } else {
-                let rows = conflicts
-                    .iter()
-                    .map(|conflict| {
-                        vec![
-                            conflict.conflict_id.to_string(),
-                            conflict.item_id.to_string(),
-                            conflict.base_revision.to_string(),
-                            conflict.current_revision.to_string(),
-                            conflict.candidate_kind.clone(),
-                            conflict.state.clone(),
-                        ]
-                    })
-                    .collect::<Vec<_>>();
+                let rows = conflict_list_table_rows(&conflicts);
                 crate::output::print_table(
-                    &["conflict_id", "item_id", "base", "current", "kind", "state"],
+                    &[
+                        "conflict_id",
+                        "item_id",
+                        "base",
+                        "current",
+                        "kind",
+                        "author_user_id",
+                        "state",
+                    ],
                     &rows,
                 );
                 Ok(())
@@ -3213,6 +3255,161 @@ pub fn parse_vault_role(value: &str) -> Result<umbra_core::VaultRole, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn conflict_list_output_omits_candidate_envelopes_and_plaintext() {
+        let conflict_id = Uuid::parse_str("00000000-0000-0000-0000-000000000801").unwrap();
+        let item_id = Uuid::parse_str("00000000-0000-0000-0000-000000000802").unwrap();
+        let conflict = crate::cache::CachedItemConflict {
+            conflict_id,
+            vault_id: Uuid::parse_str("00000000-0000-0000-0000-000000000803").unwrap(),
+            item_id,
+            base_revision: 4,
+            current_revision: 5,
+            candidate_kind: "update".to_owned(),
+            candidate_envelope: Some(serde_json::json!({"ciphertext": "AAECAwQFBgcICQ"})),
+            author_user_id: Some(Uuid::parse_str("00000000-0000-0000-0000-000000000804").unwrap()),
+            state: "open".to_owned(),
+        };
+
+        assert_eq!(
+            conflict_list_table_rows(std::slice::from_ref(&conflict)),
+            vec![vec![
+                conflict_id.to_string(),
+                item_id.to_string(),
+                "4".to_owned(),
+                "5".to_owned(),
+                "update".to_owned(),
+                "00000000-0000-0000-0000-000000000804".to_owned(),
+                "open".to_owned(),
+            ]]
+        );
+        assert_eq!(
+            serde_json::to_value(conflict_list_json(std::slice::from_ref(&conflict))).unwrap(),
+            serde_json::json!([{
+                "conflict_id": conflict_id,
+                "item_id": item_id,
+                "base_revision": 4,
+                "current_revision": 5,
+                "candidate_kind": "update",
+                "author_user_id": "00000000-0000-0000-0000-000000000804",
+                "state": "open",
+            }])
+        );
+    }
+
+    #[test]
+    fn manual_merge_posts_only_a_ciphertext_wrapper() {
+        let vault_id = Uuid::parse_str("00000000-0000-0000-0000-000000000811").unwrap();
+        let item_id = Uuid::parse_str("00000000-0000-0000-0000-000000000812").unwrap();
+        let conflict_id = Uuid::parse_str("00000000-0000-0000-0000-000000000813").unwrap();
+        let vault_key = generate_vault_key();
+        let remote_plaintext = crate::item_plaintext::build_secret_bundle(
+            "personal/prod",
+            "REMOTE_ONLY",
+            "remote-secret",
+        );
+        let mut local_plaintext =
+            crate::item_plaintext::build_secret_bundle("personal/prod", "NAME", "secret-value");
+        crate::item_plaintext::set_plaintext_field(
+            &mut local_plaintext,
+            "REMOVE_ME",
+            "local-only".to_owned(),
+        );
+        crate::item_plaintext::set_plaintext_field(
+            &mut local_plaintext,
+            "API_TOKEN",
+            "unchanged-sensitive-value".to_owned(),
+        );
+        let remote_revision = crate::cache::CachedItemRevision {
+            vault_id,
+            item_id,
+            revision: 2,
+            vault_revision: 2,
+            key_generation: 1,
+            author_user_id: None,
+            envelope: encrypt_item_plaintext(
+                vault_id,
+                item_id,
+                2,
+                "secret_bundle".to_owned(),
+                &vault_key,
+                &remote_plaintext,
+            )
+            .unwrap(),
+        };
+        let local_candidate = crate::cache::CachedItemRevision {
+            vault_id,
+            item_id,
+            revision: 2,
+            vault_revision: 2,
+            key_generation: 1,
+            author_user_id: None,
+            envelope: encrypt_item_plaintext(
+                vault_id,
+                item_id,
+                2,
+                "secret_bundle".to_owned(),
+                &vault_key,
+                &local_plaintext,
+            )
+            .unwrap(),
+        };
+
+        let remote = decrypt_cached_item(&vault_key, &remote_revision).unwrap();
+        let mut local = decrypt_cached_item(&vault_key, &local_candidate).unwrap();
+        assert_eq!(remote.plaintext.title, "personal/prod");
+        assert!(
+            local
+                .plaintext
+                .fields
+                .iter()
+                .any(|field| field.name == "API_TOKEN" && field.sensitive)
+        );
+        crate::item_plaintext::set_plaintext_field(
+            &mut local.plaintext,
+            "NAME",
+            "merged-value".to_owned(),
+        );
+        assert!(crate::item_plaintext::remove_plaintext_field(
+            &mut local.plaintext,
+            "REMOVE_ME"
+        ));
+        local.plaintext.title = "T".to_owned();
+        local.plaintext.notes = Some("N".to_owned());
+
+        let aad = AadV1::item(
+            vault_id.to_string(),
+            item_id.to_string(),
+            remote_revision.revision + 1,
+            local.kind.clone(),
+        );
+        let final_wrapper = ItemEnvelopeWrapper {
+            kind: local.kind,
+            crypto: encrypt_item(
+                &vault_key,
+                aad,
+                &serde_json::to_vec(&local.plaintext).unwrap(),
+            )
+            .unwrap(),
+        };
+        let post = ResolveItemConflictRequest {
+            protocol_version: PROTOCOL_VERSION,
+            conflict_id,
+            expected_current_revision: remote_revision.revision,
+            resolution: "merge".to_owned(),
+            envelope: Some(serde_json::to_value(final_wrapper).unwrap()),
+        };
+        let serialized_post = serde_json::to_value(post).unwrap();
+
+        assert!(serialized_post["envelope"]["crypto"]["ciphertext"].is_string());
+        assert!(!serialized_post.to_string().contains("secret-value"));
+        assert!(
+            !serialized_post
+                .to_string()
+                .contains("unchanged-sensitive-value")
+        );
+    }
 
     #[test]
     fn profile_public_key_reads_configured_key() {

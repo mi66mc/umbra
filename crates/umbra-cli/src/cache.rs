@@ -1068,11 +1068,14 @@ mod tests {
     }
 
     #[test]
-    fn sync_replaces_open_conflicts_without_plaintext() {
+    fn sync_replaces_open_conflicts_atomically() {
         let mut cache = LocalCache::open_in_memory("conflicts").unwrap();
-        let vault_id = uuid::Uuid::new_v4();
-        let conflict_id = uuid::Uuid::new_v4();
-        let item_id = uuid::Uuid::new_v4();
+        let vault_id = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000701").unwrap();
+        let initial_conflict_id =
+            uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000702").unwrap();
+        let replacement_conflict_id =
+            uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000703").unwrap();
+        let item_id = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000704").unwrap();
         cache
             .apply_sync_changes(&umbra_protocol::VaultSyncChanges {
                 vault_id,
@@ -1082,7 +1085,7 @@ mod tests {
                 deleted_items: vec![],
                 key_wrappings: vec![],
                 conflicts: vec![umbra_protocol::ItemConflictResponse {
-                    conflict_id,
+                    conflict_id: initial_conflict_id,
                     vault_id,
                     item_id,
                     base_revision: 1,
@@ -1094,15 +1097,48 @@ mod tests {
                 }],
             })
             .unwrap();
-        let conflict = cache.item_conflict(vault_id, conflict_id).unwrap().unwrap();
-        assert_eq!(
-            conflict.candidate_envelope,
-            Some(serde_json::json!({"ciphertext":"sealed"}))
-        );
+
         cache
             .apply_sync_changes(&umbra_protocol::VaultSyncChanges {
                 vault_id,
-                latest_vault_revision: 2,
+                latest_vault_revision: 3,
+                latest_access_revision: 1,
+                items: vec![],
+                deleted_items: vec![],
+                key_wrappings: vec![],
+                conflicts: vec![umbra_protocol::ItemConflictResponse {
+                    conflict_id: replacement_conflict_id,
+                    vault_id,
+                    item_id,
+                    base_revision: 2,
+                    current_revision: 3,
+                    candidate_kind: "update".to_owned(),
+                    candidate_envelope: Some(serde_json::json!({"ciphertext":"replacement"})),
+                    author_user_id: None,
+                    state: "open".to_owned(),
+                }],
+            })
+            .unwrap();
+
+        assert_eq!(
+            cache.list_item_conflicts(vault_id).unwrap(),
+            vec![CachedItemConflict {
+                conflict_id: replacement_conflict_id,
+                vault_id,
+                item_id,
+                base_revision: 2,
+                current_revision: 3,
+                candidate_kind: "update".to_owned(),
+                candidate_envelope: Some(serde_json::json!({"ciphertext":"replacement"})),
+                author_user_id: None,
+                state: "open".to_owned(),
+            }]
+        );
+
+        cache
+            .apply_sync_changes(&umbra_protocol::VaultSyncChanges {
+                vault_id,
+                latest_vault_revision: 4,
                 latest_access_revision: 1,
                 items: vec![],
                 deleted_items: vec![],
