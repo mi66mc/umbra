@@ -138,7 +138,7 @@ async fn sqlite_concurrent_duplicate_sync_checkpoints_are_idempotent() {
 }
 
 #[tokio::test]
-#[serial]
+#[serial(postgres)]
 async fn postgres_sync_checkpoint_persistence_is_opaque_idempotent_and_ordered() {
     let Some(storage) = fresh_test_storage().await else {
         return;
