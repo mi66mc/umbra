@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use base64ct::{Base64UrlUnpadded, Encoding};
+use ed25519_dalek::SigningKey;
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -227,6 +228,21 @@ impl LocalCache {
         Ok(())
     }
 
+    pub fn trusted_checkpoint_devices(&self) -> Result<Vec<TrustedCheckpointDevice>, CliError> {
+        let mut statement = self.connection.prepare(
+            "SELECT device_id, public_key, revoked
+             FROM trusted_checkpoint_devices ORDER BY device_id ASC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(TrustedCheckpointDevice {
+                device_id: parse_uuid(row.get::<_, String>(0)?)?,
+                public_key: row.get(1)?,
+                revoked: row.get(2)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(CliError::from)
+    }
+
     pub fn is_sync_unsafe(&self, vault_id: uuid::Uuid) -> Result<bool, CliError> {
         Ok(self
             .connection
@@ -392,6 +408,61 @@ impl LocalCache {
         )?;
         tx.commit()?;
         Ok(())
+    }
+
+    pub fn author_checkpoint(
+        &mut self,
+        changes: &VaultSyncChanges,
+        checkpoints: &[SyncCheckpoint],
+        author_device_id: uuid::Uuid,
+        signing_key: &SigningKey,
+    ) -> Result<SyncCheckpoint, CliError> {
+        if self.is_sync_unsafe(changes.vault_id)? {
+            return Err(self.integrity_error(changes.vault_id)?);
+        }
+
+        let previous_checkpoint_hash = match checkpoints.last() {
+            Some(checkpoint) => Some(safe_checkpoint_hash(checkpoint)),
+            None => self
+                .integrity_state(changes.vault_id)?
+                .verified_head
+                .map(|head| head.checkpoint_hash),
+        };
+        let state_commitment = self.projected_state_commitment_for_authoring(changes)?;
+        let checkpoint = umbra_crypto::checkpoints::sign_checkpoint(
+            SyncCheckpoint {
+                vault_id: changes.vault_id,
+                vault_revision: changes.latest_vault_revision,
+                state_commitment,
+                previous_checkpoint_hash,
+                author_device_id,
+                signature: String::new(),
+            },
+            signing_key,
+        )
+        .map_err(|_| CliError::Input("failed to encode sync checkpoint"))?;
+        let mut chain = checkpoints.to_vec();
+        chain.push(checkpoint.clone());
+        if let Err(failure) = self.validate_checkpoint_chain(changes, &chain) {
+            self.quarantine(checkpoints, &failure)?;
+            return Err(CliError::SyncIntegrity {
+                vault_id: failure.vault_id,
+                revision: failure.revision,
+                checkpoint_id: failure.checkpoint_hash,
+            });
+        }
+        Ok(checkpoint)
+    }
+
+    fn projected_state_commitment_for_authoring(
+        &mut self,
+        changes: &VaultSyncChanges,
+    ) -> Result<String, CliError> {
+        let tx = self.connection.transaction()?;
+        apply_sync_changes_transaction(&tx, changes)?;
+        let commitment = state_commitment_transaction(&tx, changes.vault_id)?;
+        tx.rollback()?;
+        Ok(commitment)
     }
 
     fn validate_checkpoint_chain(
@@ -2221,6 +2292,101 @@ mod tests {
                     .unwrap()
                     .envelope["ciphertext"],
                 "encrypted-two"
+            );
+        }
+
+        #[test]
+        fn client_authors_missing_checkpoint_from_projected_ciphertext_state() {
+            let mut cache = LocalCache::open_in_memory("checkpoint-author").unwrap();
+            let vault_id = uuid::Uuid::from_u128(1);
+            let device_id = uuid::Uuid::from_u128(9);
+            let key = signing_key(7);
+            trust(&cache, device_id, &key);
+
+            let first_changes = changes(vault_id, 1, "encrypted-one");
+            let first = cache
+                .author_checkpoint(&first_changes, &[], device_id, &key)
+                .unwrap();
+            assert_eq!(first.previous_checkpoint_hash, None);
+            umbra_crypto::checkpoints::verify_checkpoint(&first, &key.verifying_key()).unwrap();
+            cache
+                .verify_and_record_checkpoints(&first_changes, std::slice::from_ref(&first))
+                .unwrap();
+
+            let second_changes = changes(vault_id, 2, "encrypted-two");
+            let second = cache
+                .author_checkpoint(&second_changes, &[], device_id, &key)
+                .unwrap();
+            assert_eq!(
+                second.previous_checkpoint_hash,
+                Some(checkpoint_hash(&first).unwrap())
+            );
+            umbra_crypto::checkpoints::verify_checkpoint(&second, &key.verifying_key()).unwrap();
+            cache
+                .verify_and_record_checkpoints(&second_changes, std::slice::from_ref(&second))
+                .unwrap();
+            assert_eq!(
+                cache
+                    .integrity_state(vault_id)
+                    .unwrap()
+                    .verified_head
+                    .unwrap()
+                    .checkpoint,
+                second
+            );
+        }
+
+        #[test]
+        fn two_devices_use_transferred_anchors_to_author_and_verify() {
+            let mut first_cache = LocalCache::open_in_memory("author-device-a").unwrap();
+            let mut second_cache = LocalCache::open_in_memory("author-device-b").unwrap();
+            let vault_id = uuid::Uuid::from_u128(1);
+            let device_a = uuid::Uuid::from_u128(9);
+            let device_b = uuid::Uuid::from_u128(10);
+            let key_a = signing_key(7);
+            let key_b = signing_key(8);
+            for cache in [&first_cache, &second_cache] {
+                trust(cache, device_a, &key_a);
+                trust(cache, device_b, &key_b);
+            }
+
+            let first_changes = changes(vault_id, 1, "created-by-a");
+            let first = first_cache
+                .author_checkpoint(&first_changes, &[], device_a, &key_a)
+                .unwrap();
+            for cache in [&mut first_cache, &mut second_cache] {
+                cache
+                    .verify_and_record_checkpoints(&first_changes, std::slice::from_ref(&first))
+                    .unwrap();
+            }
+
+            let second_changes = changes(vault_id, 2, "updated-by-b");
+            let second = second_cache
+                .author_checkpoint(&second_changes, &[], device_b, &key_b)
+                .unwrap();
+            for cache in [&mut first_cache, &mut second_cache] {
+                cache
+                    .verify_and_record_checkpoints(&second_changes, std::slice::from_ref(&second))
+                    .unwrap();
+            }
+
+            assert_eq!(
+                first_cache
+                    .integrity_state(vault_id)
+                    .unwrap()
+                    .verified_head
+                    .unwrap()
+                    .checkpoint,
+                second
+            );
+            assert_eq!(
+                second_cache
+                    .integrity_state(vault_id)
+                    .unwrap()
+                    .verified_head
+                    .unwrap()
+                    .checkpoint,
+                second
             );
         }
 

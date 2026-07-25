@@ -5,8 +5,9 @@ use crate::http::UmbraHttpClient;
 use serde::Serialize;
 use umbra_core::{RevisionId, VaultId};
 use umbra_protocol::{
-    SYNC_INTEGRITY_PROTOCOL_VERSION, SyncRequest, SyncResponse, SyncStatusRequest,
-    SyncStatusResponse, VaultStatus, VaultStatusCursor, VaultSyncCursor,
+    CreateSyncCheckpointRequest, SYNC_INTEGRITY_PROTOCOL_VERSION, SyncCheckpoint, SyncRequest,
+    SyncResponse, SyncStatusRequest, SyncStatusResponse, VaultStatus, VaultStatusCursor,
+    VaultSyncChanges, VaultSyncCursor,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -184,12 +185,139 @@ async fn sync_vault(
         .filter(|checkpoint| checkpoint.vault_id == vault_id)
         .cloned()
         .collect::<Vec<_>>();
-    cache.verify_and_record_checkpoints(changes, &checkpoints)?;
+    let allow_genesis_authoring = since_vault_revision == 0
+        && checkpoints.is_empty()
+        && cache.integrity_state(vault_id)?.verified_head.is_none();
+    apply_or_publish_checkpoint(
+        client,
+        profile,
+        cache,
+        changes,
+        checkpoints,
+        allow_genesis_authoring,
+    )
+    .await?;
     Ok(SyncOutcome {
         synced: true,
         latest_vault_revision: changes.latest_vault_revision,
         latest_access_revision: changes.latest_access_revision,
     })
+}
+
+pub async fn publish_checkpoint_after_mutation(
+    profile: &ProfileConfig,
+    cache: &mut LocalCache,
+    vault_id: VaultId,
+) -> Result<SyncOutcome, CliError> {
+    if cache.is_sync_unsafe(vault_id)? {
+        return Err(cache.integrity_error(vault_id)?);
+    }
+    record_local_trust_anchor(profile, cache)?;
+    let client = UmbraHttpClient::new(profile)?;
+    let since_vault_revision = cache
+        .integrity_state(vault_id)?
+        .verified_head
+        .map(|head| head.checkpoint.vault_revision)
+        .unwrap_or(0);
+    let device_id = profile.device_id.ok_or(CliError::Input(
+        "profile has no device id; run `umbra login` first",
+    ))?;
+    let response: SyncResponse = client
+        .post(
+            "/api/v1/sync",
+            &SyncRequest {
+                protocol_version: SYNC_INTEGRITY_PROTOCOL_VERSION,
+                device_id,
+                vaults: vec![VaultSyncCursor {
+                    vault_id,
+                    since_vault_revision,
+                }],
+            },
+        )
+        .await?;
+    if response.protocol_version != SYNC_INTEGRITY_PROTOCOL_VERSION {
+        cache.quarantine_transport_failure(
+            vault_id,
+            since_vault_revision,
+            &format!("protocol-version-{}", response.protocol_version),
+            "protocol_downgrade",
+        )?;
+        return Err(cache.integrity_error(vault_id)?);
+    }
+    let matching_changes = response
+        .vaults
+        .iter()
+        .filter(|changes| changes.vault_id == vault_id)
+        .collect::<Vec<_>>();
+    let [changes] = matching_changes.as_slice() else {
+        let code = if matching_changes.is_empty() {
+            "missing_vault_response"
+        } else {
+            "duplicate_vault_response"
+        };
+        cache.quarantine_transport_failure(vault_id, since_vault_revision, "missing", code)?;
+        return Err(cache.integrity_error(vault_id)?);
+    };
+    let checkpoints = response
+        .checkpoints
+        .into_iter()
+        .filter(|checkpoint| checkpoint.vault_id == vault_id)
+        .collect();
+    apply_or_publish_checkpoint(&client, profile, cache, changes, checkpoints, true).await?;
+    Ok(SyncOutcome {
+        synced: true,
+        latest_vault_revision: changes.latest_vault_revision,
+        latest_access_revision: changes.latest_access_revision,
+    })
+}
+
+async fn apply_or_publish_checkpoint(
+    client: &UmbraHttpClient,
+    profile: &ProfileConfig,
+    cache: &mut LocalCache,
+    changes: &VaultSyncChanges,
+    mut checkpoints: Vec<SyncCheckpoint>,
+    allow_authoring: bool,
+) -> Result<(), CliError> {
+    let has_latest = checkpoints
+        .iter()
+        .any(|checkpoint| checkpoint.vault_revision == changes.latest_vault_revision);
+    if has_latest || !allow_authoring {
+        return cache.verify_and_record_checkpoints(changes, &checkpoints);
+    }
+
+    let device_id = profile.device_id.ok_or(CliError::Input(
+        "profile has no device id; run `umbra login` first",
+    ))?;
+    let signing_key = profile
+        .device_private_key
+        .as_deref()
+        .ok_or(CliError::Input(
+            "profile has no device signing key; run `umbra login` first",
+        ))
+        .and_then(crate::keys::DeviceSigningKey::from_base64url)?;
+    let candidate =
+        cache.author_checkpoint(changes, &checkpoints, device_id, signing_key.signing_key())?;
+    let published: SyncCheckpoint = client
+        .post(
+            &format!("/api/v1/vaults/{}/checkpoints", changes.vault_id),
+            &CreateSyncCheckpointRequest {
+                protocol_version: SYNC_INTEGRITY_PROTOCOL_VERSION,
+                checkpoint: candidate.clone(),
+            },
+        )
+        .await?;
+    if published != candidate {
+        cache.quarantine_transport_failure(
+            changes.vault_id,
+            changes.latest_vault_revision,
+            "mismatched-checkpoint-response",
+            "checkpoint_publish_mismatch",
+        )?;
+        return Err(cache.integrity_error(changes.vault_id)?);
+    }
+    checkpoints.push(published);
+    cache.verify_and_record_checkpoints(changes, &checkpoints)
 }
 
 pub(crate) fn record_local_trust_anchor(

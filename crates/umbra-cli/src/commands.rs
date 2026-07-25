@@ -12,10 +12,10 @@ use umbra_core::{
     VaultKind, VaultRole,
 };
 use umbra_crypto::{
-    AadV1, CryptoEnvelopeV1, DeviceBootstrapBundleV1, DeviceBootstrapEnvelopeV1, MasterPassword,
-    RecoveryChallengeEnvelopeV1, UserPrivateKey, UserPublicKey, VaultKey,
-    VaultKeyWrappingEnvelopeV1, decrypt_device_bootstrap_bundle, decrypt_item,
-    decrypt_recovery_challenge, encrypt_device_bootstrap_bundle, encrypt_item,
+    AadV1, CryptoEnvelopeV1, DeviceBootstrapBundleV1, DeviceBootstrapEnvelopeV1,
+    DeviceCheckpointTrustAnchorV1, MasterPassword, RecoveryChallengeEnvelopeV1, UserPrivateKey,
+    UserPublicKey, VaultKey, VaultKeyWrappingEnvelopeV1, decrypt_device_bootstrap_bundle,
+    decrypt_item, decrypt_recovery_challenge, encrypt_device_bootstrap_bundle, encrypt_item,
     generate_user_keypair, generate_vault_key, unwrap_vault_key, wrap_vault_key_for_user,
 };
 use umbra_protocol::{
@@ -305,13 +305,7 @@ pub async fn run(
                     },
                 )
                 .await?;
-            crate::sync::ensure_vault_synced(
-                profile,
-                &mut cache,
-                vault_id,
-                crate::sync::SyncMode::Always,
-            )
-            .await?;
+            crate::sync::publish_checkpoint_after_mutation(profile, &mut cache, vault_id).await?;
             if output.is_json() {
                 print_json(&response)
             } else {
@@ -615,11 +609,29 @@ pub async fn run(
             {
                 return Err(CliError::Input("approval code belongs to another device"));
             }
+            let cache = crate::cache::LocalCache::open(&config.active_profile)?;
+            crate::sync::record_local_trust_anchor(profile, &cache)?;
+            let devices: Vec<DeviceResponse> = client.get("/api/v1/devices").await?;
+            let pending_device = devices
+                .iter()
+                .find(|device| device.device_id == pending.device_id)
+                .ok_or(CliError::Input(
+                    "pending device is missing from authenticated device list",
+                ))?;
+            let pending_anchor = checkpoint_anchor_from_device(pending_device)?;
+            let mut trusted_checkpoint_devices = cache.trusted_checkpoint_devices()?;
+            if !trusted_checkpoint_devices
+                .iter()
+                .any(|device| device.device_id == pending_anchor.device_id)
+            {
+                trusted_checkpoint_devices.push(pending_anchor.clone());
+            }
             let bootstrap_bundle = if let Some(raw) = bootstrap_bundle_json {
                 serde_json::from_str(&raw)?
             } else {
                 let recipient = UserPublicKey::from_base64url(&pending.bootstrap_public_key)?;
-                let bundle = device_bootstrap_bundle_from_profile(profile)?;
+                let bundle =
+                    device_bootstrap_bundle_from_profile(profile, &trusted_checkpoint_devices)?;
                 let envelope = encrypt_device_bootstrap_bundle(
                     &recipient,
                     AadV1::device_bootstrap(pending.device_id.to_string()),
@@ -637,6 +649,13 @@ pub async fn run(
                     },
                 )
                 .await?;
+            let approved_anchor = checkpoint_anchor_from_device(&approved)?;
+            if approved_anchor != pending_anchor {
+                return Err(CliError::Input(
+                    "approved device signing key changed during approval",
+                ));
+            }
+            cache.record_trusted_checkpoint_device(&approved_anchor)?;
             if output.is_json() {
                 print_json(&approved)
             } else {
@@ -678,6 +697,11 @@ pub async fn run(
             let private_key = UserPrivateKey::from_base64url(bootstrap_private_key)?;
             let aad = AadV1::device_bootstrap(device_id.to_string());
             let bundle = decrypt_device_bootstrap_bundle(&private_key, &aad, &envelope)?;
+            let trusted_checkpoint_devices = bundle
+                .trusted_checkpoint_devices
+                .iter()
+                .map(checkpoint_anchor_from_bootstrap)
+                .collect::<Result<Vec<_>, _>>()?;
             profile.kdf_params = Some(bundle.kdf_params);
             profile.encrypted_user_private_key =
                 Some(serde_json::to_value(bundle.encrypted_user_private_key)?);
@@ -691,6 +715,10 @@ pub async fn run(
             profile.pending_bootstrap_private_key = None;
             profile.pending_approval_code = None;
             save_config(&config)?;
+            let cache = crate::cache::LocalCache::open(&config.active_profile)?;
+            for trusted_device in trusted_checkpoint_devices {
+                cache.record_trusted_checkpoint_device(&trusted_device)?;
+            }
             if output.is_json() {
                 print_json(&response)
             } else {
@@ -849,6 +877,13 @@ pub async fn run(
             if cache.is_sync_unsafe(vault_id)? {
                 return Err(cache.integrity_error(vault_id)?);
             }
+            crate::sync::ensure_vault_synced(
+                profile,
+                &mut cache,
+                vault_id,
+                crate::sync::SyncMode::Always,
+            )
+            .await?;
             let status: RotationStatusResponse = client
                 .get(&format!("/api/v1/vaults/{vault_id}/rotation-status"))
                 .await?;
@@ -957,49 +992,7 @@ pub async fn run(
                 vault_id,
                 new_vault_key.clone(),
             )?;
-            let refresh: SyncResponse = client
-                .post(
-                    "/api/v1/sync",
-                    &SyncRequest {
-                        protocol_version: SYNC_INTEGRITY_PROTOCOL_VERSION,
-                        device_id,
-                        vaults: vec![VaultSyncCursor {
-                            vault_id,
-                            since_vault_revision: 0,
-                        }],
-                    },
-                )
-                .await?;
-            if refresh.protocol_version != SYNC_INTEGRITY_PROTOCOL_VERSION {
-                cache.quarantine_transport_failure(
-                    vault_id,
-                    0,
-                    &format!("protocol-version-{}", refresh.protocol_version),
-                    "protocol_downgrade",
-                )?;
-                return Err(cache.integrity_error(vault_id)?);
-            }
-            let matching_refresh_changes = refresh
-                .vaults
-                .iter()
-                .filter(|changes| changes.vault_id == vault_id)
-                .collect::<Vec<_>>();
-            let [refresh_changes] = matching_refresh_changes.as_slice() else {
-                let code = if matching_refresh_changes.is_empty() {
-                    "missing_vault_response"
-                } else {
-                    "duplicate_vault_response"
-                };
-                cache.quarantine_transport_failure(vault_id, 0, "missing", code)?;
-                return Err(cache.integrity_error(vault_id)?);
-            };
-            let refresh_checkpoints = refresh
-                .checkpoints
-                .iter()
-                .filter(|checkpoint| checkpoint.vault_id == vault_id)
-                .cloned()
-                .collect::<Vec<_>>();
-            cache.verify_and_record_checkpoints(refresh_changes, &refresh_checkpoints)?;
+            crate::sync::publish_checkpoint_after_mutation(profile, &mut cache, vault_id).await?;
             refresh_cached_vault_metadata(&client, &cache, vault_id).await?;
             render_rotation_complete(output, &completed, &summary)
         }
@@ -1079,13 +1072,8 @@ pub async fn run(
                 save_config(&config)?;
             }
             let profile = active_profile(&config)?;
-            crate::sync::ensure_vault_synced(
-                profile,
-                &mut cache,
-                vault.vault_id,
-                crate::sync::SyncMode::Always,
-            )
-            .await?;
+            crate::sync::publish_checkpoint_after_mutation(profile, &mut cache, vault.vault_id)
+                .await?;
             render_vault_created(output, &vault)
         }
         Command::Vault(VaultCommand::Members { vault_id, vault }) => {
@@ -1412,13 +1400,7 @@ pub async fn run(
                 )
                 .await?;
             cache.delete_item(vault_id, revision.item_id)?;
-            crate::sync::ensure_vault_synced(
-                profile,
-                &mut cache,
-                vault_id,
-                crate::sync::SyncMode::Always,
-            )
-            .await?;
+            crate::sync::publish_checkpoint_after_mutation(profile, &mut cache, vault_id).await?;
             render_item_deleted(output, vault_id, revision.item_id, revision.revision)
         }
         Command::Item(ItemCommand::Create {
@@ -1437,6 +1419,13 @@ pub async fn run(
             let mut cache = crate::cache::LocalCache::open(&config.active_profile)?;
             let vault_id =
                 resolve_vault_id_for_output(profile, &cache, vault_id, vault.as_deref(), output)?;
+            crate::sync::ensure_vault_synced(
+                profile,
+                &mut cache,
+                vault_id,
+                crate::sync::SyncMode::IfChanged,
+            )
+            .await?;
             let (item_id, envelope) = match envelope_json {
                 Some(envelope_json) => (None, serde_json::from_str(&envelope_json)?),
                 None => {
@@ -1472,13 +1461,7 @@ pub async fn run(
                 )
                 .await?;
             cache.upsert_item_revision(&response)?;
-            crate::sync::ensure_vault_synced(
-                profile,
-                &mut cache,
-                vault_id,
-                crate::sync::SyncMode::Always,
-            )
-            .await?;
+            crate::sync::publish_checkpoint_after_mutation(profile, &mut cache, vault_id).await?;
             render_item_revision_created(output, "created item", &response)
         }
         Command::Item(ItemCommand::Update {
@@ -1490,6 +1473,14 @@ pub async fn run(
             let profile = active_profile(&config)?;
             require_login(profile)?;
             let client = UmbraHttpClient::new(profile)?;
+            let mut cache = crate::cache::LocalCache::open(&config.active_profile)?;
+            crate::sync::ensure_vault_synced(
+                profile,
+                &mut cache,
+                vault_id,
+                crate::sync::SyncMode::IfChanged,
+            )
+            .await?;
             let response: ItemRevisionResponse = client
                 .put(
                     &format!("/api/v1/vaults/{vault_id}/items/{item_id}"),
@@ -1502,15 +1493,8 @@ pub async fn run(
                     },
                 )
                 .await?;
-            let mut cache = crate::cache::LocalCache::open(&config.active_profile)?;
             cache.upsert_item_revision(&response)?;
-            crate::sync::ensure_vault_synced(
-                profile,
-                &mut cache,
-                vault_id,
-                crate::sync::SyncMode::Always,
-            )
-            .await?;
+            crate::sync::publish_checkpoint_after_mutation(profile, &mut cache, vault_id).await?;
             print_json(&response)
         }
         Command::Secret(SecretCommand::Set {
@@ -1587,13 +1571,7 @@ pub async fn run(
                         .await?
                 };
             cache.upsert_item_revision(&response)?;
-            crate::sync::ensure_vault_synced(
-                profile,
-                &mut cache,
-                vault_id,
-                crate::sync::SyncMode::Always,
-            )
-            .await?;
+            crate::sync::publish_checkpoint_after_mutation(profile, &mut cache, vault_id).await?;
             render_item_revision_created(output, "saved secret", &response)
         }
         Command::Secret(SecretCommand::List {
@@ -1718,13 +1696,7 @@ pub async fn run(
                 )
                 .await?;
             cache.upsert_item_revision(&response)?;
-            crate::sync::ensure_vault_synced(
-                profile,
-                &mut cache,
-                vault_id,
-                crate::sync::SyncMode::Always,
-            )
-            .await?;
+            crate::sync::publish_checkpoint_after_mutation(profile, &mut cache, vault_id).await?;
             if output.is_json() {
                 print_json(&response)
             } else {
@@ -2306,6 +2278,7 @@ fn apply_recovered_emergency_kit_material(
 
 fn device_bootstrap_bundle_from_profile(
     profile: &crate::config::ProfileConfig,
+    trusted_checkpoint_devices: &[crate::cache::TrustedCheckpointDevice],
 ) -> Result<DeviceBootstrapBundleV1, CliError> {
     let user_secret_key = profile
         .user_secret_key
@@ -2332,6 +2305,47 @@ fn device_bootstrap_bundle_from_profile(
         encrypted_user_private_key,
         account_public_key,
         default_vault_id: profile.default_vault_id.map(|id| id.to_string()),
+        trusted_checkpoint_devices: trusted_checkpoint_devices
+            .iter()
+            .map(|device| DeviceCheckpointTrustAnchorV1 {
+                device_id: device.device_id.to_string(),
+                public_key: device.public_key.clone(),
+                revoked: device.revoked,
+            })
+            .collect(),
+    })
+}
+
+fn checkpoint_anchor_from_device(
+    device: &DeviceResponse,
+) -> Result<crate::cache::TrustedCheckpointDevice, CliError> {
+    let public_key = device
+        .public_key
+        .clone()
+        .ok_or(CliError::Input("device has no signing public key"))?;
+    if crate::keys::public_key_fingerprint(&public_key)? != device.fingerprint {
+        return Err(CliError::Input(
+            "device signing public key does not match its fingerprint",
+        ));
+    }
+    Ok(crate::cache::TrustedCheckpointDevice {
+        device_id: device.device_id,
+        public_key,
+        revoked: device.revoked_at.is_some(),
+    })
+}
+
+fn checkpoint_anchor_from_bootstrap(
+    anchor: &DeviceCheckpointTrustAnchorV1,
+) -> Result<crate::cache::TrustedCheckpointDevice, CliError> {
+    let device_id = Uuid::parse_str(&anchor.device_id)
+        .map_err(|_| CliError::Input("invalid checkpoint device id in bootstrap bundle"))?;
+    umbra_auth::verifying_key_from_b64(&anchor.public_key)
+        .map_err(|_| CliError::Input("invalid checkpoint public key in bootstrap bundle"))?;
+    Ok(crate::cache::TrustedCheckpointDevice {
+        device_id,
+        public_key: anchor.public_key.clone(),
+        revoked: anchor.revoked,
     })
 }
 
@@ -4195,7 +4209,12 @@ mod tests {
             ..crate::config::ProfileConfig::default()
         };
 
-        let bundle = device_bootstrap_bundle_from_profile(&profile).unwrap();
+        let anchors = vec![crate::cache::TrustedCheckpointDevice {
+            device_id: Uuid::from_u128(9),
+            public_key: "checkpoint-public-key".to_owned(),
+            revoked: false,
+        }];
+        let bundle = device_bootstrap_bundle_from_profile(&profile, &anchors).unwrap();
 
         assert_eq!(bundle.version, 1);
         assert_eq!(
@@ -4207,6 +4226,67 @@ mod tests {
             bundle.default_vault_id.as_deref(),
             Some(expected_default_vault_id.as_str())
         );
+        assert_eq!(bundle.trusted_checkpoint_devices.len(), 1);
+        assert_eq!(
+            bundle.trusted_checkpoint_devices[0].device_id,
+            Uuid::from_u128(9).to_string()
+        );
+        assert_eq!(
+            bundle.trusted_checkpoint_devices[0].public_key,
+            "checkpoint-public-key"
+        );
+    }
+
+    #[test]
+    fn encrypted_bootstrap_transfers_checkpoint_anchors_to_second_device() {
+        let account_crypto = crate::crypto_state::NewAccountCrypto::generate(&MasterPassword::new(
+            "correct horse battery staple",
+        ))
+        .unwrap();
+        let first_key = DeviceSigningKey::generate();
+        let second_key = DeviceSigningKey::generate();
+        let first_device = Uuid::from_u128(9);
+        let second_device = Uuid::from_u128(10);
+        let anchors = vec![
+            crate::cache::TrustedCheckpointDevice {
+                device_id: first_device,
+                public_key: first_key.public_key_base64url(),
+                revoked: false,
+            },
+            crate::cache::TrustedCheckpointDevice {
+                device_id: second_device,
+                public_key: second_key.public_key_base64url(),
+                revoked: false,
+            },
+        ];
+        let profile = crate::config::ProfileConfig {
+            client_public_key: Some(account_crypto.public_key.to_base64url()),
+            encrypted_user_private_key: Some(
+                serde_json::to_value(account_crypto.encrypted_private_key).unwrap(),
+            ),
+            kdf_params: Some(account_crypto.kdf_params.clone()),
+            user_secret_key: Some(account_crypto.user_secret_key.to_base64url()),
+            ..crate::config::ProfileConfig::default()
+        };
+        let bundle = device_bootstrap_bundle_from_profile(&profile, &anchors).unwrap();
+        let bootstrap_keypair = generate_user_keypair();
+        let aad = AadV1::device_bootstrap(second_device.to_string());
+        let envelope =
+            encrypt_device_bootstrap_bundle(&bootstrap_keypair.public_key, aad.clone(), &bundle)
+                .unwrap();
+        let decrypted =
+            decrypt_device_bootstrap_bundle(&bootstrap_keypair.private_key, &aad, &envelope)
+                .unwrap();
+        let second_cache = crate::cache::LocalCache::open_in_memory("second-device").unwrap();
+        for anchor in &decrypted.trusted_checkpoint_devices {
+            second_cache
+                .record_trusted_checkpoint_device(
+                    &checkpoint_anchor_from_bootstrap(anchor).unwrap(),
+                )
+                .unwrap();
+        }
+
+        assert_eq!(second_cache.trusted_checkpoint_devices().unwrap(), anchors);
     }
 
     #[test]

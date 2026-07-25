@@ -485,6 +485,16 @@ pub struct DeviceBootstrapBundleV1 {
     pub encrypted_user_private_key: CryptoEnvelopeV1,
     pub account_public_key: String,
     pub default_vault_id: Option<String>,
+    #[serde(default)]
+    pub trusted_checkpoint_devices: Vec<DeviceCheckpointTrustAnchorV1>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceCheckpointTrustAnchorV1 {
+    pub device_id: String,
+    pub public_key: String,
+    #[serde(default)]
+    pub revoked: bool,
 }
 
 impl std::fmt::Debug for DeviceBootstrapBundleV1 {
@@ -499,6 +509,10 @@ impl std::fmt::Debug for DeviceBootstrapBundleV1 {
             )
             .field("account_public_key", &self.account_public_key)
             .field("default_vault_id", &self.default_vault_id)
+            .field(
+                "trusted_checkpoint_device_count",
+                &self.trusted_checkpoint_devices.len(),
+            )
             .finish()
     }
 }
@@ -1065,6 +1079,11 @@ mod tests {
             encrypted_user_private_key,
             account_public_key: account.public_key.to_base64url(),
             default_vault_id: Some("vault-1".to_owned()),
+            trusted_checkpoint_devices: vec![DeviceCheckpointTrustAnchorV1 {
+                device_id: "device-1".to_owned(),
+                public_key: "checkpoint-public-key".to_owned(),
+                revoked: false,
+            }],
         }
     }
 
@@ -1151,6 +1170,22 @@ mod tests {
 
         let debug = format!("{bundle:?}");
         assert!(!debug.contains(&bundle.user_secret_key));
+    }
+
+    #[test]
+    fn legacy_device_bootstrap_bundle_defaults_checkpoint_anchors() {
+        let current = bootstrap_bundle();
+        let bundle: DeviceBootstrapBundleV1 = serde_json::from_value(serde_json::json!({
+            "version": current.version,
+            "user_secret_key": current.user_secret_key,
+            "kdf_params": current.kdf_params,
+            "encrypted_user_private_key": current.encrypted_user_private_key,
+            "account_public_key": current.account_public_key,
+            "default_vault_id": null
+        }))
+        .unwrap();
+
+        assert!(bundle.trusted_checkpoint_devices.is_empty());
     }
 
     #[test]
