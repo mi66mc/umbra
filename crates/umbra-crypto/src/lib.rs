@@ -392,6 +392,22 @@ impl AadV1 {
         }
     }
 
+    pub fn device_vault_key_wrapping(
+        vault_id: impl Into<String>,
+        device_id: impl Into<String>,
+        generation: i64,
+    ) -> Self {
+        Self {
+            app: "umbra".to_owned(),
+            purpose: "device_vault_key_wrapping".to_owned(),
+            schema: 1,
+            vault_id: vault_id.into(),
+            item_id: Some(device_id.into()),
+            revision: Some(generation),
+            kind: None,
+        }
+    }
+
     pub fn user_private_key(user_id: impl Into<String>) -> Self {
         Self {
             app: "umbra".to_owned(),
@@ -1147,6 +1163,18 @@ mod tests {
         let unwrapped = unwrap_vault_key(&keypair.private_key, &aad, &envelope).unwrap();
 
         assert_eq!(unwrapped, vault_key);
+    }
+
+    #[test]
+    fn device_wrapping_aad_binds_device_and_generation() {
+        assert_ne!(
+            AadV1::device_vault_key_wrapping("vault", "device-a", 1),
+            AadV1::device_vault_key_wrapping("vault", "device-b", 1)
+        );
+        assert_ne!(
+            AadV1::device_vault_key_wrapping("vault", "device-a", 1),
+            AadV1::device_vault_key_wrapping("vault", "device-a", 2)
+        );
     }
 
     #[test]

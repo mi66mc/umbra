@@ -33,6 +33,8 @@ pub struct ProfileConfig {
     #[serde(default)]
     pub device_private_key: Option<String>,
     #[serde(default)]
+    pub device_encryption_private_key: Option<String>,
+    #[serde(default)]
     pub client_public_key: Option<String>,
     #[serde(default)]
     pub encrypted_user_private_key: Option<serde_json::Value>,
@@ -72,6 +74,13 @@ impl fmt::Debug for ProfileConfig {
             .field("device_id", &self.device_id)
             .field("session_id", &self.session_id)
             .field("device_private_key", &self.device_private_key)
+            .field(
+                "device_encryption_private_key",
+                &self
+                    .device_encryption_private_key
+                    .as_ref()
+                    .map(|_| "[redacted]"),
+            )
             .field("client_public_key", &self.client_public_key)
             .field(
                 "encrypted_user_private_key",
@@ -115,6 +124,7 @@ impl Default for ProfileConfig {
             device_id: None,
             session_id: None,
             device_private_key: None,
+            device_encryption_private_key: None,
             client_public_key: None,
             encrypted_user_private_key: None,
             kdf_params: None,
