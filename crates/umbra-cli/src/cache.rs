@@ -1164,6 +1164,37 @@ impl LocalCache {
         }
     }
 
+    pub fn latest_device_key_wrapping(
+        &self,
+        vault_id: uuid::Uuid,
+        user_id: uuid::Uuid,
+        device_id: uuid::Uuid,
+    ) -> Result<Option<CachedKeyWrapping>, CliError> {
+        let mut statement = self.connection.prepare(
+            r#"
+            SELECT id, vault_id, user_id, device_id, wrapping_type, envelope_json, key_generation
+            FROM vault_key_wrappings
+            WHERE vault_id = ?1 AND user_id = ?2 AND device_id = ?3
+              AND wrapping_type = 'device_public_key'
+            ORDER BY key_generation DESC
+            LIMIT 1
+            "#,
+        )?;
+        let result = statement.query_row(
+            params![
+                vault_id.to_string(),
+                user_id.to_string(),
+                device_id.to_string()
+            ],
+            cached_key_wrapping_from_row,
+        );
+        match result {
+            Ok(value) => Ok(Some(value)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(CliError::from(error)),
+        }
+    }
+
     pub fn list_latest_item_revisions(
         &self,
         vault_id: uuid::Uuid,

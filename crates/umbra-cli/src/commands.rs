@@ -497,7 +497,7 @@ pub async fn run(
             let mut vault_keys = BTreeMap::new();
             for vault_id in vault_ids {
                 let wrapping = cache
-                    .latest_key_wrapping(vault_id, user_id)?
+                    .latest_device_key_wrapping(vault_id, user_id, device_id)?
                     .ok_or(CliError::MissingVaultKeyWrapping(vault_id))?;
                 let envelope: VaultKeyWrappingEnvelopeV1 =
                     serde_json::from_value(wrapping.envelope)?;
@@ -3347,7 +3347,7 @@ fn unlock_vault_key(
             CliError::Input("profile has no device encryption key; re-enroll this device"),
         )?)?;
     let wrapping = cache
-        .latest_key_wrapping(vault_id, user_id)?
+        .latest_device_key_wrapping(vault_id, user_id, device_id)?
         .ok_or(CliError::MissingVaultKeyWrapping(vault_id))?;
     let envelope: VaultKeyWrappingEnvelopeV1 = serde_json::from_value(wrapping.envelope)?;
     let aad = AadV1::device_vault_key_wrapping(
