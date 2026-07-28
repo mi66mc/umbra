@@ -114,6 +114,8 @@ pub struct LoginResponse {
 pub struct DeviceRegisterRequest {
     pub name: String,
     pub public_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encryption_public_key: Option<String>,
     pub fingerprint: String,
 }
 

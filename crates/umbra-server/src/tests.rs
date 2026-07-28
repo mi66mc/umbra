@@ -2102,6 +2102,7 @@ async fn signed_login_can_create_org_and_rejects_nonce_replay() {
             initial_device: DeviceRegisterRequest {
                 name: "signed laptop".to_owned(),
                 public_key: verifying_key_to_b64(&signing_key.verifying_key()),
+                encryption_public_key: None,
                 fingerprint: "signed-device-fingerprint".to_owned(),
             },
             registration_upload: encode_b64(registration_finish.message.serialize().as_slice()),
@@ -2250,6 +2251,7 @@ async fn signed_login_rejects_revoked_device_state() {
             initial_device: DeviceRegisterRequest {
                 name: "revoked laptop".to_owned(),
                 public_key: verifying_key_to_b64(&signing_key.verifying_key()),
+                encryption_public_key: None,
                 fingerprint: "revoked-device-fingerprint".to_owned(),
             },
             registration_upload: encode_b64(registration_finish.message.serialize().as_slice()),
@@ -2691,6 +2693,7 @@ async fn register_and_login(app: Router, email: &str, password: &[u8]) -> String
             initial_device: DeviceRegisterRequest {
                 name: "dev laptop".to_owned(),
                 public_key: "device-public-key".to_owned(),
+                encryption_public_key: None,
                 fingerprint: "device-fingerprint".to_owned(),
             },
             registration_upload: encode_b64(registration_finish.message.serialize().as_slice()),
@@ -2943,6 +2946,7 @@ async fn register_user_with_device(
             initial_device: DeviceRegisterRequest {
                 name: device_name.to_owned(),
                 public_key: device_public_key,
+                encryption_public_key: None,
                 fingerprint: device_fingerprint,
             },
             registration_upload: encode_b64(registration_finish.message.serialize().as_slice()),

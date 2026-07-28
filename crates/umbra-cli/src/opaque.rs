@@ -18,6 +18,7 @@ use crate::keys::DeviceSigningKey;
 pub(crate) struct AccountRegistrationMaterial {
     pub(crate) public_key: String,
     pub(crate) encrypted_private_key: serde_json::Value,
+    pub(crate) device_encryption_public_key: String,
 }
 
 pub async fn register(
@@ -68,6 +69,7 @@ pub async fn register(
                 initial_device: DeviceRegisterRequest {
                     name: device_name.to_owned(),
                     public_key: device_key.public_key_base64url(),
+                    encryption_public_key: Some(account_material.device_encryption_public_key),
                     fingerprint: device_key.fingerprint(),
                 },
                 registration_upload: encode_b64(registration_finish.message.serialize().as_slice()),

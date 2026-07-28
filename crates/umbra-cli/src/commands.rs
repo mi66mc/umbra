@@ -334,6 +334,7 @@ pub async fn run(
                     .interact_text()?,
             };
             let device_key = DeviceSigningKey::generate();
+            let device_encryption_key = umbra_crypto::generate_user_keypair();
             let account_crypto = crate::crypto_state::NewAccountCrypto::generate(
                 &umbra_crypto::MasterPassword::new(password.as_bytes().to_vec()),
             )?;
@@ -353,6 +354,7 @@ pub async fn run(
                 crate::opaque::AccountRegistrationMaterial {
                     public_key: account_public_key.clone(),
                     encrypted_private_key: encrypted_user_private_key.clone(),
+                    device_encryption_public_key: device_encryption_key.public_key.to_base64url(),
                 },
             )
             .await?;
@@ -362,6 +364,8 @@ pub async fn run(
             profile_config.user_id = Some(response.user_id);
             profile_config.device_id = Some(response.device_id);
             profile_config.device_private_key = Some(device_key.to_base64url());
+            profile_config.device_encryption_private_key =
+                Some(device_encryption_key.private_key.to_base64url());
             profile_config.client_public_key = Some(account_public_key);
             profile_config.encrypted_user_private_key = Some(encrypted_user_private_key);
             profile_config.kdf_params = Some(kdf_params);

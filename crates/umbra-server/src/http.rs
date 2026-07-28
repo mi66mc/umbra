@@ -328,7 +328,7 @@ async fn auth_register_finish(
             user_id: user.id,
             name: request.initial_device.name,
             public_key: Some(request.initial_device.public_key),
-            encryption_public_key: None,
+            encryption_public_key: request.initial_device.encryption_public_key,
             fingerprint: request.initial_device.fingerprint,
             state: DeviceState::Trusted,
             approval_code_hash: None,
