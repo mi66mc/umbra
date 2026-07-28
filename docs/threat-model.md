@@ -63,13 +63,11 @@ They also do not solve first-contact active MITM by themselves. Production deplo
 
 ## Local SQLite Cache
 
-The first CLI cache stores encrypted envelopes and metadata in SQLite.
+The CLI operates SQLite only in memory and persists the complete database as a versioned XChaCha20-Poly1305 authenticated `cache.enc` snapshot. The separate random cache key is held only by the OS keychain. A stolen cache artifact therefore does not reveal vault IDs, item IDs, revision counts, timestamps, names, envelopes, plaintext secrets, plaintext vault keys, or master passwords without the local keychain credential.
 
-It does not store plaintext secrets, plaintext vault keys, or master passwords.
+Missing keys, malformed snapshots, unsupported versions, and authentication failures fail closed without erasing the encrypted artifact. Atomic replacement preserves the prior snapshot if a write cannot be promoted. A per-profile interprocess lock plus encrypted-artifact hash comparison rejects a stale writer before promotion, so a concurrent command cannot replace a newly persisted quarantine or checkpoint trust anchor with an older snapshot. Legacy plaintext caches are intentionally not auto-deleted because the user may need to recover them; operators must treat them as sensitive, back them up offline, remove them deliberately, and sync again.
 
-A local attacker who steals the cache can see metadata such as vault ids, item ids, revision counts, timestamps, and any non-secret names stored outside envelopes. They still need client-side key material to decrypt item contents.
-
-Future work may encrypt sensitive metadata or the full SQLite database with a local cache key.
+This does not protect against malware in the same OS account, a compromised OS keychain, a process-memory dump while Umbra runs, or backups/filesystem remnants created before migration. The server still never receives cache keys, cache plaintext, or SQLite bytes.
 
 ## Local Unlock State
 

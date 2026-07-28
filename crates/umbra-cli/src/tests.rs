@@ -1029,6 +1029,12 @@ fn parses_cache_status_command() {
 }
 
 #[test]
+fn parses_cache_clear_command() {
+    let cli = Cli::parse_from(["umbra", "cache", "clear"]);
+    assert!(matches!(cli.command, Command::Cache(CacheCommand::Clear)));
+}
+
+#[test]
 fn parses_crypto_rotation_commands() {
     let vault_id = "00000000-0000-0000-0000-000000000001";
 

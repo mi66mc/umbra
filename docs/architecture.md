@@ -109,6 +109,12 @@ The user secret key is not a daily password. It is a high-entropy account secret
 - New device with no trusted device available: user enters password, imports the emergency kit, decrypts the server-provided encrypted user private key locally, and completes a recovery challenge.
 - After registration or bootstrap: the device may store the secret key locally, protected by OS keychain or encrypted local cache.
 
+### Encrypted local cache
+
+The CLI uses SQLite only in process memory. After a committed cache mutation it serializes the in-memory database, encrypts the whole snapshot with XChaCha20-Poly1305, binds it to the profile and cache format version, and atomically replaces `cache.enc`. The random snapshot key exists only in the OS keychain under a separate versioned cache account. No SQLite, WAL, journal, plaintext metadata, or cache key is intentionally persisted to disk. The server never receives cache keys, SQLite bytes, plaintext, or additional cache content. A per-profile interprocess lock serializes snapshot promotion; while holding it, a writer compares the encrypted artifact hash it opened with the current artifact and rejects stale state instead of overwriting another command's integrity records.
+
+On absent key, invalid format/version, or failed authentication, opening fails closed and leaves the artifact untouched. Legacy plaintext `cache.db` files are detected and left unchanged; the operator must back up and intentionally remove them before rebuilding a cache from server sync. `umbra cache clear` intentionally removes the encrypted cache plus its keychain entry; `umbra lock` only clears short-lived unlock state.
+
 ## Device Trust
 
 OPAQUE proves account-password knowledge. It does not make an unknown device trusted by itself.

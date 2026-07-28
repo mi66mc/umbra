@@ -1,11 +1,19 @@
+use std::cell::RefCell;
+use std::ffi::OsStr;
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use base64ct::{Base64UrlUnpadded, Encoding};
 use ed25519_dalek::SigningKey;
-use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
+use fs4::fs_std::FileExt;
+use rusqlite::{Connection, DatabaseName, OptionalExtension, params, params_from_iter};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use umbra_core::VaultKind;
+use umbra_crypto::{
+    AadV1, CryptoEnvelopeV1, LocalUnlockKey, decrypt_local_unlock_state, encrypt_local_unlock_state,
+};
 use umbra_protocol::{SyncCheckpoint, VaultSyncChanges};
 
 use crate::error::CliError;
@@ -13,6 +21,57 @@ use crate::error::CliError;
 pub struct LocalCache {
     connection: Connection,
     profile: String,
+    persistence: Option<CachePersistence>,
+}
+
+const CACHE_FORMAT_VERSION: u16 = 1;
+const KEYRING_SERVICE: &str = "umbra";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PersistedCacheV1 {
+    version: u16,
+    envelope: CryptoEnvelopeV1,
+}
+
+trait CacheKeyStore: Send + Sync {
+    fn get(&self, profile: &str) -> Result<Option<LocalUnlockKey>, CliError>;
+    fn set(&self, profile: &str, key: &LocalUnlockKey) -> Result<(), CliError>;
+    fn clear(&self, profile: &str) -> Result<(), CliError>;
+}
+
+struct KeyringCacheKeyStore;
+
+impl CacheKeyStore for KeyringCacheKeyStore {
+    fn get(&self, profile: &str) -> Result<Option<LocalUnlockKey>, CliError> {
+        let entry = keyring::Entry::new(KEYRING_SERVICE, &cache_keyring_account(profile))?;
+        match entry.get_password() {
+            Ok(value) => Ok(Some(LocalUnlockKey::from_base64url(&value)?)),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn set(&self, profile: &str, key: &LocalUnlockKey) -> Result<(), CliError> {
+        keyring::Entry::new(KEYRING_SERVICE, &cache_keyring_account(profile))?
+            .set_password(&key.to_base64url())?;
+        Ok(())
+    }
+
+    fn clear(&self, profile: &str) -> Result<(), CliError> {
+        match keyring::Entry::new(KEYRING_SERVICE, &cache_keyring_account(profile))?
+            .delete_credential()
+        {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+}
+
+struct CachePersistence {
+    encrypted_path: PathBuf,
+    lock_path: PathBuf,
+    expected_snapshot_hash: RefCell<Option<[u8; 32]>>,
+    key_store: Arc<dyn CacheKeyStore>,
 }
 
 #[allow(dead_code)]
@@ -132,10 +191,48 @@ impl LocalCache {
     }
 
     pub fn open_path(profile: &str, path: PathBuf) -> Result<Self, CliError> {
-        let connection = Connection::open(path)?;
+        Self::open_path_with_key_store(profile, path, Arc::new(KeyringCacheKeyStore))
+    }
+
+    fn open_path_with_key_store(
+        profile: &str,
+        legacy_path: PathBuf,
+        key_store: Arc<dyn CacheKeyStore>,
+    ) -> Result<Self, CliError> {
+        let encrypted_path = legacy_path.with_file_name("cache.enc");
+        if legacy_path.exists() && !encrypted_path.exists() {
+            return Err(CliError::Input(
+                "legacy plaintext cache detected; back it up, remove it intentionally, then sync again",
+            ));
+        }
+        let mut connection = Connection::open_in_memory()?;
+        let expected_snapshot_hash = snapshot_hash(&encrypted_path)?;
+        if encrypted_path.exists() {
+            let Some(key) = key_store.get(profile)? else {
+                return Err(CliError::Input(
+                    "encrypted cache key is unavailable; restore the OS keychain entry or clear the cache intentionally",
+                ));
+            };
+            let stored: PersistedCacheV1 = serde_json::from_slice(&std::fs::read(&encrypted_path)?)
+                .map_err(|_| CliError::Input("encrypted cache format is invalid; restore a known-good cache or clear it intentionally"))?;
+            if stored.version != CACHE_FORMAT_VERSION {
+                return Err(CliError::Input(
+                    "encrypted cache format version is unsupported; restore a compatible client or clear the cache intentionally",
+                ));
+            }
+            let bytes = decrypt_local_unlock_state(&key, &cache_aad(profile), &stored.envelope)
+                .map_err(|_| CliError::Input("encrypted cache authentication failed; do not trust this cache; restore it or clear it intentionally"))?;
+            deserialize_database(&mut connection, bytes)?;
+        }
         let cache = Self {
             connection,
             profile: profile.to_owned(),
+            persistence: Some(CachePersistence {
+                lock_path: encrypted_path.with_file_name("cache.lock"),
+                encrypted_path,
+                expected_snapshot_hash: RefCell::new(expected_snapshot_hash),
+                key_store,
+            }),
         };
         cache.create_schema()?;
         Ok(cache)
@@ -147,6 +244,7 @@ impl LocalCache {
         let cache = Self {
             connection,
             profile: profile.to_owned(),
+            persistence: None,
         };
         cache.create_schema()?;
         Ok(cache)
@@ -213,6 +311,7 @@ impl LocalCache {
                 "UPDATE trusted_checkpoint_devices SET revoked = ?2 WHERE device_id = ?1",
                 params![device.device_id.to_string(), revoked],
             )?;
+            self.persist()?;
             return Ok(());
         }
         self.connection.execute(
@@ -225,6 +324,7 @@ impl LocalCache {
                 chrono::Utc::now().to_rfc3339()
             ],
         )?;
+        self.persist()?;
         Ok(())
     }
 
@@ -407,6 +507,7 @@ impl LocalCache {
             params![changes.vault_id.to_string(), now],
         )?;
         tx.commit()?;
+        self.persist()?;
         Ok(())
     }
 
@@ -789,6 +890,7 @@ impl LocalCache {
             params![failure.vault_id.to_string(), now],
         )?;
         tx.commit()?;
+        self.persist()?;
         Ok(())
     }
 
@@ -821,6 +923,7 @@ impl LocalCache {
             "DELETE FROM item_revisions WHERE vault_id = ?1 AND item_id = ?2",
             params![vault_id.to_string(), item_id.to_string()],
         )?;
+        self.persist()?;
         Ok(())
     }
 
@@ -872,6 +975,7 @@ impl LocalCache {
                 now
             ],
         )?;
+        self.persist()?;
         Ok(())
     }
 
@@ -906,6 +1010,7 @@ impl LocalCache {
                 now
             ],
         )?;
+        self.persist()?;
         Ok(())
     }
 
@@ -992,6 +1097,7 @@ impl LocalCache {
                 now
             ],
         )?;
+        self.persist()?;
         Ok(())
     }
 
@@ -1129,6 +1235,51 @@ impl LocalCache {
             _ => return Err(CliError::Input("unknown cache table")),
         };
         Ok(self.connection.query_row(sql, [], |row| row.get(0))?)
+    }
+
+    pub fn clear_persistent(profile: &str) -> Result<(), CliError> {
+        let path = profile_cache_dir(profile).join("cache.enc");
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        KeyringCacheKeyStore.clear(profile)
+    }
+
+    fn persist(&self) -> Result<(), CliError> {
+        let Some(persistence) = &self.persistence else {
+            return Ok(());
+        };
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&persistence.lock_path)?;
+        lock.lock_exclusive()?;
+        let current_hash = snapshot_hash(&persistence.encrypted_path)?;
+        if current_hash != *persistence.expected_snapshot_hash.borrow() {
+            return Err(CliError::Input(
+                "local cache changed by another process; rerun the command",
+            ));
+        }
+        let existing_key = persistence.key_store.get(&self.profile)?;
+        let key = existing_key
+            .clone()
+            .unwrap_or_else(LocalUnlockKey::generate);
+        if existing_key.is_none() {
+            persistence.key_store.set(&self.profile, &key)?;
+        }
+        let snapshot = self.connection.serialize(DatabaseName::Main)?;
+        let envelope = encrypt_local_unlock_state(&key, cache_aad(&self.profile), &snapshot)?;
+        let bytes = serde_json::to_vec(&PersistedCacheV1 {
+            version: CACHE_FORMAT_VERSION,
+            envelope,
+        })?;
+        write_atomic(&persistence.encrypted_path, &bytes)?;
+        *persistence.expected_snapshot_hash.borrow_mut() = Some(snapshot_bytes_hash(&bytes));
+        Ok(())
     }
 
     fn create_schema(&self) -> Result<(), CliError> {
@@ -1744,6 +1895,68 @@ fn sanitize_profile_name(profile: &str) -> String {
         .collect()
 }
 
+fn cache_keyring_account(profile: &str) -> String {
+    format!(
+        "cache:v1:{}",
+        Base64UrlUnpadded::encode_string(profile.as_bytes())
+    )
+}
+
+fn cache_aad(profile: &str) -> AadV1 {
+    AadV1 {
+        app: "umbra".to_owned(),
+        purpose: "local_cache".to_owned(),
+        schema: CACHE_FORMAT_VERSION,
+        vault_id: profile.to_owned(),
+        item_id: Some("sqlite-snapshot".to_owned()),
+        revision: None,
+        kind: None,
+    }
+}
+
+fn deserialize_database(connection: &mut Connection, bytes: Vec<u8>) -> Result<(), CliError> {
+    use std::ptr::{NonNull, copy_nonoverlapping};
+
+    let length = bytes.len();
+    let raw = unsafe { rusqlite::ffi::sqlite3_malloc(length as i32) }.cast::<u8>();
+    let pointer = NonNull::new(raw)
+        .ok_or_else(|| std::io::Error::other("unable to allocate SQLite cache snapshot"))?;
+    unsafe { copy_nonoverlapping(bytes.as_ptr(), pointer.as_ptr(), length) };
+    let data = unsafe { rusqlite::serialize::OwnedData::from_raw_nonnull(pointer, length) };
+    connection.deserialize(DatabaseName::Main, data, false)?;
+    Ok(())
+}
+
+fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
+    let parent = path.parent().ok_or(CliError::Input(
+        "encrypted cache path has no parent directory",
+    ))?;
+    std::fs::create_dir_all(parent)?;
+    let name = path
+        .file_name()
+        .and_then(OsStr::to_str)
+        .unwrap_or("cache.enc");
+    let temporary = path.with_file_name(format!(".{name}.{}.tmp", uuid::Uuid::new_v4()));
+    std::fs::write(&temporary, bytes)?;
+    if let Err(error) = std::fs::rename(&temporary, path) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error.into());
+    }
+    Ok(())
+}
+
+fn snapshot_hash(path: &Path) -> Result<Option<[u8; 32]>, CliError> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(snapshot_bytes_hash(&bytes))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn snapshot_bytes_hash(bytes: &[u8]) -> [u8; 32] {
+    Sha256::digest(bytes).into()
+}
+
 fn cached_vault_from_row(row: &rusqlite::Row<'_>) -> Result<CachedVault, rusqlite::Error> {
     Ok(CachedVault {
         vault_id: parse_uuid(row.get::<_, String>(0)?)?,
@@ -1849,6 +2062,246 @@ fn vault_kind_to_str(kind: VaultKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct MemoryCacheKeyStore(Mutex<HashMap<String, LocalUnlockKey>>);
+
+    impl CacheKeyStore for MemoryCacheKeyStore {
+        fn get(&self, profile: &str) -> Result<Option<LocalUnlockKey>, CliError> {
+            Ok(self.0.lock().unwrap().get(profile).cloned())
+        }
+
+        fn set(&self, profile: &str, key: &LocalUnlockKey) -> Result<(), CliError> {
+            self.0
+                .lock()
+                .unwrap()
+                .insert(profile.to_owned(), key.clone());
+            Ok(())
+        }
+
+        fn clear(&self, profile: &str) -> Result<(), CliError> {
+            self.0.lock().unwrap().remove(profile);
+            Ok(())
+        }
+    }
+
+    struct KeyBeforeSnapshotStore {
+        artifact_path: PathBuf,
+        key: Mutex<Option<LocalUnlockKey>>,
+    }
+
+    impl CacheKeyStore for KeyBeforeSnapshotStore {
+        fn get(&self, _profile: &str) -> Result<Option<LocalUnlockKey>, CliError> {
+            Ok(self.key.lock().unwrap().clone())
+        }
+
+        fn set(&self, _profile: &str, key: &LocalUnlockKey) -> Result<(), CliError> {
+            if self.artifact_path.exists() {
+                return Err(CliError::Input("cache snapshot was written before its key"));
+            }
+            *self.key.lock().unwrap() = Some(key.clone());
+            Ok(())
+        }
+
+        fn clear(&self, _profile: &str) -> Result<(), CliError> {
+            *self.key.lock().unwrap() = None;
+            Ok(())
+        }
+    }
+
+    fn persisted_cache(
+        profile: &str,
+        root: &tempfile::TempDir,
+        keys: Arc<MemoryCacheKeyStore>,
+    ) -> LocalCache {
+        LocalCache::open_path_with_key_store(profile, root.path().join("cache.db"), keys).unwrap()
+    }
+
+    #[test]
+    fn persisted_cache_reopens_without_plaintext_artifacts() {
+        let root = tempfile::tempdir().unwrap();
+        let keys = Arc::new(MemoryCacheKeyStore::default());
+        let cache = persisted_cache("personal", &root, keys.clone());
+        cache
+            .upsert_vault(&umbra_protocol::VaultResponse {
+                vault_id: uuid::Uuid::new_v4(),
+                org_id: None,
+                name: "fixture-plaintext".to_owned(),
+                kind: VaultKind::Personal,
+                vault_revision: 1,
+                access_revision: 1,
+                current_key_generation: 1,
+                needs_key_rotation: false,
+            })
+            .unwrap();
+        let artifact = root.path().join("cache.enc");
+        let bytes = std::fs::read(&artifact).unwrap();
+        assert!(
+            !bytes
+                .windows(b"fixture-plaintext".len())
+                .any(|part| part == b"fixture-plaintext")
+        );
+        assert!(
+            !bytes
+                .windows(b"SQLite format 3".len())
+                .any(|part| part == b"SQLite format 3")
+        );
+        assert_eq!(
+            persisted_cache("personal", &root, keys)
+                .list_vaults()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn first_snapshot_stores_cache_key_before_writing_artifact() {
+        let root = tempfile::tempdir().unwrap();
+        let artifact = root.path().join("cache.enc");
+        let keys = Arc::new(KeyBeforeSnapshotStore {
+            artifact_path: artifact.clone(),
+            key: Mutex::new(None),
+        });
+        let cache = LocalCache::open_path_with_key_store(
+            "personal",
+            root.path().join("cache.db"),
+            keys.clone(),
+        )
+        .unwrap();
+
+        cache
+            .upsert_vault(&umbra_protocol::VaultResponse {
+                vault_id: uuid::Uuid::new_v4(),
+                org_id: None,
+                name: "first-snapshot".to_owned(),
+                kind: VaultKind::Personal,
+                vault_revision: 1,
+                access_revision: 1,
+                current_key_generation: 1,
+                needs_key_rotation: false,
+            })
+            .unwrap();
+
+        assert!(keys.get("personal").unwrap().is_some());
+        assert!(artifact.exists());
+    }
+
+    #[test]
+    fn trusted_checkpoint_anchor_survives_persistent_cache_reopen() {
+        let root = tempfile::tempdir().unwrap();
+        let keys = Arc::new(MemoryCacheKeyStore::default());
+        let device = TrustedCheckpointDevice {
+            device_id: uuid::Uuid::new_v4(),
+            public_key: Base64UrlUnpadded::encode_string(&[9u8; 32]),
+            revoked: false,
+        };
+        persisted_cache("personal", &root, keys.clone())
+            .record_trusted_checkpoint_device(&device)
+            .unwrap();
+
+        assert_eq!(
+            persisted_cache("personal", &root, keys)
+                .trusted_checkpoint_devices()
+                .unwrap(),
+            vec![device]
+        );
+    }
+
+    #[test]
+    fn checkpoint_quarantine_survives_persistent_cache_reopen() {
+        let root = tempfile::tempdir().unwrap();
+        let keys = Arc::new(MemoryCacheKeyStore::default());
+        let vault_id = uuid::Uuid::new_v4();
+        let mut cache = persisted_cache("personal", &root, keys.clone());
+        cache
+            .quarantine_transport_failure(vault_id, 7, "invalid-checkpoint", "invalid_signature")
+            .unwrap();
+        drop(cache);
+
+        assert!(
+            persisted_cache("personal", &root, keys)
+                .is_sync_unsafe(vault_id)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn stale_writer_cannot_overwrite_persisted_quarantine() {
+        let root = tempfile::tempdir().unwrap();
+        let keys = Arc::new(MemoryCacheKeyStore::default());
+        let vault_id = uuid::Uuid::new_v4();
+        let stale_cache = persisted_cache("personal", &root, keys.clone());
+        let mut detecting_cache = persisted_cache("personal", &root, keys.clone());
+
+        detecting_cache
+            .quarantine_transport_failure(vault_id, 7, "invalid-checkpoint", "invalid_signature")
+            .unwrap();
+        let result = stale_cache.record_trusted_checkpoint_device(&TrustedCheckpointDevice {
+            device_id: uuid::Uuid::new_v4(),
+            public_key: Base64UrlUnpadded::encode_string(&[3u8; 32]),
+            revoked: false,
+        });
+
+        assert!(result.is_err());
+        assert!(
+            persisted_cache("personal", &root, keys)
+                .is_sync_unsafe(vault_id)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn legacy_cache_is_left_untouched_and_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let legacy = root.path().join("cache.db");
+        std::fs::write(&legacy, b"legacy-cache-fixture").unwrap();
+        let before = std::fs::read(&legacy).unwrap();
+        assert!(
+            LocalCache::open_path_with_key_store(
+                "personal",
+                legacy.clone(),
+                Arc::new(MemoryCacheKeyStore::default())
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read(legacy).unwrap(), before);
+    }
+
+    #[test]
+    fn missing_key_and_tampering_fail_closed() {
+        let root = tempfile::tempdir().unwrap();
+        let keys = Arc::new(MemoryCacheKeyStore::default());
+        let cache = persisted_cache("personal", &root, keys.clone());
+        cache
+            .upsert_vault(&umbra_protocol::VaultResponse {
+                vault_id: uuid::Uuid::new_v4(),
+                org_id: None,
+                name: "secret".to_owned(),
+                kind: VaultKind::Personal,
+                vault_revision: 1,
+                access_revision: 1,
+                current_key_generation: 1,
+                needs_key_rotation: false,
+            })
+            .unwrap();
+        keys.clear("personal").unwrap();
+        assert!(
+            LocalCache::open_path_with_key_store(
+                "personal",
+                root.path().join("cache.db"),
+                keys.clone()
+            )
+            .is_err()
+        );
+        keys.set("personal", &LocalUnlockKey::generate()).unwrap();
+        assert!(
+            LocalCache::open_path_with_key_store("personal", root.path().join("cache.db"), keys)
+                .is_err()
+        );
+    }
 
     #[test]
     fn profile_cache_dir_sanitizes_profile_names() {
