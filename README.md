@@ -263,3 +263,24 @@ umbra secret get pulzar/dev --vault Personal
 Online read commands call sync status first and only run full sync when item or access revisions changed. `--offline` reads only from the local encrypted-envelope cache and may be stale. `--cached` remains an alias for `--offline` on item reads for compatibility.
 
 `sync run` uses the cached vault revision cursor by default. Use `--force-full` to request from revision `0`.
+
+## Sync integrity checkpoints (protocol v2)
+
+Protocol v2 adds signed, append-only sync checkpoints. A checkpoint binds a vault revision to a deterministic SHA-256 commitment of the encrypted item/conflict state and to the prior checkpoint hash. It contains identifiers, revisions, deletion/conflict state, key-generation metadata, ciphertext-envelope hashes, the author device ID, and an Ed25519 signature. It never contains plaintext, vault keys, passwords, private keys, raw envelopes, or key wrappings.
+
+Version 1 remains compatible: v1 requests and responses neither request nor contain checkpoints. A client must explicitly negotiate `protocol_version: 2` before it creates, receives, or validates them.
+
+The server is an opaque relay and store for checkpoint metadata. Only an authenticated, trusted device with vault write permission may author a checkpoint; the request signature binds its device ID. The server does not hold checkpoint signing keys and is not a trust authority for checkpoint signatures.
+
+Each client persists its own trusted checkpoint-device public keys and its last verified checkpoint. Never treat a device key returned by the server as a new trust anchor. Transfer trust anchors through an authenticated local/device-to-device procedure when bootstrapping a new client; a valid signature from an unknown device is not sufficient.
+
+If the client observes rollback, a missing or broken predecessor, non-monotonic revision, invalid signature, untrusted/revoked signer, commitment mismatch, or two different checkpoint hashes for one vault revision, it records the evidence and quarantines that vault. Normal sync and status then refuse to accept more state, including with `--force-full`. Umbra does not silently reset the cursor, discard evidence, or auto-recover this condition.
+
+Inspect a quarantined vault without exposing vault contents:
+
+```powershell
+umbra sync integrity status --vault Personal
+umbra sync integrity export --vault Personal --output integrity-evidence.json
+```
+
+The export contains only signed checkpoint metadata and integrity findings (IDs, revisions, hashes, device IDs/public-key fingerprints, signatures, and error codes). It deliberately excludes plaintext, ciphertext or raw envelopes, wrappings, vault keys, passwords, tokens, and private keys. Preserve this file and compare it with another trusted device or incident-response record before deciding on recovery.

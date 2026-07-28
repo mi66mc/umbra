@@ -19,6 +19,7 @@ use umbra_auth::{
 
 pub(crate) const AUTHENTICATED_USER_HEADER: &str = "x-umbra-authenticated-user";
 pub(crate) const AUTHENTICATED_DEVICE_HEADER: &str = "x-umbra-authenticated-device";
+pub(crate) const AUTHENTICATED_SCHEME_HEADER: &str = "x-umbra-authenticated-scheme";
 const MAX_BODY_BYTES: usize = 1024 * 1024;
 const MAX_CLOCK_SKEW_SECONDS: i64 = 300;
 
@@ -48,16 +49,20 @@ pub(crate) async fn auth_middleware(
 ) -> Result<Response, StatusCode> {
     request.headers_mut().remove(AUTHENTICATED_USER_HEADER);
     request.headers_mut().remove(AUTHENTICATED_DEVICE_HEADER);
+    request.headers_mut().remove(AUTHENTICATED_SCHEME_HEADER);
     let (mut parts, body) = request.into_parts();
     let body_bytes = to_bytes(body, MAX_BODY_BYTES)
         .await
         .map_err(|_| StatusCode::BAD_REQUEST)?;
 
-    let authenticated =
+    let (authenticated, scheme) =
         if let Some(authenticated) = authenticate_bearer(&state, &parts.headers).await? {
-            authenticated
+            (authenticated, "bearer")
         } else {
-            authenticate_signed(&state, &parts, &body_bytes).await?
+            (
+                authenticate_signed(&state, &parts, &body_bytes).await?,
+                "signed",
+            )
         };
 
     check_authenticated(&state, authenticated.device_id, &parts.method)
@@ -72,6 +77,12 @@ pub(crate) async fn auth_middleware(
     parts
         .headers
         .insert(AUTHENTICATED_USER_HEADER, user_header_value);
+    parts.headers.insert(
+        AUTHENTICATED_SCHEME_HEADER,
+        scheme
+            .parse()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+    );
     if let Some(device_id) = authenticated.device_id {
         let device_header_value = device_id
             .to_string()

@@ -315,6 +315,29 @@ The response reports only revision movement:
 
 The endpoint is authenticated and uses the same vault membership checks as full sync. It does not expose plaintext, ciphertext, item counts, or member counts.
 
+## Protocol v2: signed sync checkpoints
+
+Version 2 is opt-in. A client sends `"protocol_version": 2`; v1 remains byte-for-byte compatible and omits checkpoint fields. A v1 client must never be made to parse or validate checkpoint data, and a v2 client must not silently fall back to v1 after an integrity failure.
+
+A v2 sync response carries the ordered checkpoint history needed after the caller's verified head. Checkpoint creation is accepted only from the authenticated signed-request device when it is trusted and has vault writer/editor permission. The author device ID in the payload must match that request identity. The server persists and transports the opaque record; it does not possess a checkpoint private key or use signature verification as a source of authority.
+
+The canonical signed payload is domain separated as `UMBRA-SYNC-CHECKPOINT-V1` and encodes, in a fixed unambiguous order:
+
+```txt
+vault_id
+vault_revision (fixed-width)
+state_commitment (SHA-256)
+previous_checkpoint_hash (SHA-256 or the defined genesis value)
+author_device_id
+sorted encrypted-state entries
+```
+
+State entries are sorted deterministically and include only item/conflict identifiers, revisions and state, deletion markers, key-generation metadata, and hashes of ciphertext envelopes. The checkpoint signature is Ed25519 over these bytes; its checkpoint hash identifies the signed record. Raw ciphertext envelopes, vault-key wrappings, plaintext, keys, passwords, sessions, and private keys are never part of the checkpoint payload or evidence bundle.
+
+For a v2 vault, the client validates the signature against locally persisted trusted device keys, then validates predecessor, monotonic revision, commitment, and equivocation. An unknown or revoked signer fails even if its signature is mathematically valid. Any failure—including rollback, omitted/broken history, altered commitment, or different hashes for one vault/revision—must be recorded locally and cause the vault to be quarantined. The normal sync/status path returns an integrity error containing only vault, revision, and checkpoint identifiers; it must not apply the unsafe response.
+
+`umbra sync integrity status --vault <selector>` reports the local integrity state. `umbra sync integrity export --vault <selector> --output <file>` writes a forensic bundle of checkpoint metadata and findings only. Exports must not overwrite an existing output by default and must exclude envelopes, wrappings, ciphertext, plaintext, vault keys, tokens, passwords, and private keys.
+
 ## Cacheable Sync Data
 
 `SyncResponse` is safe for the CLI to cache because item data and vault keys are still encrypted envelopes.

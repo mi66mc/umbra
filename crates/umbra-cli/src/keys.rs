@@ -6,6 +6,15 @@ use umbra_auth::{signing_key_from_b64, signing_key_to_b64, verifying_key_to_b64}
 
 use crate::error::CliError;
 
+pub fn public_key_fingerprint(value: &str) -> Result<String, CliError> {
+    let key = umbra_auth::verifying_key_from_b64(value)?;
+    let digest = Sha256::digest(key.as_bytes());
+    Ok(format!(
+        "SHA256:{}",
+        Base64UrlUnpadded::encode_string(&digest)
+    ))
+}
+
 #[derive(Clone)]
 pub struct DeviceSigningKey {
     signing_key: SigningKey,
@@ -54,5 +63,9 @@ mod tests {
 
         assert_eq!(decoded.public_key_base64url(), key.public_key_base64url());
         assert!(key.fingerprint().starts_with("SHA256:"));
+        assert_eq!(
+            public_key_fingerprint(&key.public_key_base64url()).unwrap(),
+            key.fingerprint()
+        );
     }
 }

@@ -1,7 +1,12 @@
 use std::path::{Path, PathBuf};
 
+use base64ct::{Base64UrlUnpadded, Encoding};
+use ed25519_dalek::SigningKey;
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use umbra_core::VaultKind;
+use umbra_protocol::{SyncCheckpoint, VaultSyncChanges};
 
 use crate::error::CliError;
 
@@ -10,6 +15,7 @@ pub struct LocalCache {
     profile: String,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct CachedVault {
     pub vault_id: uuid::Uuid,
@@ -74,6 +80,50 @@ pub struct CacheStatus {
     pub sync_state_count: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct IntegrityFinding {
+    pub vault_id: uuid::Uuid,
+    pub revision: i64,
+    pub checkpoint_hash: String,
+    pub code: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conflicting_checkpoint_hash: Option<String>,
+    pub observed_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrustedCheckpointDevice {
+    pub device_id: uuid::Uuid,
+    pub public_key: String,
+    pub revoked: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerifiedCheckpoint {
+    pub checkpoint_hash: String,
+    pub checkpoint: SyncCheckpoint,
+    pub verified_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct VaultIntegrityState {
+    pub vault_id: uuid::Uuid,
+    pub unsafe_sync: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verified_head: Option<VerifiedCheckpoint>,
+    pub findings: Vec<IntegrityFinding>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CheckpointForensicsBundle {
+    pub version: u16,
+    pub vault_id: uuid::Uuid,
+    pub unsafe_sync: bool,
+    pub verified_checkpoints: Vec<SyncCheckpoint>,
+    pub observed_checkpoints: Vec<SyncCheckpoint>,
+    pub findings: Vec<IntegrityFinding>,
+}
+
 impl LocalCache {
     pub fn open(profile: &str) -> Result<Self, CliError> {
         let dir = profile_cache_dir(profile);
@@ -111,138 +161,659 @@ impl LocalCache {
         rows.collect::<Result<Vec<_>, _>>().map_err(CliError::from)
     }
 
-    pub fn apply_sync_changes(
-        &mut self,
-        changes: &umbra_protocol::VaultSyncChanges,
-    ) -> Result<(), CliError> {
-        let now = chrono::Utc::now().to_rfc3339();
+    #[cfg(test)]
+    pub fn apply_sync_changes(&mut self, changes: &VaultSyncChanges) -> Result<(), CliError> {
         let tx = self.connection.transaction()?;
-        tx.execute(
-            r#"
-            INSERT INTO sync_state (
-                vault_id, latest_vault_revision, latest_access_revision, synced_at
+        apply_sync_changes_transaction(&tx, changes)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn integrity_findings(
+        &self,
+        vault_id: uuid::Uuid,
+    ) -> Result<Vec<IntegrityFinding>, CliError> {
+        let mut statement = self.connection.prepare(
+            "SELECT vault_id, revision, checkpoint_hash, code, conflicting_checkpoint_hash, observed_at
+             FROM sync_integrity_findings WHERE vault_id = ?1 ORDER BY id ASC",
+        )?;
+        let rows = statement.query_map(params![vault_id.to_string()], |row| {
+            Ok(IntegrityFinding {
+                vault_id: parse_uuid(row.get::<_, String>(0)?)?,
+                revision: row.get(1)?,
+                checkpoint_hash: row.get(2)?,
+                code: row.get(3)?,
+                conflicting_checkpoint_hash: row.get(4)?,
+                observed_at: row.get(5)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(CliError::from)
+    }
+
+    pub fn record_trusted_checkpoint_device(
+        &self,
+        device: &TrustedCheckpointDevice,
+    ) -> Result<(), CliError> {
+        let existing = self
+            .connection
+            .query_row(
+                "SELECT public_key, revoked FROM trusted_checkpoint_devices WHERE device_id = ?1",
+                params![device.device_id.to_string()],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)),
             )
-            VALUES (?1, ?2, ?3, ?4)
-            ON CONFLICT(vault_id) DO UPDATE SET
-                latest_vault_revision = excluded.latest_vault_revision,
-                latest_access_revision = excluded.latest_access_revision,
-                synced_at = excluded.synced_at
-            "#,
+            .optional()?;
+        if let Some((public_key, revoked)) = existing {
+            if public_key != device.public_key {
+                return Err(CliError::Input(
+                    "trusted checkpoint device key cannot be replaced",
+                ));
+            }
+            let revoked = revoked || device.revoked;
+            self.connection.execute(
+                "UPDATE trusted_checkpoint_devices SET revoked = ?2 WHERE device_id = ?1",
+                params![device.device_id.to_string(), revoked],
+            )?;
+            return Ok(());
+        }
+        self.connection.execute(
+            "INSERT INTO trusted_checkpoint_devices (device_id, public_key, revoked, trusted_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                device.device_id.to_string(),
+                device.public_key,
+                device.revoked,
+                chrono::Utc::now().to_rfc3339()
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn trusted_checkpoint_devices(&self) -> Result<Vec<TrustedCheckpointDevice>, CliError> {
+        let mut statement = self.connection.prepare(
+            "SELECT device_id, public_key, revoked
+             FROM trusted_checkpoint_devices ORDER BY device_id ASC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(TrustedCheckpointDevice {
+                device_id: parse_uuid(row.get::<_, String>(0)?)?,
+                public_key: row.get(1)?,
+                revoked: row.get(2)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(CliError::from)
+    }
+
+    pub fn is_sync_unsafe(&self, vault_id: uuid::Uuid) -> Result<bool, CliError> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT unsafe FROM sync_integrity_state WHERE vault_id = ?1",
+                params![vault_id.to_string()],
+                |row| row.get::<_, bool>(0),
+            )
+            .optional()?
+            .unwrap_or(false))
+    }
+
+    pub fn integrity_state(&self, vault_id: uuid::Uuid) -> Result<VaultIntegrityState, CliError> {
+        let verified_head = self
+            .connection
+            .query_row(
+                "SELECT checkpoint_hash, checkpoint_json, verified_at
+                 FROM verified_checkpoint_heads WHERE vault_id = ?1",
+                params![vault_id.to_string()],
+                verified_checkpoint_from_row,
+            )
+            .optional()?;
+        Ok(VaultIntegrityState {
+            vault_id,
+            unsafe_sync: self.is_sync_unsafe(vault_id)?,
+            verified_head,
+            findings: self.integrity_findings(vault_id)?,
+        })
+    }
+
+    pub fn export_checkpoint_evidence(
+        &self,
+        vault_id: uuid::Uuid,
+    ) -> Result<CheckpointForensicsBundle, CliError> {
+        Ok(CheckpointForensicsBundle {
+            version: 1,
+            vault_id,
+            unsafe_sync: self.is_sync_unsafe(vault_id)?,
+            verified_checkpoints: self
+                .checkpoints_from_table("verified_sync_checkpoints", vault_id)?,
+            observed_checkpoints: self
+                .checkpoints_from_table("observed_sync_checkpoints", vault_id)?,
+            findings: self.integrity_findings(vault_id)?,
+        })
+    }
+
+    fn checkpoints_from_table(
+        &self,
+        table: &str,
+        vault_id: uuid::Uuid,
+    ) -> Result<Vec<SyncCheckpoint>, CliError> {
+        let sql = match table {
+            "verified_sync_checkpoints" => {
+                "SELECT checkpoint_json FROM verified_sync_checkpoints
+                 WHERE vault_id = ?1 ORDER BY revision ASC, checkpoint_hash ASC"
+            }
+            "observed_sync_checkpoints" => {
+                "SELECT checkpoint_json FROM observed_sync_checkpoints
+                 WHERE vault_id = ?1 ORDER BY revision ASC, checkpoint_hash ASC"
+            }
+            _ => return Err(CliError::Input("unknown checkpoint evidence table")),
+        };
+        let mut statement = self.connection.prepare(sql)?;
+        let rows = statement.query_map(params![vault_id.to_string()], |row| {
+            parse_json_as(row.get::<_, String>(0)?)
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(CliError::from)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn projected_state_commitment(
+        &mut self,
+        changes: &VaultSyncChanges,
+    ) -> Result<String, CliError> {
+        let tx = self.connection.transaction()?;
+        apply_sync_changes_transaction(&tx, changes)?;
+        let commitment = state_commitment_transaction(&tx, changes.vault_id)?;
+        tx.rollback()?;
+        Ok(commitment)
+    }
+
+    pub fn verify_and_record_checkpoints(
+        &mut self,
+        changes: &VaultSyncChanges,
+        checkpoints: &[SyncCheckpoint],
+    ) -> Result<(), CliError> {
+        if self.is_sync_unsafe(changes.vault_id)? {
+            return Err(self.integrity_error(changes.vault_id)?);
+        }
+
+        let validated = match self.validate_checkpoint_chain(changes, checkpoints) {
+            Ok(validated) => validated,
+            Err(failure) => {
+                self.quarantine(checkpoints, &failure)?;
+                return Err(CliError::SyncIntegrity {
+                    vault_id: failure.vault_id,
+                    revision: failure.revision,
+                    checkpoint_id: failure.checkpoint_hash,
+                });
+            }
+        };
+
+        let tx = self.connection.transaction()?;
+        apply_sync_changes_transaction(&tx, changes)?;
+        let commitment = state_commitment_transaction(&tx, changes.vault_id)?;
+        if commitment != validated.latest.state_commitment {
+            tx.rollback()?;
+            let failure = ValidationFailure {
+                vault_id: changes.vault_id,
+                revision: validated.latest.vault_revision,
+                checkpoint_hash: safe_checkpoint_hash(&validated.latest),
+                code: "commitment_mismatch",
+                conflicting_checkpoint_hash: None,
+            };
+            self.quarantine(checkpoints, &failure)?;
+            return Err(CliError::SyncIntegrity {
+                vault_id: failure.vault_id,
+                revision: failure.revision,
+                checkpoint_id: failure.checkpoint_hash,
+            });
+        }
+
+        let now = chrono::Utc::now().to_rfc3339();
+        for checkpoint in checkpoints {
+            let hash = safe_checkpoint_hash(checkpoint);
+            record_observed_checkpoint(&tx, checkpoint, &hash, &now)?;
+            tx.execute(
+                "INSERT OR IGNORE INTO verified_sync_checkpoints
+                 (checkpoint_hash, vault_id, revision, checkpoint_json, verified_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    hash,
+                    checkpoint.vault_id.to_string(),
+                    checkpoint.vault_revision,
+                    serde_json::to_string(checkpoint)?,
+                    now
+                ],
+            )?;
+        }
+        let latest_hash = safe_checkpoint_hash(&validated.latest);
+        tx.execute(
+            "INSERT INTO verified_checkpoint_heads
+             (vault_id, revision, checkpoint_hash, checkpoint_json, verified_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(vault_id) DO UPDATE SET
+                revision = excluded.revision,
+                checkpoint_hash = excluded.checkpoint_hash,
+                checkpoint_json = excluded.checkpoint_json,
+                verified_at = excluded.verified_at",
             params![
                 changes.vault_id.to_string(),
-                changes.latest_vault_revision,
-                changes.latest_access_revision,
+                validated.latest.vault_revision,
+                latest_hash,
+                serde_json::to_string(&validated.latest)?,
                 now
             ],
         )?;
-
-        for item in &changes.items {
-            tx.execute(
-                r#"
-                INSERT INTO item_revisions (
-                    vault_id, item_id, revision, vault_revision, key_generation,
-                    author_user_id, envelope_json, updated_at
-                )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-                ON CONFLICT(vault_id, item_id, revision) DO UPDATE SET
-                    vault_revision = excluded.vault_revision,
-                    key_generation = excluded.key_generation,
-                    author_user_id = excluded.author_user_id,
-                    envelope_json = excluded.envelope_json,
-                    updated_at = excluded.updated_at
-                "#,
-                params![
-                    item.vault_id.to_string(),
-                    item.item_id.to_string(),
-                    item.revision,
-                    item.vault_revision,
-                    item.key_generation,
-                    item.author_user_id.map(|id| id.to_string()),
-                    serde_json::to_string(&item.envelope)?,
-                    now
-                ],
-            )?;
-        }
-
-        for item_id in &changes.deleted_items {
-            tx.execute(
-                "DELETE FROM item_revisions WHERE vault_id = ?1 AND item_id = ?2",
-                params![changes.vault_id.to_string(), item_id.to_string()],
-            )?;
-        }
-
-        let active_wrapping_ids = changes
-            .key_wrappings
-            .iter()
-            .map(|wrapping| wrapping.id.to_string())
-            .collect::<Vec<_>>();
-        if active_wrapping_ids.is_empty() {
-            tx.execute(
-                "DELETE FROM vault_key_wrappings WHERE vault_id = ?1",
-                params![changes.vault_id.to_string()],
-            )?;
-        } else {
-            let placeholders = (0..active_wrapping_ids.len())
-                .map(|_| "?")
-                .collect::<Vec<_>>()
-                .join(", ");
-            let sql = format!(
-                "DELETE FROM vault_key_wrappings WHERE vault_id = ? AND id NOT IN ({placeholders})"
-            );
-            let mut values = Vec::with_capacity(active_wrapping_ids.len() + 1);
-            values.push(changes.vault_id.to_string());
-            values.extend(active_wrapping_ids);
-            tx.execute(&sql, params_from_iter(values))?;
-        }
-
-        for wrapping in &changes.key_wrappings {
-            tx.execute(
-                r#"
-                INSERT INTO vault_key_wrappings (
-                    id, vault_id, user_id, device_id, wrapping_type,
-                    envelope_json, key_generation, updated_at
-                )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-                ON CONFLICT(id) DO UPDATE SET
-                    vault_id = excluded.vault_id,
-                    user_id = excluded.user_id,
-                    device_id = excluded.device_id,
-                    wrapping_type = excluded.wrapping_type,
-                    envelope_json = excluded.envelope_json,
-                    key_generation = excluded.key_generation,
-                    updated_at = excluded.updated_at
-                "#,
-                params![
-                    wrapping.id.to_string(),
-                    wrapping.vault_id.to_string(),
-                    wrapping.user_id.to_string(),
-                    wrapping.device_id.map(|id| id.to_string()),
-                    wrapping.wrapping_type.as_str(),
-                    serde_json::to_string(&wrapping.envelope)?,
-                    wrapping.key_generation,
-                    now
-                ],
-            )?;
-        }
-
         tx.execute(
-            "DELETE FROM item_conflicts WHERE vault_id = ?1",
-            params![changes.vault_id.to_string()],
+            "INSERT INTO sync_integrity_state (vault_id, unsafe, updated_at)
+             VALUES (?1, 0, ?2)
+             ON CONFLICT(vault_id) DO UPDATE SET updated_at = excluded.updated_at",
+            params![changes.vault_id.to_string(), now],
         )?;
-        for conflict in &changes.conflicts {
-            tx.execute(
-                "INSERT INTO item_conflicts (conflict_id,vault_id,item_id,base_revision,current_revision,candidate_kind,candidate_envelope_json,author_user_id,state,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
-                params![
-                    conflict.conflict_id.to_string(), conflict.vault_id.to_string(), conflict.item_id.to_string(),
-                    conflict.base_revision, conflict.current_revision, conflict.candidate_kind,
-                    conflict.candidate_envelope.as_ref().map(serde_json::to_string).transpose()?,
-                    conflict.author_user_id.map(|id| id.to_string()), conflict.state, now,
-                ],
-            )?;
-        }
-
         tx.commit()?;
         Ok(())
+    }
+
+    pub fn author_checkpoint(
+        &mut self,
+        changes: &VaultSyncChanges,
+        checkpoints: &[SyncCheckpoint],
+        author_device_id: uuid::Uuid,
+        signing_key: &SigningKey,
+    ) -> Result<SyncCheckpoint, CliError> {
+        if self.is_sync_unsafe(changes.vault_id)? {
+            return Err(self.integrity_error(changes.vault_id)?);
+        }
+
+        let previous_checkpoint_hash = match checkpoints.last() {
+            Some(checkpoint) => Some(safe_checkpoint_hash(checkpoint)),
+            None => self
+                .integrity_state(changes.vault_id)?
+                .verified_head
+                .map(|head| head.checkpoint_hash),
+        };
+        let state_commitment = self.projected_state_commitment_for_authoring(changes)?;
+        let checkpoint = umbra_crypto::checkpoints::sign_checkpoint(
+            SyncCheckpoint {
+                vault_id: changes.vault_id,
+                vault_revision: changes.latest_vault_revision,
+                state_commitment,
+                previous_checkpoint_hash,
+                author_device_id,
+                signature: String::new(),
+            },
+            signing_key,
+        )
+        .map_err(|_| CliError::Input("failed to encode sync checkpoint"))?;
+        let mut chain = checkpoints.to_vec();
+        chain.push(checkpoint.clone());
+        if let Err(failure) = self.validate_checkpoint_chain(changes, &chain) {
+            self.quarantine(checkpoints, &failure)?;
+            return Err(CliError::SyncIntegrity {
+                vault_id: failure.vault_id,
+                revision: failure.revision,
+                checkpoint_id: failure.checkpoint_hash,
+            });
+        }
+        Ok(checkpoint)
+    }
+
+    fn projected_state_commitment_for_authoring(
+        &mut self,
+        changes: &VaultSyncChanges,
+    ) -> Result<String, CliError> {
+        let tx = self.connection.transaction()?;
+        apply_sync_changes_transaction(&tx, changes)?;
+        let commitment = state_commitment_transaction(&tx, changes.vault_id)?;
+        tx.rollback()?;
+        Ok(commitment)
+    }
+
+    fn validate_checkpoint_chain(
+        &self,
+        changes: &VaultSyncChanges,
+        checkpoints: &[SyncCheckpoint],
+    ) -> Result<ValidatedCheckpoints, ValidationFailure> {
+        let vault_id = changes.vault_id;
+        let fallback_hash = checkpoints
+            .last()
+            .map(safe_checkpoint_hash)
+            .unwrap_or_else(|| "missing".to_owned());
+        if self
+            .sync_state(vault_id)
+            .map_err(|_| {
+                ValidationFailure::new(
+                    vault_id,
+                    changes.latest_vault_revision,
+                    fallback_hash.clone(),
+                    "local_integrity_state_error",
+                )
+            })?
+            .is_some_and(|state| changes.latest_access_revision < state.latest_access_revision)
+        {
+            return Err(ValidationFailure::new(
+                vault_id,
+                changes.latest_vault_revision,
+                fallback_hash,
+                "access_revision_rollback",
+            ));
+        }
+        if changes.items.iter().any(|item| item.vault_id != vault_id)
+            || changes
+                .key_wrappings
+                .iter()
+                .any(|wrapping| wrapping.vault_id != vault_id)
+            || changes
+                .conflicts
+                .iter()
+                .any(|conflict| conflict.vault_id != vault_id)
+        {
+            return Err(ValidationFailure::new(
+                vault_id,
+                changes.latest_vault_revision,
+                fallback_hash,
+                "state_scope_mismatch",
+            ));
+        }
+        let head = self
+            .integrity_state(vault_id)
+            .map_err(|_| {
+                ValidationFailure::new(
+                    vault_id,
+                    changes.latest_vault_revision,
+                    fallback_hash.clone(),
+                    "local_integrity_state_error",
+                )
+            })?
+            .verified_head;
+        if checkpoints.is_empty() {
+            if let Some(head) = head
+                && head.checkpoint.vault_revision == changes.latest_vault_revision
+            {
+                return Ok(ValidatedCheckpoints {
+                    latest: head.checkpoint,
+                });
+            }
+            return Err(ValidationFailure::new(
+                vault_id,
+                changes.latest_vault_revision,
+                fallback_hash,
+                "missing_checkpoint",
+            ));
+        }
+
+        let mut cursor = head.map(|head| (head.checkpoint.vault_revision, head.checkpoint_hash));
+        let mut latest = None;
+
+        for checkpoint in checkpoints {
+            let hash = safe_checkpoint_hash(checkpoint);
+            if checkpoint.vault_id != vault_id {
+                return Err(ValidationFailure::new(
+                    vault_id,
+                    checkpoint.vault_revision,
+                    hash,
+                    "vault_mismatch",
+                ));
+            }
+
+            if let Some(existing_hash) = self
+                .observed_checkpoint_hash(vault_id, checkpoint.vault_revision)
+                .map_err(|_| {
+                    ValidationFailure::new(
+                        vault_id,
+                        checkpoint.vault_revision,
+                        hash.clone(),
+                        "local_integrity_state_error",
+                    )
+                })?
+                && existing_hash != hash
+            {
+                return Err(ValidationFailure {
+                    vault_id,
+                    revision: checkpoint.vault_revision,
+                    checkpoint_hash: hash,
+                    code: "equivocation",
+                    conflicting_checkpoint_hash: Some(existing_hash),
+                });
+            }
+
+            let trusted = self
+                .trusted_checkpoint_device(checkpoint.author_device_id)
+                .map_err(|_| {
+                    ValidationFailure::new(
+                        vault_id,
+                        checkpoint.vault_revision,
+                        hash.clone(),
+                        "local_integrity_state_error",
+                    )
+                })?;
+            let Some(trusted) = trusted else {
+                return Err(ValidationFailure::new(
+                    vault_id,
+                    checkpoint.vault_revision,
+                    hash,
+                    "untrusted_signer",
+                ));
+            };
+            if trusted.revoked {
+                return Err(ValidationFailure::new(
+                    vault_id,
+                    checkpoint.vault_revision,
+                    hash,
+                    "revoked_signer",
+                ));
+            }
+            let key = umbra_auth::verifying_key_from_b64(&trusted.public_key).map_err(|_| {
+                ValidationFailure::new(
+                    vault_id,
+                    checkpoint.vault_revision,
+                    hash.clone(),
+                    "invalid_trust_anchor",
+                )
+            })?;
+            if umbra_crypto::checkpoints::verify_checkpoint(checkpoint, &key).is_err() {
+                return Err(ValidationFailure::new(
+                    vault_id,
+                    checkpoint.vault_revision,
+                    hash,
+                    "invalid_signature",
+                ));
+            }
+
+            match cursor.as_ref() {
+                Some((revision, _previous_hash)) if checkpoint.vault_revision < *revision => {
+                    let verified_hash = self
+                        .verified_checkpoint_hash(vault_id, checkpoint.vault_revision)
+                        .map_err(|_| {
+                            ValidationFailure::new(
+                                vault_id,
+                                checkpoint.vault_revision,
+                                hash.clone(),
+                                "local_integrity_state_error",
+                            )
+                        })?;
+                    if verified_hash.as_ref() == Some(&hash) {
+                        continue;
+                    }
+                    return Err(ValidationFailure::new(
+                        vault_id,
+                        checkpoint.vault_revision,
+                        hash,
+                        "non_monotonic_revision",
+                    ));
+                }
+                Some((revision, previous_hash)) if checkpoint.vault_revision == *revision => {
+                    if hash != *previous_hash {
+                        return Err(ValidationFailure {
+                            vault_id,
+                            revision: checkpoint.vault_revision,
+                            checkpoint_hash: hash,
+                            code: "equivocation",
+                            conflicting_checkpoint_hash: Some(previous_hash.clone()),
+                        });
+                    }
+                    latest = Some(checkpoint.clone());
+                    continue;
+                }
+                Some((_revision, previous_hash)) => {
+                    if checkpoint.previous_checkpoint_hash.as_ref() != Some(previous_hash) {
+                        return Err(ValidationFailure::new(
+                            vault_id,
+                            checkpoint.vault_revision,
+                            hash,
+                            "missing_predecessor",
+                        ));
+                    }
+                }
+                None if checkpoint.previous_checkpoint_hash.is_some() => {
+                    return Err(ValidationFailure::new(
+                        vault_id,
+                        checkpoint.vault_revision,
+                        hash,
+                        "missing_predecessor",
+                    ));
+                }
+                None => {}
+            }
+            cursor = Some((checkpoint.vault_revision, hash));
+            latest = Some(checkpoint.clone());
+        }
+
+        let Some(latest) = latest else {
+            let checkpoint = checkpoints
+                .last()
+                .expect("non-empty checkpoint slice checked above");
+            return Err(ValidationFailure::new(
+                vault_id,
+                checkpoint.vault_revision,
+                safe_checkpoint_hash(checkpoint),
+                "non_monotonic_revision",
+            ));
+        };
+        if latest.vault_revision != changes.latest_vault_revision {
+            return Err(ValidationFailure::new(
+                vault_id,
+                latest.vault_revision,
+                safe_checkpoint_hash(&latest),
+                "checkpoint_revision_mismatch",
+            ));
+        }
+        Ok(ValidatedCheckpoints { latest })
+    }
+
+    fn trusted_checkpoint_device(
+        &self,
+        device_id: uuid::Uuid,
+    ) -> Result<Option<TrustedCheckpointDevice>, CliError> {
+        self.connection
+            .query_row(
+                "SELECT device_id, public_key, revoked
+                 FROM trusted_checkpoint_devices WHERE device_id = ?1",
+                params![device_id.to_string()],
+                |row| {
+                    Ok(TrustedCheckpointDevice {
+                        device_id: parse_uuid(row.get::<_, String>(0)?)?,
+                        public_key: row.get(1)?,
+                        revoked: row.get(2)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(CliError::from)
+    }
+
+    fn observed_checkpoint_hash(
+        &self,
+        vault_id: uuid::Uuid,
+        revision: i64,
+    ) -> Result<Option<String>, CliError> {
+        self.connection
+            .query_row(
+                "SELECT checkpoint_hash FROM observed_sync_checkpoints
+                 WHERE vault_id = ?1 AND revision = ?2
+                 ORDER BY checkpoint_hash ASC LIMIT 1",
+                params![vault_id.to_string(), revision],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(CliError::from)
+    }
+
+    fn verified_checkpoint_hash(
+        &self,
+        vault_id: uuid::Uuid,
+        revision: i64,
+    ) -> Result<Option<String>, CliError> {
+        self.connection
+            .query_row(
+                "SELECT checkpoint_hash FROM verified_sync_checkpoints
+                 WHERE vault_id = ?1 AND revision = ?2
+                 ORDER BY checkpoint_hash ASC LIMIT 1",
+                params![vault_id.to_string(), revision],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(CliError::from)
+    }
+
+    fn quarantine(
+        &mut self,
+        checkpoints: &[SyncCheckpoint],
+        failure: &ValidationFailure,
+    ) -> Result<(), CliError> {
+        let tx = self.connection.transaction()?;
+        let now = chrono::Utc::now().to_rfc3339();
+        for checkpoint in checkpoints {
+            if is_safe_signed_checkpoint_metadata(checkpoint) {
+                record_observed_checkpoint(
+                    &tx,
+                    checkpoint,
+                    &safe_checkpoint_hash(checkpoint),
+                    &now,
+                )?;
+            }
+        }
+        tx.execute(
+            "INSERT INTO sync_integrity_findings
+             (vault_id, revision, checkpoint_hash, code, conflicting_checkpoint_hash, observed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                failure.vault_id.to_string(),
+                failure.revision,
+                failure.checkpoint_hash,
+                failure.code,
+                failure.conflicting_checkpoint_hash,
+                now
+            ],
+        )?;
+        tx.execute(
+            "INSERT INTO sync_integrity_state (vault_id, unsafe, updated_at)
+             VALUES (?1, 1, ?2)
+             ON CONFLICT(vault_id) DO UPDATE SET unsafe = 1, updated_at = excluded.updated_at",
+            params![failure.vault_id.to_string(), now],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn integrity_error(&self, vault_id: uuid::Uuid) -> Result<CliError, CliError> {
+        let finding = self.integrity_findings(vault_id)?.into_iter().last();
+        Ok(CliError::SyncIntegrity {
+            vault_id,
+            revision: finding.as_ref().map(|value| value.revision).unwrap_or(0),
+            checkpoint_id: finding
+                .map(|value| value.checkpoint_hash)
+                .unwrap_or_else(|| "unknown".to_owned()),
+        })
+    }
+
+    pub(crate) fn quarantine_transport_failure(
+        &mut self,
+        vault_id: uuid::Uuid,
+        revision: i64,
+        checkpoint_id: &str,
+        code: &'static str,
+    ) -> Result<(), CliError> {
+        self.quarantine(
+            &[],
+            &ValidationFailure::new(vault_id, revision, checkpoint_id.to_owned(), code),
+        )
     }
 
     pub fn delete_item(&self, vault_id: uuid::Uuid, item_id: uuid::Uuid) -> Result<(), CliError> {
@@ -624,6 +1195,64 @@ impl LocalCache {
                 state TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS deleted_item_tombstones (
+                vault_id TEXT NOT NULL,
+                item_id TEXT NOT NULL,
+                deleted_at_revision INTEGER NOT NULL,
+                PRIMARY KEY (vault_id, item_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS trusted_checkpoint_devices (
+                device_id TEXT PRIMARY KEY,
+                public_key TEXT NOT NULL,
+                revoked INTEGER NOT NULL DEFAULT 0,
+                trusted_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS observed_sync_checkpoints (
+                checkpoint_hash TEXT PRIMARY KEY,
+                vault_id TEXT NOT NULL,
+                revision INTEGER NOT NULL,
+                checkpoint_json TEXT NOT NULL,
+                observed_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_observed_sync_checkpoints_vault_revision
+                ON observed_sync_checkpoints (vault_id, revision);
+
+            CREATE TABLE IF NOT EXISTS verified_sync_checkpoints (
+                checkpoint_hash TEXT PRIMARY KEY,
+                vault_id TEXT NOT NULL,
+                revision INTEGER NOT NULL,
+                checkpoint_json TEXT NOT NULL,
+                verified_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_verified_sync_checkpoints_vault_revision
+                ON verified_sync_checkpoints (vault_id, revision);
+
+            CREATE TABLE IF NOT EXISTS verified_checkpoint_heads (
+                vault_id TEXT PRIMARY KEY,
+                revision INTEGER NOT NULL,
+                checkpoint_hash TEXT NOT NULL,
+                checkpoint_json TEXT NOT NULL,
+                verified_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS sync_integrity_state (
+                vault_id TEXT PRIMARY KEY,
+                unsafe INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS sync_integrity_findings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                vault_id TEXT NOT NULL,
+                revision INTEGER NOT NULL,
+                checkpoint_hash TEXT NOT NULL,
+                code TEXT NOT NULL,
+                conflicting_checkpoint_hash TEXT,
+                observed_at TEXT NOT NULL
+            );
             "#,
         )?;
         self.add_column_if_missing(
@@ -635,6 +1264,11 @@ impl LocalCache {
             "sync_state",
             "latest_access_revision",
             "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        self.add_column_if_missing(
+            "sync_integrity_findings",
+            "conflicting_checkpoint_hash",
+            "TEXT",
         )?;
         self.connection.execute(
             "INSERT OR REPLACE INTO cache_meta (key, value) VALUES ('schema_version', '1')",
@@ -651,7 +1285,8 @@ impl LocalCache {
     ) -> Result<(), CliError> {
         match (table, column, definition) {
             ("vaults", "latest_access_revision", "INTEGER NOT NULL DEFAULT 0")
-            | ("sync_state", "latest_access_revision", "INTEGER NOT NULL DEFAULT 0") => {}
+            | ("sync_state", "latest_access_revision", "INTEGER NOT NULL DEFAULT 0")
+            | ("sync_integrity_findings", "conflicting_checkpoint_hash", "TEXT") => {}
             _ => return Err(CliError::Input("unknown cache migration column")),
         }
 
@@ -666,6 +1301,406 @@ impl LocalCache {
         }
         Ok(())
     }
+}
+
+#[derive(Debug)]
+struct ValidationFailure {
+    vault_id: uuid::Uuid,
+    revision: i64,
+    checkpoint_hash: String,
+    code: &'static str,
+    conflicting_checkpoint_hash: Option<String>,
+}
+
+impl ValidationFailure {
+    fn new(
+        vault_id: uuid::Uuid,
+        revision: i64,
+        checkpoint_hash: String,
+        code: &'static str,
+    ) -> Self {
+        Self {
+            vault_id,
+            revision,
+            checkpoint_hash,
+            code,
+            conflicting_checkpoint_hash: None,
+        }
+    }
+}
+
+struct ValidatedCheckpoints {
+    latest: SyncCheckpoint,
+}
+
+fn apply_sync_changes_transaction(
+    tx: &rusqlite::Transaction<'_>,
+    changes: &VaultSyncChanges,
+) -> Result<(), CliError> {
+    let now = chrono::Utc::now().to_rfc3339();
+    tx.execute(
+        r#"
+        INSERT INTO sync_state (
+            vault_id, latest_vault_revision, latest_access_revision, synced_at
+        )
+        VALUES (?1, ?2, ?3, ?4)
+        ON CONFLICT(vault_id) DO UPDATE SET
+            latest_vault_revision = excluded.latest_vault_revision,
+            latest_access_revision = excluded.latest_access_revision,
+            synced_at = excluded.synced_at
+        "#,
+        params![
+            changes.vault_id.to_string(),
+            changes.latest_vault_revision,
+            changes.latest_access_revision,
+            now
+        ],
+    )?;
+
+    for item in &changes.items {
+        tx.execute(
+            r#"
+            INSERT INTO item_revisions (
+                vault_id, item_id, revision, vault_revision, key_generation,
+                author_user_id, envelope_json, updated_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            ON CONFLICT(vault_id, item_id, revision) DO UPDATE SET
+                vault_revision = excluded.vault_revision,
+                key_generation = excluded.key_generation,
+                author_user_id = excluded.author_user_id,
+                envelope_json = excluded.envelope_json,
+                updated_at = excluded.updated_at
+            "#,
+            params![
+                item.vault_id.to_string(),
+                item.item_id.to_string(),
+                item.revision,
+                item.vault_revision,
+                item.key_generation,
+                item.author_user_id.map(|id| id.to_string()),
+                serde_json::to_string(&item.envelope)?,
+                now
+            ],
+        )?;
+        tx.execute(
+            "DELETE FROM deleted_item_tombstones WHERE vault_id = ?1 AND item_id = ?2",
+            params![changes.vault_id.to_string(), item.item_id.to_string()],
+        )?;
+    }
+
+    for item_id in &changes.deleted_items {
+        tx.execute(
+            "DELETE FROM item_revisions WHERE vault_id = ?1 AND item_id = ?2",
+            params![changes.vault_id.to_string(), item_id.to_string()],
+        )?;
+        tx.execute(
+            "INSERT INTO deleted_item_tombstones (vault_id, item_id, deleted_at_revision)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(vault_id, item_id) DO UPDATE SET
+                deleted_at_revision = excluded.deleted_at_revision",
+            params![
+                changes.vault_id.to_string(),
+                item_id.to_string(),
+                changes.latest_vault_revision
+            ],
+        )?;
+    }
+
+    let active_wrapping_ids = changes
+        .key_wrappings
+        .iter()
+        .map(|wrapping| wrapping.id.to_string())
+        .collect::<Vec<_>>();
+    if active_wrapping_ids.is_empty() {
+        tx.execute(
+            "DELETE FROM vault_key_wrappings WHERE vault_id = ?1",
+            params![changes.vault_id.to_string()],
+        )?;
+    } else {
+        let placeholders = (0..active_wrapping_ids.len())
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "DELETE FROM vault_key_wrappings WHERE vault_id = ? AND id NOT IN ({placeholders})"
+        );
+        let mut values = Vec::with_capacity(active_wrapping_ids.len() + 1);
+        values.push(changes.vault_id.to_string());
+        values.extend(active_wrapping_ids);
+        tx.execute(&sql, params_from_iter(values))?;
+    }
+
+    for wrapping in &changes.key_wrappings {
+        tx.execute(
+            r#"
+            INSERT INTO vault_key_wrappings (
+                id, vault_id, user_id, device_id, wrapping_type,
+                envelope_json, key_generation, updated_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            ON CONFLICT(id) DO UPDATE SET
+                vault_id = excluded.vault_id,
+                user_id = excluded.user_id,
+                device_id = excluded.device_id,
+                wrapping_type = excluded.wrapping_type,
+                envelope_json = excluded.envelope_json,
+                key_generation = excluded.key_generation,
+                updated_at = excluded.updated_at
+            "#,
+            params![
+                wrapping.id.to_string(),
+                wrapping.vault_id.to_string(),
+                wrapping.user_id.to_string(),
+                wrapping.device_id.map(|id| id.to_string()),
+                wrapping.wrapping_type.as_str(),
+                serde_json::to_string(&wrapping.envelope)?,
+                wrapping.key_generation,
+                now
+            ],
+        )?;
+    }
+
+    tx.execute(
+        "DELETE FROM item_conflicts WHERE vault_id = ?1",
+        params![changes.vault_id.to_string()],
+    )?;
+    for conflict in &changes.conflicts {
+        tx.execute(
+            "INSERT INTO item_conflicts
+             (conflict_id,vault_id,item_id,base_revision,current_revision,candidate_kind,
+              candidate_envelope_json,author_user_id,state,updated_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+            params![
+                conflict.conflict_id.to_string(),
+                conflict.vault_id.to_string(),
+                conflict.item_id.to_string(),
+                conflict.base_revision,
+                conflict.current_revision,
+                conflict.candidate_kind,
+                conflict
+                    .candidate_envelope
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()?,
+                conflict.author_user_id.map(|id| id.to_string()),
+                conflict.state,
+                now,
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+fn state_commitment_transaction(
+    tx: &rusqlite::Transaction<'_>,
+    vault_id: uuid::Uuid,
+) -> Result<String, CliError> {
+    let mut entries = Vec::new();
+    let mut items = tx.prepare(
+        r#"
+        SELECT ir.item_id, ir.revision, ir.vault_revision, ir.key_generation,
+               ir.author_user_id, ir.envelope_json
+        FROM item_revisions ir
+        INNER JOIN (
+            SELECT vault_id, item_id, MAX(revision) AS max_revision
+            FROM item_revisions WHERE vault_id = ?1 GROUP BY vault_id, item_id
+        ) latest
+          ON latest.vault_id = ir.vault_id
+         AND latest.item_id = ir.item_id
+         AND latest.max_revision = ir.revision
+        WHERE ir.vault_id = ?1
+        ORDER BY ir.item_id ASC
+        "#,
+    )?;
+    let item_rows = items.query_map(params![vault_id.to_string()], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, i64>(3)?,
+            row.get::<_, Option<String>>(4)?,
+            row.get::<_, String>(5)?,
+        ))
+    })?;
+    for row in item_rows {
+        let (item_id, revision, vault_revision, key_generation, author_user_id, envelope) = row?;
+        let envelope: serde_json::Value = serde_json::from_str(&envelope)?;
+        entries.push(serde_json::to_vec(&serde_json::json!([
+            "item",
+            vault_id,
+            item_id,
+            revision,
+            vault_revision,
+            key_generation,
+            author_user_id,
+            hash_json(&envelope)?
+        ]))?);
+    }
+
+    let mut tombstones = tx.prepare(
+        "SELECT item_id, deleted_at_revision FROM deleted_item_tombstones
+         WHERE vault_id = ?1 ORDER BY item_id ASC",
+    )?;
+    let tombstone_rows = tombstones.query_map(params![vault_id.to_string()], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    for row in tombstone_rows {
+        let (item_id, revision) = row?;
+        entries.push(serde_json::to_vec(&serde_json::json!([
+            "deleted", vault_id, item_id, revision
+        ]))?);
+    }
+
+    let mut conflicts = tx.prepare(
+        "SELECT conflict_id,item_id,base_revision,current_revision,candidate_kind,
+                candidate_envelope_json,author_user_id,state
+         FROM item_conflicts WHERE vault_id = ?1 ORDER BY conflict_id ASC",
+    )?;
+    let conflict_rows = conflicts.query_map(params![vault_id.to_string()], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, i64>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, Option<String>>(5)?,
+            row.get::<_, Option<String>>(6)?,
+            row.get::<_, String>(7)?,
+        ))
+    })?;
+    for row in conflict_rows {
+        let (
+            conflict_id,
+            item_id,
+            base_revision,
+            current_revision,
+            candidate_kind,
+            candidate_envelope,
+            author_user_id,
+            state,
+        ) = row?;
+        let candidate_hash = candidate_envelope
+            .map(|value| serde_json::from_str::<serde_json::Value>(&value))
+            .transpose()?
+            .as_ref()
+            .map(hash_json)
+            .transpose()?;
+        entries.push(serde_json::to_vec(&serde_json::json!([
+            "conflict",
+            vault_id,
+            conflict_id,
+            item_id,
+            base_revision,
+            current_revision,
+            candidate_kind,
+            candidate_hash,
+            author_user_id,
+            state
+        ]))?);
+    }
+    Ok(umbra_crypto::checkpoints::state_commitment(entries))
+}
+
+fn hash_json(value: &serde_json::Value) -> Result<String, CliError> {
+    Ok(Base64UrlUnpadded::encode_string(&Sha256::digest(
+        canonical_json_bytes(value)?,
+    )))
+}
+
+fn canonical_json_bytes(value: &serde_json::Value) -> Result<Vec<u8>, CliError> {
+    fn write(value: &serde_json::Value, output: &mut Vec<u8>) -> Result<(), serde_json::Error> {
+        match value {
+            serde_json::Value::Object(map) => {
+                output.push(b'{');
+                let mut keys = map.keys().collect::<Vec<_>>();
+                keys.sort();
+                for (index, key) in keys.into_iter().enumerate() {
+                    if index > 0 {
+                        output.push(b',');
+                    }
+                    output.extend_from_slice(serde_json::to_string(key)?.as_bytes());
+                    output.push(b':');
+                    write(&map[key], output)?;
+                }
+                output.push(b'}');
+            }
+            serde_json::Value::Array(values) => {
+                output.push(b'[');
+                for (index, value) in values.iter().enumerate() {
+                    if index > 0 {
+                        output.push(b',');
+                    }
+                    write(value, output)?;
+                }
+                output.push(b']');
+            }
+            _ => output.extend_from_slice(serde_json::to_string(value)?.as_bytes()),
+        }
+        Ok(())
+    }
+
+    let mut output = Vec::new();
+    write(value, &mut output)?;
+    Ok(output)
+}
+
+fn record_observed_checkpoint(
+    tx: &rusqlite::Transaction<'_>,
+    checkpoint: &SyncCheckpoint,
+    checkpoint_hash: &str,
+    observed_at: &str,
+) -> Result<(), CliError> {
+    tx.execute(
+        "INSERT OR IGNORE INTO observed_sync_checkpoints
+         (checkpoint_hash, vault_id, revision, checkpoint_json, observed_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            checkpoint_hash,
+            checkpoint.vault_id.to_string(),
+            checkpoint.vault_revision,
+            serde_json::to_string(checkpoint)?,
+            observed_at
+        ],
+    )?;
+    Ok(())
+}
+
+fn safe_checkpoint_hash(checkpoint: &SyncCheckpoint) -> String {
+    umbra_crypto::checkpoints::checkpoint_hash(checkpoint).unwrap_or_else(|_| {
+        let encoded = serde_json::to_vec(checkpoint).unwrap_or_default();
+        Base64UrlUnpadded::encode_string(&Sha256::digest(encoded))
+    })
+}
+
+fn is_safe_signed_checkpoint_metadata(checkpoint: &SyncCheckpoint) -> bool {
+    let commitment_is_safe = Base64UrlUnpadded::decode_vec(&checkpoint.state_commitment)
+        .is_ok_and(|bytes| bytes.len() == 32);
+    let predecessor_is_safe = checkpoint
+        .previous_checkpoint_hash
+        .as_deref()
+        .map(Base64UrlUnpadded::decode_vec)
+        .transpose()
+        .is_ok_and(|value| value.is_none_or(|bytes| bytes.len() == 32));
+    let signature_is_safe =
+        Base64UrlUnpadded::decode_vec(&checkpoint.signature).is_ok_and(|bytes| bytes.len() == 64);
+    commitment_is_safe && predecessor_is_safe && signature_is_safe
+}
+
+fn verified_checkpoint_from_row(
+    row: &rusqlite::Row<'_>,
+) -> Result<VerifiedCheckpoint, rusqlite::Error> {
+    Ok(VerifiedCheckpoint {
+        checkpoint_hash: row.get(0)?,
+        checkpoint: parse_json_as(row.get::<_, String>(1)?)?,
+        verified_at: row.get(2)?,
+    })
+}
+
+fn parse_json_as<T: serde::de::DeserializeOwned>(value: String) -> Result<T, rusqlite::Error> {
+    serde_json::from_str(&value).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error))
+    })
 }
 
 pub fn profile_cache_dir(profile: &str) -> PathBuf {
@@ -1147,5 +2182,658 @@ mod tests {
             })
             .unwrap();
         assert!(cache.list_item_conflicts(vault_id).unwrap().is_empty());
+    }
+
+    mod checkpoint_validation {
+        use ed25519_dalek::SigningKey;
+        use umbra_auth::verifying_key_to_b64;
+        use umbra_crypto::checkpoints::{checkpoint_hash, sign_checkpoint};
+        use umbra_protocol::{ItemRevisionResponse, SyncCheckpoint, VaultSyncChanges};
+
+        use super::*;
+
+        fn signing_key(seed: u8) -> SigningKey {
+            SigningKey::from_bytes(&[seed; 32])
+        }
+
+        fn changes(vault_id: uuid::Uuid, revision: i64, ciphertext: &str) -> VaultSyncChanges {
+            VaultSyncChanges {
+                vault_id,
+                latest_vault_revision: revision,
+                latest_access_revision: 1,
+                items: vec![ItemRevisionResponse {
+                    item_id: uuid::Uuid::from_u128(2),
+                    vault_id,
+                    revision,
+                    vault_revision: revision,
+                    key_generation: 1,
+                    author_user_id: None,
+                    envelope: serde_json::json!({
+                        "ciphertext": ciphertext,
+                        "nonce": "opaque-nonce"
+                    }),
+                }],
+                deleted_items: vec![],
+                key_wrappings: vec![],
+                conflicts: vec![],
+            }
+        }
+
+        fn trust(
+            cache: &LocalCache,
+            device_id: uuid::Uuid,
+            key: &SigningKey,
+        ) -> TrustedCheckpointDevice {
+            let device = TrustedCheckpointDevice {
+                device_id,
+                public_key: verifying_key_to_b64(&key.verifying_key()),
+                revoked: false,
+            };
+            cache.record_trusted_checkpoint_device(&device).unwrap();
+            device
+        }
+
+        fn checkpoint(
+            cache: &mut LocalCache,
+            changes: &VaultSyncChanges,
+            previous_checkpoint_hash: Option<String>,
+            device_id: uuid::Uuid,
+            key: &SigningKey,
+        ) -> SyncCheckpoint {
+            let state_commitment = cache.projected_state_commitment(changes).unwrap();
+            sign_checkpoint(
+                SyncCheckpoint {
+                    vault_id: changes.vault_id,
+                    vault_revision: changes.latest_vault_revision,
+                    state_commitment,
+                    previous_checkpoint_hash,
+                    author_device_id: device_id,
+                    signature: String::new(),
+                },
+                key,
+            )
+            .unwrap()
+        }
+
+        #[test]
+        fn checkpoint_validation_records_valid_successor_and_changes_atomically() {
+            let mut cache = LocalCache::open_in_memory("valid-checkpoint").unwrap();
+            let vault_id = uuid::Uuid::from_u128(1);
+            let device_id = uuid::Uuid::from_u128(9);
+            let key = signing_key(7);
+            trust(&cache, device_id, &key);
+
+            let first_changes = changes(vault_id, 1, "encrypted-one");
+            let first = checkpoint(&mut cache, &first_changes, None, device_id, &key);
+            cache
+                .verify_and_record_checkpoints(&first_changes, std::slice::from_ref(&first))
+                .unwrap();
+            let first_hash = checkpoint_hash(&first).unwrap();
+
+            let second_changes = changes(vault_id, 2, "encrypted-two");
+            let second = checkpoint(
+                &mut cache,
+                &second_changes,
+                Some(first_hash),
+                device_id,
+                &key,
+            );
+            cache
+                .verify_and_record_checkpoints(&second_changes, std::slice::from_ref(&second))
+                .unwrap();
+
+            let state = cache.integrity_state(vault_id).unwrap();
+            assert!(!state.unsafe_sync);
+            assert_eq!(state.verified_head.unwrap().checkpoint, second);
+            assert_eq!(
+                cache
+                    .latest_item_revision(vault_id, uuid::Uuid::from_u128(2))
+                    .unwrap()
+                    .unwrap()
+                    .envelope["ciphertext"],
+                "encrypted-two"
+            );
+        }
+
+        #[test]
+        fn client_authors_missing_checkpoint_from_projected_ciphertext_state() {
+            let mut cache = LocalCache::open_in_memory("checkpoint-author").unwrap();
+            let vault_id = uuid::Uuid::from_u128(1);
+            let device_id = uuid::Uuid::from_u128(9);
+            let key = signing_key(7);
+            trust(&cache, device_id, &key);
+
+            let first_changes = changes(vault_id, 1, "encrypted-one");
+            let first = cache
+                .author_checkpoint(&first_changes, &[], device_id, &key)
+                .unwrap();
+            assert_eq!(first.previous_checkpoint_hash, None);
+            umbra_crypto::checkpoints::verify_checkpoint(&first, &key.verifying_key()).unwrap();
+            cache
+                .verify_and_record_checkpoints(&first_changes, std::slice::from_ref(&first))
+                .unwrap();
+
+            let second_changes = changes(vault_id, 2, "encrypted-two");
+            let second = cache
+                .author_checkpoint(&second_changes, &[], device_id, &key)
+                .unwrap();
+            assert_eq!(
+                second.previous_checkpoint_hash,
+                Some(checkpoint_hash(&first).unwrap())
+            );
+            umbra_crypto::checkpoints::verify_checkpoint(&second, &key.verifying_key()).unwrap();
+            cache
+                .verify_and_record_checkpoints(&second_changes, std::slice::from_ref(&second))
+                .unwrap();
+            assert_eq!(
+                cache
+                    .integrity_state(vault_id)
+                    .unwrap()
+                    .verified_head
+                    .unwrap()
+                    .checkpoint,
+                second
+            );
+        }
+
+        #[test]
+        fn two_devices_use_transferred_anchors_to_author_and_verify() {
+            let mut first_cache = LocalCache::open_in_memory("author-device-a").unwrap();
+            let mut second_cache = LocalCache::open_in_memory("author-device-b").unwrap();
+            let vault_id = uuid::Uuid::from_u128(1);
+            let device_a = uuid::Uuid::from_u128(9);
+            let device_b = uuid::Uuid::from_u128(10);
+            let key_a = signing_key(7);
+            let key_b = signing_key(8);
+            for cache in [&first_cache, &second_cache] {
+                trust(cache, device_a, &key_a);
+                trust(cache, device_b, &key_b);
+            }
+
+            let first_changes = changes(vault_id, 1, "created-by-a");
+            let first = first_cache
+                .author_checkpoint(&first_changes, &[], device_a, &key_a)
+                .unwrap();
+            for cache in [&mut first_cache, &mut second_cache] {
+                cache
+                    .verify_and_record_checkpoints(&first_changes, std::slice::from_ref(&first))
+                    .unwrap();
+            }
+
+            let second_changes = changes(vault_id, 2, "updated-by-b");
+            let second = second_cache
+                .author_checkpoint(&second_changes, &[], device_b, &key_b)
+                .unwrap();
+            for cache in [&mut first_cache, &mut second_cache] {
+                cache
+                    .verify_and_record_checkpoints(&second_changes, std::slice::from_ref(&second))
+                    .unwrap();
+            }
+
+            assert_eq!(
+                first_cache
+                    .integrity_state(vault_id)
+                    .unwrap()
+                    .verified_head
+                    .unwrap()
+                    .checkpoint,
+                second
+            );
+            assert_eq!(
+                second_cache
+                    .integrity_state(vault_id)
+                    .unwrap()
+                    .verified_head
+                    .unwrap()
+                    .checkpoint,
+                second
+            );
+        }
+
+        #[test]
+        fn malicious_checkpoint_rollback_is_quarantined_without_applying_payload() {
+            let mut cache = LocalCache::open_in_memory("rollback").unwrap();
+            let vault_id = uuid::Uuid::from_u128(1);
+            let device_id = uuid::Uuid::from_u128(9);
+            let key = signing_key(7);
+            trust(&cache, device_id, &key);
+
+            let first_changes = changes(vault_id, 1, "trusted-first");
+            let first = checkpoint(&mut cache, &first_changes, None, device_id, &key);
+            cache
+                .verify_and_record_checkpoints(&first_changes, std::slice::from_ref(&first))
+                .unwrap();
+            let current_changes = changes(vault_id, 2, "trusted-current");
+            let current = checkpoint(
+                &mut cache,
+                &current_changes,
+                Some(checkpoint_hash(&first).unwrap()),
+                device_id,
+                &key,
+            );
+            cache
+                .verify_and_record_checkpoints(&current_changes, std::slice::from_ref(&current))
+                .unwrap();
+            let trusted_hash = checkpoint_hash(&current).unwrap();
+
+            let result =
+                cache.verify_and_record_checkpoints(&first_changes, std::slice::from_ref(&first));
+
+            assert!(matches!(
+                result,
+                Err(CliError::SyncIntegrity {
+                    vault_id: id,
+                    revision: 1,
+                    ..
+                }) if id == vault_id
+            ));
+            let state = cache.integrity_state(vault_id).unwrap();
+            assert!(state.unsafe_sync);
+            assert_eq!(state.verified_head.unwrap().checkpoint_hash, trusted_hash);
+            assert_eq!(state.findings[0].code, "non_monotonic_revision");
+            assert_eq!(
+                cache
+                    .latest_item_revision(vault_id, uuid::Uuid::from_u128(2))
+                    .unwrap()
+                    .unwrap()
+                    .envelope["ciphertext"],
+                "trusted-current"
+            );
+        }
+
+        #[test]
+        fn checkpoint_validation_quarantines_invalid_signature_untrusted_signer_and_commitment() {
+            for case in [
+                "invalid_signature",
+                "untrusted_signer",
+                "commitment_mismatch",
+            ] {
+                let mut cache = LocalCache::open_in_memory(case).unwrap();
+                let vault_id = uuid::Uuid::from_u128(1);
+                let trusted_device = uuid::Uuid::from_u128(9);
+                let untrusted_device = uuid::Uuid::from_u128(10);
+                let trusted_key = signing_key(7);
+                let untrusted_key = signing_key(8);
+                trust(&cache, trusted_device, &trusted_key);
+                let changes = changes(vault_id, 1, "encrypted");
+                let mut candidate =
+                    checkpoint(&mut cache, &changes, None, trusted_device, &trusted_key);
+                match case {
+                    "invalid_signature" => candidate.signature.push('x'),
+                    "untrusted_signer" => {
+                        candidate = checkpoint(
+                            &mut cache,
+                            &changes,
+                            None,
+                            untrusted_device,
+                            &untrusted_key,
+                        );
+                    }
+                    "commitment_mismatch" => {
+                        candidate = sign_checkpoint(
+                            SyncCheckpoint {
+                                state_commitment: umbra_crypto::checkpoints::state_commitment([
+                                    b"altered-state".to_vec(),
+                                ]),
+                                ..candidate
+                            },
+                            &trusted_key,
+                        )
+                        .unwrap();
+                    }
+                    _ => unreachable!(),
+                }
+
+                let result =
+                    cache.verify_and_record_checkpoints(&changes, std::slice::from_ref(&candidate));
+
+                assert!(matches!(result, Err(CliError::SyncIntegrity { .. })));
+                let state = cache.integrity_state(vault_id).unwrap();
+                assert!(state.unsafe_sync);
+                assert_eq!(state.findings[0].code, case);
+                assert!(state.verified_head.is_none());
+                assert!(
+                    cache
+                        .latest_item_revision(vault_id, uuid::Uuid::from_u128(2))
+                        .unwrap()
+                        .is_none()
+                );
+            }
+        }
+
+        #[test]
+        fn checkpoint_validation_rejects_missing_predecessor_and_revoked_signer() {
+            let vault_id = uuid::Uuid::from_u128(1);
+            let device_id = uuid::Uuid::from_u128(9);
+            let key = signing_key(7);
+
+            let mut missing_cache = LocalCache::open_in_memory("missing-predecessor").unwrap();
+            trust(&missing_cache, device_id, &key);
+            let first_changes = changes(vault_id, 1, "first");
+            let first = checkpoint(&mut missing_cache, &first_changes, None, device_id, &key);
+            missing_cache
+                .verify_and_record_checkpoints(&first_changes, std::slice::from_ref(&first))
+                .unwrap();
+            let skipped_changes = changes(vault_id, 3, "skipped-revision");
+            let skipped = checkpoint(
+                &mut missing_cache,
+                &skipped_changes,
+                Some(umbra_crypto::checkpoints::state_commitment([
+                    b"omitted-predecessor".to_vec(),
+                ])),
+                device_id,
+                &key,
+            );
+            assert!(matches!(
+                missing_cache.verify_and_record_checkpoints(
+                    &skipped_changes,
+                    std::slice::from_ref(&skipped)
+                ),
+                Err(CliError::SyncIntegrity { .. })
+            ));
+            assert_eq!(
+                missing_cache.integrity_findings(vault_id).unwrap()[0].code,
+                "missing_predecessor"
+            );
+
+            let mut revoked_cache = LocalCache::open_in_memory("revoked-signer").unwrap();
+            revoked_cache
+                .record_trusted_checkpoint_device(&TrustedCheckpointDevice {
+                    device_id,
+                    public_key: verifying_key_to_b64(&key.verifying_key()),
+                    revoked: true,
+                })
+                .unwrap();
+            let revoked_changes = changes(vault_id, 1, "revoked");
+            let revoked = checkpoint(&mut revoked_cache, &revoked_changes, None, device_id, &key);
+            assert!(matches!(
+                revoked_cache.verify_and_record_checkpoints(
+                    &revoked_changes,
+                    std::slice::from_ref(&revoked)
+                ),
+                Err(CliError::SyncIntegrity { .. })
+            ));
+            assert_eq!(
+                revoked_cache.integrity_findings(vault_id).unwrap()[0].code,
+                "revoked_signer"
+            );
+        }
+
+        #[test]
+        fn checkpoint_validation_persists_transport_downgrade_evidence() {
+            let mut cache = LocalCache::open_in_memory("transport-downgrade").unwrap();
+            let vault_id = uuid::Uuid::from_u128(1);
+
+            cache
+                .quarantine_transport_failure(vault_id, 4, "protocol-v1", "protocol_downgrade")
+                .unwrap();
+
+            let state = cache.integrity_state(vault_id).unwrap();
+            assert!(state.unsafe_sync);
+            assert_eq!(state.findings[0].code, "protocol_downgrade");
+            assert_eq!(state.findings[0].checkpoint_hash, "protocol-v1");
+        }
+
+        #[test]
+        fn checkpoint_validation_rejects_cross_vault_nested_records() {
+            let mut cache = LocalCache::open_in_memory("cross-vault").unwrap();
+            let vault_id = uuid::Uuid::from_u128(1);
+            let other_vault_id = uuid::Uuid::from_u128(99);
+            let device_id = uuid::Uuid::from_u128(9);
+            let key = signing_key(7);
+            trust(&cache, device_id, &key);
+            let mut malicious_changes = changes(vault_id, 1, "hidden-cross-vault-record");
+            malicious_changes.items[0].vault_id = other_vault_id;
+            let signed = checkpoint(&mut cache, &malicious_changes, None, device_id, &key);
+
+            assert!(matches!(
+                cache.verify_and_record_checkpoints(
+                    &malicious_changes,
+                    std::slice::from_ref(&signed)
+                ),
+                Err(CliError::SyncIntegrity { .. })
+            ));
+            assert_eq!(
+                cache.integrity_findings(vault_id).unwrap()[0].code,
+                "state_scope_mismatch"
+            );
+            assert!(
+                cache
+                    .latest_item_revision(other_vault_id, uuid::Uuid::from_u128(2))
+                    .unwrap()
+                    .is_none()
+            );
+        }
+
+        #[test]
+        fn checkpoint_validation_rejects_access_revision_rollback() {
+            let mut cache = LocalCache::open_in_memory("access-rollback").unwrap();
+            let vault_id = uuid::Uuid::from_u128(1);
+            let device_id = uuid::Uuid::from_u128(9);
+            let key = signing_key(7);
+            trust(&cache, device_id, &key);
+            let mut current_changes = changes(vault_id, 1, "trusted");
+            current_changes.latest_access_revision = 5;
+            let current = checkpoint(&mut cache, &current_changes, None, device_id, &key);
+            cache
+                .verify_and_record_checkpoints(&current_changes, std::slice::from_ref(&current))
+                .unwrap();
+
+            let mut rollback_changes = current_changes.clone();
+            rollback_changes.latest_access_revision = 4;
+            assert!(matches!(
+                cache.verify_and_record_checkpoints(&rollback_changes, &[]),
+                Err(CliError::SyncIntegrity { .. })
+            ));
+            assert_eq!(
+                cache.integrity_findings(vault_id).unwrap()[0].code,
+                "access_revision_rollback"
+            );
+            assert_eq!(
+                cache
+                    .sync_state(vault_id)
+                    .unwrap()
+                    .unwrap()
+                    .latest_access_revision,
+                5
+            );
+        }
+
+        #[test]
+        fn malicious_checkpoint_equivocation_preserves_both_signed_records() {
+            let mut cache = LocalCache::open_in_memory("equivocation").unwrap();
+            let vault_id = uuid::Uuid::from_u128(1);
+            let device_id = uuid::Uuid::from_u128(9);
+            let key = signing_key(7);
+            trust(&cache, device_id, &key);
+            let original_changes = changes(vault_id, 1, "branch-a");
+            let original = checkpoint(&mut cache, &original_changes, None, device_id, &key);
+            cache
+                .verify_and_record_checkpoints(&original_changes, std::slice::from_ref(&original))
+                .unwrap();
+
+            let conflicting_changes = changes(vault_id, 1, "branch-b");
+            let conflicting = checkpoint(&mut cache, &conflicting_changes, None, device_id, &key);
+            let result = cache.verify_and_record_checkpoints(
+                &conflicting_changes,
+                std::slice::from_ref(&conflicting),
+            );
+
+            assert!(matches!(result, Err(CliError::SyncIntegrity { .. })));
+            let bundle = cache.export_checkpoint_evidence(vault_id).unwrap();
+            assert!(bundle.unsafe_sync);
+            assert_eq!(bundle.observed_checkpoints.len(), 2);
+            assert!(bundle.observed_checkpoints.contains(&original));
+            assert!(bundle.observed_checkpoints.contains(&conflicting));
+            assert_eq!(bundle.findings[0].code, "equivocation");
+        }
+
+        #[test]
+        fn sync_integrity_export_contains_no_payloads_wrappings_or_secrets() {
+            let mut cache = LocalCache::open_in_memory("redacted-export").unwrap();
+            let vault_id = uuid::Uuid::from_u128(1);
+            let device_id = uuid::Uuid::from_u128(9);
+            let key = signing_key(7);
+            trust(&cache, device_id, &key);
+            let changes = changes(
+                vault_id,
+                1,
+                "PLAINTEXT_SECRET_CIPHERTEXT_ENVELOPE_TOKEN_VAULT_KEY_WRAPPING",
+            );
+            let signed = checkpoint(&mut cache, &changes, None, device_id, &key);
+            cache
+                .verify_and_record_checkpoints(&changes, std::slice::from_ref(&signed))
+                .unwrap();
+
+            let encoded =
+                serde_json::to_string(&cache.export_checkpoint_evidence(vault_id).unwrap())
+                    .unwrap();
+            for forbidden in [
+                "PLAINTEXT_SECRET",
+                "CIPHERTEXT_ENVELOPE",
+                "TOKEN",
+                "VAULT_KEY_WRAPPING",
+                "\"envelope\"",
+                "\"plaintext\"",
+                "\"wrapping\"",
+                "\"private_key\"",
+            ] {
+                assert!(!encoded.contains(forbidden), "export leaked {forbidden}");
+            }
+        }
+
+        #[test]
+        fn sync_integrity_export_redacts_malformed_attacker_controlled_metadata() {
+            let mut cache = LocalCache::open_in_memory("malformed-export").unwrap();
+            let vault_id = uuid::Uuid::from_u128(1);
+            let device_id = uuid::Uuid::from_u128(9);
+            let key = signing_key(7);
+            trust(&cache, device_id, &key);
+            let changes = changes(vault_id, 1, "encrypted");
+            let mut malicious = checkpoint(&mut cache, &changes, None, device_id, &key);
+            malicious.signature =
+                "PLAINTEXT_SECRET_CIPHERTEXT_ENVELOPE_TOKEN_VAULT_KEY_WRAPPING".to_owned();
+            assert!(matches!(
+                cache.verify_and_record_checkpoints(&changes, std::slice::from_ref(&malicious)),
+                Err(CliError::SyncIntegrity { .. })
+            ));
+
+            let encoded =
+                serde_json::to_string(&cache.export_checkpoint_evidence(vault_id).unwrap())
+                    .unwrap();
+            for forbidden in [
+                "PLAINTEXT_SECRET",
+                "CIPHERTEXT_ENVELOPE",
+                "TOKEN",
+                "VAULT_KEY_WRAPPING",
+            ] {
+                assert!(!encoded.contains(forbidden), "export leaked {forbidden}");
+            }
+            assert!(encoded.contains("invalid_signature"));
+        }
+
+        #[test]
+        fn honest_devices_converge_on_the_same_verified_checkpoint() {
+            let mut first_cache = LocalCache::open_in_memory("first").unwrap();
+            let mut second_cache = LocalCache::open_in_memory("second").unwrap();
+            let vault_id = uuid::Uuid::from_u128(1);
+            let device_a = uuid::Uuid::from_u128(9);
+            let device_b = uuid::Uuid::from_u128(10);
+            let key_a = signing_key(7);
+            let key_b = signing_key(8);
+            for cache in [&first_cache, &second_cache] {
+                trust(cache, device_a, &key_a);
+                trust(cache, device_b, &key_b);
+            }
+
+            let first_changes = changes(vault_id, 1, "created-by-a");
+            let first = checkpoint(&mut first_cache, &first_changes, None, device_a, &key_a);
+            for cache in [&mut first_cache, &mut second_cache] {
+                cache
+                    .verify_and_record_checkpoints(&first_changes, std::slice::from_ref(&first))
+                    .unwrap();
+            }
+
+            let mut conflict_changes = changes(vault_id, 2, "updated-by-b");
+            conflict_changes.conflicts = vec![umbra_protocol::ItemConflictResponse {
+                conflict_id: uuid::Uuid::from_u128(3),
+                vault_id,
+                item_id: uuid::Uuid::from_u128(2),
+                base_revision: 1,
+                current_revision: 2,
+                candidate_kind: "update".to_owned(),
+                candidate_envelope: Some(serde_json::json!({
+                    "ciphertext": "conflicting-encrypted-candidate"
+                })),
+                author_user_id: None,
+                state: "open".to_owned(),
+            }];
+            let conflict_checkpoint = checkpoint(
+                &mut first_cache,
+                &conflict_changes,
+                Some(checkpoint_hash(&first).unwrap()),
+                device_b,
+                &key_b,
+            );
+            for cache in [&mut first_cache, &mut second_cache] {
+                cache
+                    .verify_and_record_checkpoints(
+                        &conflict_changes,
+                        std::slice::from_ref(&conflict_checkpoint),
+                    )
+                    .unwrap();
+            }
+
+            let resolved_changes = changes(vault_id, 3, "resolved-by-a");
+            let resolved_checkpoint = checkpoint(
+                &mut first_cache,
+                &resolved_changes,
+                Some(checkpoint_hash(&conflict_checkpoint).unwrap()),
+                device_a,
+                &key_a,
+            );
+            for cache in [&mut first_cache, &mut second_cache] {
+                cache
+                    .verify_and_record_checkpoints(
+                        &resolved_changes,
+                        std::slice::from_ref(&resolved_checkpoint),
+                    )
+                    .unwrap();
+            }
+
+            let first_head = first_cache
+                .integrity_state(vault_id)
+                .unwrap()
+                .verified_head
+                .unwrap();
+            let second_head = second_cache
+                .integrity_state(vault_id)
+                .unwrap()
+                .verified_head
+                .unwrap();
+            assert_eq!(first_head.checkpoint_hash, second_head.checkpoint_hash);
+            assert_eq!(first_head.checkpoint, second_head.checkpoint);
+            assert_eq!(first_head.checkpoint, resolved_checkpoint);
+            assert!(
+                first_cache
+                    .list_item_conflicts(vault_id)
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(
+                second_cache
+                    .list_item_conflicts(vault_id)
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(
+                first_cache
+                    .latest_item_revision(vault_id, uuid::Uuid::from_u128(2))
+                    .unwrap(),
+                second_cache
+                    .latest_item_revision(vault_id, uuid::Uuid::from_u128(2))
+                    .unwrap()
+            );
+        }
     }
 }

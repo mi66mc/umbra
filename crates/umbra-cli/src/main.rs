@@ -460,6 +460,34 @@ pub enum SyncCommand {
         #[arg(long)]
         force_full: bool,
     },
+    #[command(subcommand)]
+    Integrity(SyncIntegrityCommand),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SyncIntegrityCommand {
+    Status {
+        #[arg(long)]
+        vault_id: Option<VaultId>,
+        #[arg(long)]
+        vault: Option<String>,
+    },
+    Export {
+        #[arg(long)]
+        vault_id: Option<VaultId>,
+        #[arg(long)]
+        vault: Option<String>,
+        #[arg(long)]
+        output: PathBuf,
+    },
+    ExportTrustAnchors {
+        #[arg(long)]
+        output: PathBuf,
+    },
+    ImportTrustAnchors {
+        #[arg(long)]
+        input: PathBuf,
+    },
 }
 
 #[tokio::main]

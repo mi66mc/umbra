@@ -4,13 +4,14 @@ use uuid::Uuid;
 use crate::{
     AcceptVaultInvite, AppendAuditLog, ApprovePendingDevice, AuditLogRecord, CreateDevice,
     CreateEncryptedItem, CreateItemConflict, CreateItemRevision, CreateOrg,
-    CreateRecoveryChallenge, CreateSession, CreateUser, CreateVault, CreateVaultInvite,
-    CreateVaultKeyWrapping, DeleteItem, DeletedItemRecord, DeviceRecord, FinishVaultKeyRotation,
-    ItemConflictRecord, ItemRevisionRecord, OrgMemberRecord, OrgRecord, PendingVaultInviteRecord,
-    PostgresStorage, RecoveryChallengeRecord, ResolveItemConflict, ResolvedItemConflictRecord,
-    RotationStatusRecord, SessionRecord, StorageError, UpsertOrgMember, UpsertUserAuth,
-    UpsertVaultMember, UserAuthRecord, UserRecord, VaultInviteRecord, VaultKeyWrappingRecord,
-    VaultMemberRecord, VaultRecord, VaultSyncStatusRecord,
+    CreateRecoveryChallenge, CreateSession, CreateSyncCheckpoint, CreateUser, CreateVault,
+    CreateVaultInvite, CreateVaultKeyWrapping, DeleteItem, DeletedItemRecord, DeviceRecord,
+    FinishVaultKeyRotation, ItemConflictRecord, ItemRevisionRecord, OrgMemberRecord, OrgRecord,
+    PendingVaultInviteRecord, PostgresStorage, RecoveryChallengeRecord, ResolveItemConflict,
+    ResolvedItemConflictRecord, RotationStatusRecord, SessionRecord, StorageError,
+    StoredSyncCheckpoint, UpsertOrgMember, UpsertUserAuth, UpsertVaultMember, UserAuthRecord,
+    UserRecord, VaultInviteRecord, VaultKeyWrappingRecord, VaultMemberRecord, VaultRecord,
+    VaultSyncStatusRecord,
 };
 use umbra_core::{DeviceId, OrgId, UserId, VaultId};
 
@@ -148,6 +149,21 @@ pub trait StorageBackend: Send + Sync {
         &self,
         input: FinishVaultKeyRotation,
     ) -> Result<RotationStatusRecord, StorageError>;
+
+    async fn append_sync_checkpoint(
+        &self,
+        input: CreateSyncCheckpoint,
+    ) -> Result<StoredSyncCheckpoint, StorageError>;
+    async fn list_sync_checkpoints_since(
+        &self,
+        vault_id: VaultId,
+        since_vault_revision: i64,
+    ) -> Result<Vec<StoredSyncCheckpoint>, StorageError>;
+    async fn find_sync_checkpoint(
+        &self,
+        vault_id: VaultId,
+        vault_revision: i64,
+    ) -> Result<Option<StoredSyncCheckpoint>, StorageError>;
 
     async fn create_item_revision(
         &self,
@@ -459,6 +475,29 @@ impl StorageBackend for PostgresStorage {
         input: FinishVaultKeyRotation,
     ) -> Result<RotationStatusRecord, StorageError> {
         PostgresStorage::finish_vault_key_rotation(self, input).await
+    }
+
+    async fn append_sync_checkpoint(
+        &self,
+        input: CreateSyncCheckpoint,
+    ) -> Result<StoredSyncCheckpoint, StorageError> {
+        PostgresStorage::append_sync_checkpoint(self, input).await
+    }
+
+    async fn list_sync_checkpoints_since(
+        &self,
+        vault_id: VaultId,
+        since_vault_revision: i64,
+    ) -> Result<Vec<StoredSyncCheckpoint>, StorageError> {
+        PostgresStorage::list_sync_checkpoints_since(self, vault_id, since_vault_revision).await
+    }
+
+    async fn find_sync_checkpoint(
+        &self,
+        vault_id: VaultId,
+        vault_revision: i64,
+    ) -> Result<Option<StoredSyncCheckpoint>, StorageError> {
+        PostgresStorage::find_sync_checkpoint(self, vault_id, vault_revision).await
     }
 
     async fn create_item_revision(
@@ -806,6 +845,34 @@ impl StorageBackend for crate::sqlite::SqliteStorage {
         input: FinishVaultKeyRotation,
     ) -> Result<RotationStatusRecord, StorageError> {
         crate::sqlite::SqliteStorage::finish_vault_key_rotation(self, input).await
+    }
+
+    async fn append_sync_checkpoint(
+        &self,
+        input: CreateSyncCheckpoint,
+    ) -> Result<StoredSyncCheckpoint, StorageError> {
+        crate::sqlite::SqliteStorage::append_sync_checkpoint(self, input).await
+    }
+
+    async fn list_sync_checkpoints_since(
+        &self,
+        vault_id: VaultId,
+        since_vault_revision: i64,
+    ) -> Result<Vec<StoredSyncCheckpoint>, StorageError> {
+        crate::sqlite::SqliteStorage::list_sync_checkpoints_since(
+            self,
+            vault_id,
+            since_vault_revision,
+        )
+        .await
+    }
+
+    async fn find_sync_checkpoint(
+        &self,
+        vault_id: VaultId,
+        vault_revision: i64,
+    ) -> Result<Option<StoredSyncCheckpoint>, StorageError> {
+        crate::sqlite::SqliteStorage::find_sync_checkpoint(self, vault_id, vault_revision).await
     }
 
     async fn create_item_revision(

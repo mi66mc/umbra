@@ -3,7 +3,9 @@ use umbra_core::{DeviceState, MemberState, VaultRole};
 use uuid::Uuid;
 
 use crate::error::ServerError;
-use crate::signed_auth::{AuthenticatedUser, authenticated_user_from_headers};
+use crate::signed_auth::{
+    AUTHENTICATED_SCHEME_HEADER, AuthenticatedUser, authenticated_user_from_headers,
+};
 use crate::state::AppState;
 use crate::util::token_hash;
 
@@ -47,6 +49,22 @@ pub(crate) async fn authenticate_trusted_context(
         return Err(ServerError::Forbidden);
     }
     Ok(auth)
+}
+
+/// Checkpoint authorship is bound to a device-authenticated HTTP request, not
+/// a bearer session that happens to be associated with a device.
+pub(crate) async fn authenticate_signed_trusted_context(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<AuthenticatedUser, ServerError> {
+    if headers
+        .get(AUTHENTICATED_SCHEME_HEADER)
+        .and_then(|value| value.to_str().ok())
+        != Some("signed")
+    {
+        return Err(ServerError::Forbidden);
+    }
+    authenticate_trusted_context(state, headers).await
 }
 
 pub(crate) async fn ensure_org_manager(

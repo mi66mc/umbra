@@ -112,3 +112,18 @@ upload new encrypted revision
 ## Protocol Migrations
 
 Protocol migrations are handled with explicit `protocol_version` fields and versioned API routes.
+
+## Migration 9: sync checkpoints
+
+Migration `000009_sync_checkpoints.sql` exists in both migration trees:
+
+```txt
+crates/umbra-migrations/migrations/000009_sync_checkpoints.sql
+crates/umbra-migrations/sqlite/000009_sync_checkpoints.sql
+```
+
+It adds append-only checkpoint persistence and lookup indexes for ordered retrieval by vault revision. Checkpoint rows contain only vault ID, revision, encrypted-state commitment, previous/checkpoint hashes, author device ID, signature, and timestamps. The database must reject a competing checkpoint hash at the same vault revision rather than replacing history. Audit indexing records checkpoint identifiers, revision, hash, and device ID only.
+
+Before enabling protocol v2, back up the database, run the normal migration procedure, and confirm `umbra-server migrate status` reports migration 9 applied. Run v2 only after trusted clients have locally persisted checkpoint-device anchors; applying the schema alone does not bootstrap trust. Keep protocol v1 available for existing clients, but use explicit v2 negotiation for checkpoint-aware clients.
+
+Rollback of a schema migration is not an integrity recovery procedure. Do not delete checkpoint rows or client forensic evidence to make a quarantined vault sync again. Preserve the evidence, export it with `umbra sync integrity export`, and investigate against an independently trusted client history.
