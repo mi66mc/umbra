@@ -10,7 +10,7 @@ use crate::{
     RecoveryChallengeRecord, StorageError,
 };
 
-const DEVICE_COLUMNS: &str = "id, user_id, name, public_key, fingerprint, state, approval_code_hash, approval_expires_at, bootstrap_public_key, bootstrap_bundle, created_at, trusted_at, last_seen_at, revoked_at";
+const DEVICE_COLUMNS: &str = "id, user_id, name, public_key, encryption_public_key, fingerprint, state, approval_code_hash, approval_expires_at, bootstrap_public_key, bootstrap_bundle, created_at, trusted_at, last_seen_at, revoked_at";
 
 impl SqliteStorage {
     pub async fn create_device(&self, input: CreateDevice) -> Result<DeviceRecord, StorageError> {
@@ -19,11 +19,11 @@ impl SqliteStorage {
         let row = sqlx::query(&format!(
             r#"
             INSERT INTO devices (
-                id, user_id, name, public_key, fingerprint, trusted, state,
+                id, user_id, name, public_key, encryption_public_key, fingerprint, trusted, state,
                 approval_code_hash, approval_expires_at, bootstrap_public_key, trusted_at
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
-                    CASE WHEN ?7 = 'trusted' THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now') ELSE NULL END)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
+                    CASE WHEN ?8 = 'trusted' THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now') ELSE NULL END)
             RETURNING {DEVICE_COLUMNS}
             "#
         ))
@@ -31,6 +31,7 @@ impl SqliteStorage {
         .bind(input.user_id.to_string())
         .bind(input.name)
         .bind(input.public_key)
+        .bind(input.encryption_public_key)
         .bind(input.fingerprint)
         .bind(matches!(input.state, DeviceState::Trusted) as i64)
         .bind(state)

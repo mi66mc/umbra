@@ -6,7 +6,7 @@ use crate::error::{ensure_rows_affected, map_sqlx_error};
 use crate::models::*;
 use crate::{PostgresStorage, StorageError};
 
-const DEVICE_COLUMNS: &str = "id, user_id, name, public_key, fingerprint, state, approval_code_hash, approval_expires_at, bootstrap_public_key, bootstrap_bundle, created_at, trusted_at, last_seen_at, revoked_at";
+const DEVICE_COLUMNS: &str = "id, user_id, name, public_key, encryption_public_key, fingerprint, state, approval_code_hash, approval_expires_at, bootstrap_public_key, bootstrap_bundle, created_at, trusted_at, last_seen_at, revoked_at";
 
 impl PostgresStorage {
     pub async fn create_device(&self, input: CreateDevice) -> Result<DeviceRecord, StorageError> {
@@ -14,10 +14,10 @@ impl PostgresStorage {
         let row = sqlx::query(&format!(
             r#"
             INSERT INTO devices (
-                id, user_id, name, public_key, fingerprint, trusted, state,
+                id, user_id, name, public_key, encryption_public_key, fingerprint, trusted, state,
                 approval_code_hash, approval_expires_at, bootstrap_public_key, trusted_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, CASE WHEN $7 = 'trusted' THEN now() ELSE NULL END)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, CASE WHEN $8 = 'trusted' THEN now() ELSE NULL END)
             RETURNING {DEVICE_COLUMNS}
             "#
         ))
@@ -25,6 +25,7 @@ impl PostgresStorage {
         .bind(input.user_id)
         .bind(input.name)
         .bind(input.public_key)
+        .bind(input.encryption_public_key)
         .bind(input.fingerprint)
         .bind(matches!(input.state, DeviceState::Trusted))
         .bind(device_state_to_str(input.state))
