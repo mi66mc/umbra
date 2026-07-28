@@ -545,7 +545,19 @@ pub async fn run(
         }
         Command::EmergencyKit(EmergencyKitCommand::Export { output }) => {
             let profile = active_profile(&config)?;
-            let encoded = emergency_kit_json_from_profile(profile)?;
+            let cache = crate::cache::LocalCache::open(&config.active_profile)?;
+            let anchors = cache.trusted_checkpoint_devices()?;
+            let trust_bundle = if anchors.is_empty() {
+                None
+            } else {
+                let password = rpassword::prompt_password("Master password: ")?;
+                let unlocked = crate::crypto_state::load_unlocked_profile(
+                    profile,
+                    &MasterPassword::new(password.into_bytes()),
+                )?;
+                Some(authenticated_checkpoint_trust_bundle(&unlocked, &anchors)?)
+            };
+            let encoded = emergency_kit_json_from_profile_with_trust_bundle(profile, trust_bundle)?;
             if let Some(path) = output {
                 std::fs::write(&path, encoded)?;
                 println!("emergency kit written: {}", path.display());
@@ -759,6 +771,8 @@ pub async fn run(
                 &master_password,
                 &emergency_kit,
             )?;
+            let recovered_checkpoint_anchors =
+                checkpoint_anchors_from_emergency_kit(&unlocked, &emergency_kit)?;
             let envelope: RecoveryChallengeEnvelopeV1 =
                 serde_json::from_value(challenge.encrypted_challenge)?;
             let aad = AadV1::recovery_challenge(
@@ -780,6 +794,8 @@ pub async fn run(
                 .await?;
             apply_recovered_emergency_kit_material(profile, &emergency_kit)?;
             save_config(&config)?;
+            let cache = crate::cache::LocalCache::open(&config.active_profile)?;
+            record_checkpoint_trust_anchors(&cache, &recovered_checkpoint_anchors)?;
             if output.is_json() {
                 print_json(&recovered)
             } else {
@@ -1923,6 +1939,55 @@ pub async fn run(
                         Ok(())
                     }
                 }
+                SyncIntegrityCommand::ExportTrustAnchors {
+                    output: destination,
+                } => {
+                    let password = rpassword::prompt_password("Master password: ")?;
+                    let unlocked = crate::crypto_state::load_unlocked_profile(
+                        profile,
+                        &MasterPassword::new(password.into_bytes()),
+                    )?;
+                    let bundle = authenticated_checkpoint_trust_bundle(
+                        &unlocked,
+                        &cache.trusted_checkpoint_devices()?,
+                    )?;
+                    let encoded = serde_json::to_string_pretty(&bundle)?;
+                    std::fs::write(&destination, encoded)?;
+                    if output.is_json() {
+                        print_json(&serde_json::json!({
+                            "output": destination,
+                            "anchor_count": bundle.trusted_checkpoint_devices.len(),
+                            "exported": true
+                        }))
+                    } else {
+                        println!(
+                            "checkpoint trust anchors written: {}",
+                            destination.display()
+                        );
+                        Ok(())
+                    }
+                }
+                SyncIntegrityCommand::ImportTrustAnchors { input } => {
+                    let raw = std::fs::read_to_string(&input)?;
+                    let bundle: umbra_crypto::checkpoint_trust::CheckpointTrustBundleV1 =
+                        serde_json::from_str(&raw)?;
+                    let password = rpassword::prompt_password("Master password: ")?;
+                    let unlocked = crate::crypto_state::load_unlocked_profile(
+                        profile,
+                        &MasterPassword::new(password.into_bytes()),
+                    )?;
+                    let imported = import_checkpoint_trust_bundle(&cache, &unlocked, &bundle)?;
+                    if output.is_json() {
+                        print_json(&serde_json::json!({
+                            "input": input,
+                            "anchor_count": imported,
+                            "imported": true
+                        }))
+                    } else {
+                        println!("checkpoint trust anchors imported: {imported}");
+                        Ok(())
+                    }
+                }
             }
         }
     }
@@ -2220,7 +2285,15 @@ fn profile_public_key(profile: &crate::config::ProfileConfig) -> Result<UserPubl
 fn emergency_kit_json_from_profile(
     profile: &crate::config::ProfileConfig,
 ) -> Result<String, CliError> {
-    let kit = crate::crypto_state::EmergencyKitV1::from_profile(profile)?;
+    emergency_kit_json_from_profile_with_trust_bundle(profile, None)
+}
+
+fn emergency_kit_json_from_profile_with_trust_bundle(
+    profile: &crate::config::ProfileConfig,
+    checkpoint_trust_bundle: Option<umbra_crypto::checkpoint_trust::CheckpointTrustBundleV1>,
+) -> Result<String, CliError> {
+    let mut kit = crate::crypto_state::EmergencyKitV1::from_profile(profile)?;
+    kit.checkpoint_trust_bundle = checkpoint_trust_bundle;
     serde_json::to_string_pretty(&kit).map_err(CliError::from)
 }
 
@@ -2274,6 +2347,85 @@ fn apply_recovered_emergency_kit_material(
     profile.legacy_session_token = None;
     profile.session_id = None;
     Ok(())
+}
+
+fn authenticated_checkpoint_trust_bundle(
+    unlocked: &crate::crypto_state::UnlockedAccountCrypto,
+    anchors: &[crate::cache::TrustedCheckpointDevice],
+) -> Result<umbra_crypto::checkpoint_trust::CheckpointTrustBundleV1, CliError> {
+    let anchors = anchors
+        .iter()
+        .map(|anchor| DeviceCheckpointTrustAnchorV1 {
+            device_id: anchor.device_id.to_string(),
+            public_key: anchor.public_key.clone(),
+            revoked: anchor.revoked,
+        })
+        .collect();
+    umbra_crypto::checkpoint_trust::authenticate_checkpoint_trust_bundle(
+        &unlocked.private_key,
+        &unlocked.public_key,
+        anchors,
+    )
+    .map_err(|_| CliError::Input("failed to authenticate checkpoint trust anchors"))
+}
+
+fn checkpoint_anchors_from_emergency_kit(
+    unlocked: &crate::crypto_state::UnlockedAccountCrypto,
+    kit: &crate::crypto_state::EmergencyKitV1,
+) -> Result<Vec<crate::cache::TrustedCheckpointDevice>, CliError> {
+    match kit.checkpoint_trust_bundle.as_ref() {
+        Some(bundle) => verified_checkpoint_trust_anchors(unlocked, bundle),
+        None => Ok(Vec::new()),
+    }
+}
+
+fn verified_checkpoint_trust_anchors(
+    unlocked: &crate::crypto_state::UnlockedAccountCrypto,
+    bundle: &umbra_crypto::checkpoint_trust::CheckpointTrustBundleV1,
+) -> Result<Vec<crate::cache::TrustedCheckpointDevice>, CliError> {
+    umbra_crypto::checkpoint_trust::verify_checkpoint_trust_bundle(
+        &unlocked.private_key,
+        &unlocked.public_key,
+        bundle,
+    )
+    .map_err(|_| CliError::Input("checkpoint trust anchor authentication failed"))?
+    .iter()
+    .map(checkpoint_anchor_from_bootstrap)
+    .collect()
+}
+
+fn record_checkpoint_trust_anchors(
+    cache: &crate::cache::LocalCache,
+    anchors: &[crate::cache::TrustedCheckpointDevice],
+) -> Result<(), CliError> {
+    let existing = cache
+        .trusted_checkpoint_devices()?
+        .into_iter()
+        .map(|anchor| (anchor.device_id, anchor))
+        .collect::<BTreeMap<_, _>>();
+    for anchor in anchors {
+        if let Some(current) = existing.get(&anchor.device_id)
+            && current != anchor
+        {
+            return Err(CliError::Input(
+                "checkpoint trust anchor conflicts with existing local trust",
+            ));
+        }
+    }
+    for anchor in anchors {
+        cache.record_trusted_checkpoint_device(anchor)?;
+    }
+    Ok(())
+}
+
+fn import_checkpoint_trust_bundle(
+    cache: &crate::cache::LocalCache,
+    unlocked: &crate::crypto_state::UnlockedAccountCrypto,
+    bundle: &umbra_crypto::checkpoint_trust::CheckpointTrustBundleV1,
+) -> Result<usize, CliError> {
+    let anchors = verified_checkpoint_trust_anchors(unlocked, bundle)?;
+    record_checkpoint_trust_anchors(cache, &anchors)?;
+    Ok(anchors.len())
 }
 
 fn device_bootstrap_bundle_from_profile(
@@ -4116,6 +4268,88 @@ mod tests {
         assert_eq!(profile.pending_approval_code, None);
         assert_eq!(profile.legacy_session_token, None);
         assert_eq!(profile.session_id, None);
+    }
+
+    #[test]
+    fn emergency_kit_restores_authenticated_checkpoint_anchors_after_recovery() {
+        let password = MasterPassword::new("correct horse battery staple");
+        let account_crypto = crate::crypto_state::NewAccountCrypto::generate(&password).unwrap();
+        let unlocked = account_crypto.unlock(&password).unwrap();
+        let signing_key = crate::keys::DeviceSigningKey::generate();
+        let source_anchor = crate::cache::TrustedCheckpointDevice {
+            device_id: uuid::Uuid::from_u128(1),
+            public_key: signing_key.public_key_base64url(),
+            revoked: false,
+        };
+        let bundle =
+            authenticated_checkpoint_trust_bundle(&unlocked, std::slice::from_ref(&source_anchor))
+                .unwrap();
+        let mut kit =
+            crate::crypto_state::EmergencyKitV1::from_account_crypto(None, &account_crypto);
+        kit.checkpoint_trust_bundle = Some(bundle);
+        let recovered_anchors = checkpoint_anchors_from_emergency_kit(&unlocked, &kit).unwrap();
+        let recovered_cache = crate::cache::LocalCache::open_in_memory("recovered-device").unwrap();
+
+        record_checkpoint_trust_anchors(&recovered_cache, &recovered_anchors).unwrap();
+
+        assert_eq!(
+            recovered_cache.trusted_checkpoint_devices().unwrap(),
+            vec![source_anchor]
+        );
+    }
+
+    #[test]
+    fn signed_anchor_export_import_migrates_existing_devices_without_secrets() {
+        let password = MasterPassword::new("correct horse battery staple");
+        let account_crypto = crate::crypto_state::NewAccountCrypto::generate(&password).unwrap();
+        let unlocked = account_crypto.unlock(&password).unwrap();
+        let device_signing_key = crate::keys::DeviceSigningKey::generate();
+        let anchor = crate::cache::TrustedCheckpointDevice {
+            device_id: uuid::Uuid::from_u128(2),
+            public_key: device_signing_key.public_key_base64url(),
+            revoked: false,
+        };
+        let source = crate::cache::LocalCache::open_in_memory("existing-source").unwrap();
+        source.record_trusted_checkpoint_device(&anchor).unwrap();
+        let bundle = authenticated_checkpoint_trust_bundle(
+            &unlocked,
+            &source.trusted_checkpoint_devices().unwrap(),
+        )
+        .unwrap();
+        let encoded = serde_json::to_string(&bundle).unwrap();
+        let destination = crate::cache::LocalCache::open_in_memory("existing-destination").unwrap();
+
+        import_checkpoint_trust_bundle(&destination, &unlocked, &bundle).unwrap();
+
+        assert_eq!(
+            destination.trusted_checkpoint_devices().unwrap(),
+            vec![anchor]
+        );
+        assert!(!encoded.contains(&account_crypto.user_secret_key.to_base64url()));
+        assert!(!encoded.contains(&unlocked.private_key.to_base64url()));
+        assert!(!encoded.contains(&device_signing_key.to_base64url()));
+        assert!(!encoded.contains("ciphertext"));
+        assert!(!encoded.contains("vault_key"));
+        assert!(!encoded.contains("envelope"));
+    }
+
+    #[test]
+    fn anchor_import_rejects_tampering_before_mutating_cache() {
+        let password = MasterPassword::new("correct horse battery staple");
+        let account_crypto = crate::crypto_state::NewAccountCrypto::generate(&password).unwrap();
+        let unlocked = account_crypto.unlock(&password).unwrap();
+        let signing_key = crate::keys::DeviceSigningKey::generate();
+        let anchor = crate::cache::TrustedCheckpointDevice {
+            device_id: uuid::Uuid::from_u128(3),
+            public_key: signing_key.public_key_base64url(),
+            revoked: false,
+        };
+        let mut bundle = authenticated_checkpoint_trust_bundle(&unlocked, &[anchor]).unwrap();
+        bundle.trusted_checkpoint_devices[0].revoked = true;
+        let destination = crate::cache::LocalCache::open_in_memory("tampered").unwrap();
+
+        assert!(import_checkpoint_trust_bundle(&destination, &unlocked, &bundle).is_err());
+        assert!(destination.trusted_checkpoint_devices().unwrap().is_empty());
     }
 
     #[tokio::test]

@@ -471,6 +471,36 @@ fn sync_integrity_commands_parse_status_and_export() {
             }
         )) if name == "Personal" && output == std::path::Path::new("evidence.json")
     ));
+
+    let anchors_export = Cli::parse_from([
+        "umbra",
+        "sync",
+        "integrity",
+        "export-trust-anchors",
+        "--output",
+        "anchors.json",
+    ]);
+    assert!(matches!(
+        anchors_export.command,
+        Command::Sync(crate::SyncCommand::Integrity(
+            crate::SyncIntegrityCommand::ExportTrustAnchors { output }
+        )) if output == std::path::Path::new("anchors.json")
+    ));
+
+    let anchors_import = Cli::parse_from([
+        "umbra",
+        "sync",
+        "integrity",
+        "import-trust-anchors",
+        "--input",
+        "anchors.json",
+    ]);
+    assert!(matches!(
+        anchors_import.command,
+        Command::Sync(crate::SyncCommand::Integrity(
+            crate::SyncIntegrityCommand::ImportTrustAnchors { input }
+        )) if input == std::path::Path::new("anchors.json")
+    ));
 }
 
 #[test]

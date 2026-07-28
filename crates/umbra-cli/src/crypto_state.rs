@@ -32,6 +32,9 @@ pub(crate) struct EmergencyKitV1 {
     pub(crate) account_public_key: String,
     pub(crate) user_secret_key: String,
     pub(crate) kdf_params: Argon2idParams,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) checkpoint_trust_bundle:
+        Option<umbra_crypto::checkpoint_trust::CheckpointTrustBundleV1>,
 }
 
 impl std::fmt::Debug for EmergencyKitV1 {
@@ -43,6 +46,14 @@ impl std::fmt::Debug for EmergencyKitV1 {
             .field("account_public_key", &self.account_public_key)
             .field("user_secret_key", &"[redacted]")
             .field("kdf_params", &self.kdf_params)
+            .field(
+                "checkpoint_trust_anchor_count",
+                &self
+                    .checkpoint_trust_bundle
+                    .as_ref()
+                    .map(|bundle| bundle.trusted_checkpoint_devices.len())
+                    .unwrap_or_default(),
+            )
             .finish()
     }
 }
@@ -58,6 +69,7 @@ impl EmergencyKitV1 {
             account_public_key: account_crypto.public_key.to_base64url(),
             user_secret_key: account_crypto.user_secret_key.to_base64url(),
             kdf_params: account_crypto.kdf_params.clone(),
+            checkpoint_trust_bundle: None,
         }
     }
 
@@ -81,6 +93,7 @@ impl EmergencyKitV1 {
             account_public_key,
             user_secret_key,
             kdf_params,
+            checkpoint_trust_bundle: None,
         })
     }
 }
@@ -251,6 +264,47 @@ mod tests {
 
         assert!(!debug.contains(&account_crypto.user_secret_key.to_base64url()));
         assert!(debug.contains("[redacted]"));
+    }
+
+    #[test]
+    fn legacy_emergency_kit_defaults_checkpoint_trust_bundle() {
+        let password = MasterPassword::new("correct horse battery staple");
+        let account_crypto = NewAccountCrypto::generate(&password).unwrap();
+        let current = EmergencyKitV1::from_account_crypto(None, &account_crypto);
+        let legacy = serde_json::json!({
+            "version": 1,
+            "account_public_key": current.account_public_key,
+            "user_secret_key": current.user_secret_key,
+            "kdf_params": current.kdf_params,
+        });
+
+        let decoded: EmergencyKitV1 = serde_json::from_value(legacy).unwrap();
+
+        assert_eq!(decoded.checkpoint_trust_bundle, None);
+    }
+
+    #[test]
+    fn emergency_kit_carries_account_authenticated_checkpoint_anchors() {
+        let password = MasterPassword::new("correct horse battery staple");
+        let account_crypto = NewAccountCrypto::generate(&password).unwrap();
+        let unlocked = account_crypto.unlock(&password).unwrap();
+        let trust_bundle = umbra_crypto::checkpoint_trust::authenticate_checkpoint_trust_bundle(
+            &unlocked.private_key,
+            &unlocked.public_key,
+            vec![umbra_crypto::DeviceCheckpointTrustAnchorV1 {
+                device_id: "00000000-0000-0000-0000-000000000001".to_owned(),
+                public_key: "public-checkpoint-signing-key".to_owned(),
+                revoked: false,
+            }],
+        )
+        .unwrap();
+        let mut kit = EmergencyKitV1::from_account_crypto(None, &account_crypto);
+        kit.checkpoint_trust_bundle = Some(trust_bundle.clone());
+
+        let decoded: EmergencyKitV1 =
+            serde_json::from_str(&serde_json::to_string(&kit).unwrap()).unwrap();
+
+        assert_eq!(decoded.checkpoint_trust_bundle, Some(trust_bundle));
     }
 
     #[test]

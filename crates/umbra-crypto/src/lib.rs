@@ -10,6 +10,7 @@ use subtle::ConstantTimeEq;
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+pub mod checkpoint_trust;
 pub mod checkpoints;
 
 pub const ENVELOPE_VERSION_V1: u16 = 1;

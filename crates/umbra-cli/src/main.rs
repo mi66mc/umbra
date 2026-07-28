@@ -480,6 +480,14 @@ pub enum SyncIntegrityCommand {
         #[arg(long)]
         output: PathBuf,
     },
+    ExportTrustAnchors {
+        #[arg(long)]
+        output: PathBuf,
+    },
+    ImportTrustAnchors {
+        #[arg(long)]
+        input: PathBuf,
+    },
 }
 
 #[tokio::main]
