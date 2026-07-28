@@ -1,5 +1,15 @@
 # Umbra Architecture
 
+## Device-scoped vault-key envelopes (protocol v3)
+
+Protocol v3 separates a device's request-signing key from its X25519 vault-envelope encryption key. Registration persists only `devices.encryption_public_key`; the matching private key lives in the local profile and is redacted from diagnostics, cache status, audit events, and emergency-kit exports. Migration 10 adds this nullable public-key column and an index over `(vault_id, user_id, device_id, key_generation)` on both PostgreSQL and SQLite. Null keys and null target devices remain legacy data, not a device key.
+
+For a v3 vault creation, the authenticated trusted device submits one opaque `device_public_key` wrapping addressed to itself. The server writes the recipient `device_id`, public wrapping type, and key generation alongside the opaque envelope, but does not inspect or transform the ciphertext. The client encrypts the vault key with AAD that includes the vault ID, recipient device ID, and generation. A local unlock only accepts an envelope matching its own device ID and decrypts it with that device's X25519 private key; there is no account-key fallback.
+
+Protocol-v3 sync obtains wrappings through a user/device/vault lookup and returns only records addressed to the authenticated trusted device. This is an authorization and delivery boundary, not remote erasure: revocation terminates server access and future delivery, while a device that previously obtained a key may retain it locally. Removing a member or revoking a device must therefore set `needs_key_rotation`, and an owner/admin must re-encrypt from a trusted client before future generations can exclude the compromised recipient.
+
+The end-state distribution rule is one envelope per active intended device for every creation, bootstrap approval, member grant, invite acceptance, and rotation. At present only initial creation and v3 sync/cache/unlock are implemented on this boundary. Bootstrap, membership/invite, and rotation still have legacy user-scoped seams and must be migrated atomically before the architecture claims complete device-scoped distribution. Protocol-v3 checkpoints likewise need a deterministic commitment over recipient metadata and envelope hashes; protocol v2 currently commits encrypted item/conflict state only.
+
 Umbra is a zero-knowledge, self-hosted vault. The server is an authorization, metadata, and synchronization service for encrypted envelopes. It must not receive plaintext secrets, plaintext vault keys, master passwords, user secret keys, or decrypted items.
 
 ## Product Shape

@@ -1,5 +1,13 @@
 # Umbra Threat Model
 
+## Device-scoped wrapping rollout
+
+The intended boundary is that every current vault-key generation is encrypted separately to each approved recipient device's X25519 encryption public key. The server sees device IDs, states, membership, generations, and opaque envelopes, but never vault keys, device private keys, or envelope plaintext. For the implemented initial-vault path, sync delivery and local cache lookup are device-specific and the client fails closed if its own `device_public_key` envelope is absent or does not authenticate with vault/device/generation AAD.
+
+This reduces accidental cross-device delivery and prevents a pending or revoked device from obtaining a *newly delivered* v3 envelope through the v3 sync filter. It does not revoke a vault key or plaintext already downloaded, copied, or decrypted. Device revocation and member removal require key rotation and rotation of real external credentials after suspected exposure.
+
+The rollout is not yet complete for device approval, invites/member grants, member acceptance, and rotation. Those paths still contain user-scoped or optional-device envelope contracts. They are explicitly outside the completed guarantee until they create and validate one recipient-addressed envelope for every active intended device and bind that metadata into sync integrity checkpoints. This is a release/security limitation, not a compatibility fallback: local unlock must not use an account private key to accept a legacy wrapping as if it were device scoped.
+
 ## Protects Against
 
 - Database leak.
