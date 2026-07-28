@@ -543,6 +543,11 @@ pub async fn run(
             let status = cache.status()?;
             render_cache_status(output, &status)
         }
+        Command::Cache(CacheCommand::Clear) => {
+            crate::cache::LocalCache::clear_persistent(&config.active_profile)?;
+            println!("encrypted cache cleared");
+            Ok(())
+        }
         Command::EmergencyKit(EmergencyKitCommand::Export { output }) => {
             let profile = active_profile(&config)?;
             let cache = crate::cache::LocalCache::open(&config.active_profile)?;

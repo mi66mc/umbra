@@ -133,6 +133,7 @@ pub enum ProfileCommand {
 #[derive(Debug, Subcommand)]
 pub enum CacheCommand {
     Status,
+    Clear,
 }
 
 #[derive(Debug, Subcommand)]
