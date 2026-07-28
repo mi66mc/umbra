@@ -6,9 +6,15 @@ use umbra_core::{
 
 pub const PROTOCOL_VERSION: u16 = 1;
 pub const SYNC_INTEGRITY_PROTOCOL_VERSION: u16 = 2;
+pub const DEVICE_SCOPED_WRAPPING_PROTOCOL_VERSION: u16 = 3;
 
 pub const fn is_supported_protocol_version(version: u16) -> bool {
-    matches!(version, PROTOCOL_VERSION | SYNC_INTEGRITY_PROTOCOL_VERSION)
+    matches!(
+        version,
+        PROTOCOL_VERSION
+            | SYNC_INTEGRITY_PROTOCOL_VERSION
+            | DEVICE_SCOPED_WRAPPING_PROTOCOL_VERSION
+    )
 }
 
 pub const fn is_sync_integrity_protocol_version(version: u16) -> bool {

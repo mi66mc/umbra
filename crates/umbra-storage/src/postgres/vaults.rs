@@ -207,6 +207,17 @@ impl PostgresStorage {
         rows.into_iter().map(vault_key_wrapping_from_row).collect()
     }
 
+    pub async fn list_key_wrappings_for_device_vault(
+        &self,
+        user_id: UserId,
+        device_id: DeviceId,
+        vault_id: VaultId,
+    ) -> Result<Vec<VaultKeyWrappingRecord>, StorageError> {
+        let rows = sqlx::query("SELECT id, vault_id, user_id, device_id, wrapping_type, envelope, key_generation, created_at, rotated_at, revoked_at FROM vault_key_wrappings w WHERE w.user_id = $1 AND w.device_id = $2 AND w.vault_id = $3 AND w.revoked_at IS NULL AND w.wrapping_type = 'device_public_key' AND EXISTS (SELECT 1 FROM devices d WHERE d.id = w.device_id AND d.user_id = w.user_id AND d.state = 'trusted' AND d.revoked_at IS NULL) ORDER BY w.created_at ASC")
+            .bind(user_id).bind(device_id).bind(vault_id).fetch_all(&self.pool).await?;
+        rows.into_iter().map(vault_key_wrapping_from_row).collect()
+    }
+
     pub async fn remove_vault_member(
         &self,
         vault_id: VaultId,

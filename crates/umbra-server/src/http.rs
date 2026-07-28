@@ -1424,13 +1424,21 @@ async fn sync(
             .into_iter()
             .map(item_revision_response)
             .collect();
-        let key_wrappings = state
-            .storage
-            .list_key_wrappings_for_user_vault(user_id, cursor.vault_id)
-            .await?
-            .into_iter()
-            .map(vault_key_wrapping_response)
-            .collect();
+        let key_wrappings = if request.protocol_version >= 3 {
+            let device_id = context.device_id.ok_or(ServerError::Forbidden)?;
+            state
+                .storage
+                .list_key_wrappings_for_device_vault(user_id, device_id, cursor.vault_id)
+                .await?
+        } else {
+            state
+                .storage
+                .list_key_wrappings_for_user_vault(user_id, cursor.vault_id)
+                .await?
+        }
+        .into_iter()
+        .map(vault_key_wrapping_response)
+        .collect();
         let deleted_items = state
             .storage
             .list_deleted_item_ids_since(cursor.vault_id, cursor.since_vault_revision)
