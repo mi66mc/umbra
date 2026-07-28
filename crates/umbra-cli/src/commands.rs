@@ -1096,7 +1096,7 @@ pub async fn run(
                     .post(
                         &vault_create_path(None),
                         &CreateVaultRequest {
-                            protocol_version: PROTOCOL_VERSION,
+                            protocol_version: DEVICE_SCOPED_WRAPPING_PROTOCOL_VERSION,
                             vault_id: Some(requested_vault_id),
                             name,
                             kind,
