@@ -2308,6 +2308,14 @@ fn selected_unlock_vaults(
 }
 
 #[cfg(test)]
+fn profile_public_key(profile: &crate::config::ProfileConfig) -> Result<UserPublicKey, CliError> {
+    let public_key = profile.client_public_key.as_deref().ok_or(CliError::Input(
+        "profile has no account public key; run `umbra register` for this profile",
+    ))?;
+    Ok(UserPublicKey::from_base64url(public_key)?)
+}
+
+#[cfg(test)]
 fn emergency_kit_json_from_profile(
     profile: &crate::config::ProfileConfig,
 ) -> Result<String, CliError> {
