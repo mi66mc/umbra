@@ -144,11 +144,7 @@ impl UserPrivateKey {
     }
 
     pub fn public_key(&self) -> UserPublicKey {
-        UserPublicKey(
-            self.static_secret()
-                .diffie_hellman(&PublicKey::from([9u8; KEY_LEN]))
-                .to_bytes(),
-        )
+        UserPublicKey(PublicKey::from(&self.static_secret()).to_bytes())
     }
 
     pub fn from_base64url(encoded: &str) -> Result<Self, CryptoError> {
@@ -1183,6 +1179,12 @@ mod tests {
             AadV1::device_vault_key_wrapping("vault", "device-a", 1),
             AadV1::device_vault_key_wrapping("vault", "device-a", 2)
         );
+    }
+
+    #[test]
+    fn device_private_key_derives_its_registered_public_key() {
+        let keypair = generate_user_keypair();
+        assert_eq!(keypair.private_key.public_key(), keypair.public_key);
     }
 
     #[test]
