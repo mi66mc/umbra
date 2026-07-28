@@ -143,6 +143,14 @@ impl UserPrivateKey {
         encode_b64(&self.0)
     }
 
+    pub fn public_key(&self) -> UserPublicKey {
+        UserPublicKey(
+            self.static_secret()
+                .diffie_hellman(&PublicKey::from([9u8; KEY_LEN]))
+                .to_bytes(),
+        )
+    }
+
     pub fn from_base64url(encoded: &str) -> Result<Self, CryptoError> {
         Ok(Self(decode_array(encoded)?))
     }

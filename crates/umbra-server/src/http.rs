@@ -729,9 +729,8 @@ async fn create_org(
     Json(request): Json<CreateOrgRequest>,
 ) -> Result<Json<OrgResponse>, ServerError> {
     ensure_protocol(request.protocol_version)?;
-    let user_id = authenticate_trusted_context(&state, &headers)
-        .await?
-        .user_id;
+    let context = authenticate_trusted_context(&state, &headers).await?;
+    let user_id = context.user_id;
     let org = state
         .storage
         .create_org(CreateOrg {
@@ -874,9 +873,9 @@ async fn create_vault_inner(
     kind: VaultKind,
     initial_key_wrapping: Value,
 ) -> Result<Json<VaultResponse>, ServerError> {
-    let user_id = authenticate_trusted_context(&state, &headers)
-        .await?
-        .user_id;
+    let context = authenticate_trusted_context(&state, &headers).await?;
+    let user_id = context.user_id;
+    let device_id = context.device_id.ok_or(ServerError::Forbidden)?;
     if let Some(org_id) = org_id {
         ensure_org_vault_creator(&state, org_id, user_id).await?;
     }
@@ -906,8 +905,8 @@ async fn create_vault_inner(
             id: None,
             vault_id: vault.id,
             user_id,
-            device_id: None,
-            wrapping_type: "user_public_key".to_owned(),
+            device_id: Some(device_id),
+            wrapping_type: "device_public_key".to_owned(),
             envelope: initial_key_wrapping,
             key_generation: vault.current_key_generation,
         })

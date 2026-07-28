@@ -21,12 +21,13 @@ use umbra_crypto::{
 use umbra_protocol::{
     AcceptInviteRequest, AddOrgMemberRequest, AddVaultMemberRequest, ApprovalLookupRequest,
     ApproveDeviceRequest, CreateItemRequest, CreateOrgRequest, CreateOrgVaultRequest,
-    CreateVaultRequest, DeleteItemRequest, DeviceBootstrapResponse, DeviceResponse,
-    InviteMemberRequest, InviteResponse, ItemRevisionResponse, OrgMemberResponse, OrgResponse,
-    PROTOCOL_VERSION, PendingDeviceSummary, PendingInviteResponse, RecoverTrustRequest,
-    RecoverTrustResponse, RecoveryChallengeStartRequest, RecoveryChallengeStartResponse,
-    RejectInviteRequest, ResolveItemConflictRequest, ResolveItemConflictResponse,
-    RotateVaultKeyRequest, RotationItemRevision, RotationStatusResponse, RotationVaultKeyWrapping,
+    CreateVaultRequest, DEVICE_SCOPED_WRAPPING_PROTOCOL_VERSION, DeleteItemRequest,
+    DeviceBootstrapResponse, DeviceResponse, InviteMemberRequest, InviteResponse,
+    ItemRevisionResponse, OrgMemberResponse, OrgResponse, PROTOCOL_VERSION, PendingDeviceSummary,
+    PendingInviteResponse, RecoverTrustRequest, RecoverTrustResponse,
+    RecoveryChallengeStartRequest, RecoveryChallengeStartResponse, RejectInviteRequest,
+    ResolveItemConflictRequest, ResolveItemConflictResponse, RotateVaultKeyRequest,
+    RotationItemRevision, RotationStatusResponse, RotationVaultKeyWrapping,
     SYNC_INTEGRITY_PROTOCOL_VERSION, SyncRequest, SyncResponse, UpdateItemRequest,
     UserLookupRequest, UserLookupResponse, VaultMemberResponse, VaultResponse, VaultSyncCursor,
 };
@@ -1055,9 +1056,24 @@ pub async fn run(
             let initial_key_wrapping = match wrapping_json {
                 Some(value) => serde_json::from_str(&value)?,
                 None => {
-                    let public_key = profile_public_key(profile)?;
+                    let device_id = profile.device_id.ok_or(CliError::Input(
+                        "profile has no device id; run `umbra register` first",
+                    ))?;
+                    let private_key = UserPrivateKey::from_base64url(
+                        profile
+                            .device_encryption_private_key
+                            .as_deref()
+                            .ok_or(CliError::Input(
+                                "profile has no device encryption key; re-enroll this device",
+                            ))?,
+                    )?;
+                    let public_key = private_key.public_key();
                     let vault_key = generate_vault_key();
-                    let aad = AadV1::vault_key_wrapping(requested_vault_id.to_string());
+                    let aad = AadV1::device_vault_key_wrapping(
+                        requested_vault_id.to_string(),
+                        device_id.to_string(),
+                        1,
+                    );
                     let wrapping = wrap_vault_key_for_user(&public_key, &vault_key, aad)?;
                     serde_json::to_value(wrapping)?
                 }
@@ -1067,7 +1083,7 @@ pub async fn run(
                     .post(
                         &vault_create_path(Some(org_id)),
                         &CreateOrgVaultRequest {
-                            protocol_version: PROTOCOL_VERSION,
+                            protocol_version: DEVICE_SCOPED_WRAPPING_PROTOCOL_VERSION,
                             vault_id: Some(requested_vault_id),
                             name,
                             kind,
@@ -2282,13 +2298,6 @@ fn selected_unlock_vaults(
     Ok(vec![resolve_vault_id(
         profile, cache, vault_id, vault_name,
     )?])
-}
-
-fn profile_public_key(profile: &crate::config::ProfileConfig) -> Result<UserPublicKey, CliError> {
-    let public_key = profile.client_public_key.as_deref().ok_or(CliError::Input(
-        "profile has no account public key; run `umbra register` for this profile",
-    ))?;
-    Ok(UserPublicKey::from_base64url(public_key)?)
 }
 
 #[cfg(test)]
