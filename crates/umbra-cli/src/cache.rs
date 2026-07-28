@@ -303,6 +303,7 @@ impl LocalCache {
                 "UPDATE trusted_checkpoint_devices SET revoked = ?2 WHERE device_id = ?1",
                 params![device.device_id.to_string(), revoked],
             )?;
+            self.persist()?;
             return Ok(());
         }
         self.connection.execute(
@@ -315,6 +316,7 @@ impl LocalCache {
                 chrono::Utc::now().to_rfc3339()
             ],
         )?;
+        self.persist()?;
         Ok(())
     }
 
@@ -880,6 +882,7 @@ impl LocalCache {
             params![failure.vault_id.to_string(), now],
         )?;
         tx.commit()?;
+        self.persist()?;
         Ok(())
     }
 
@@ -2150,6 +2153,45 @@ mod tests {
 
         assert!(keys.get("personal").unwrap().is_some());
         assert!(artifact.exists());
+    }
+
+    #[test]
+    fn trusted_checkpoint_anchor_survives_persistent_cache_reopen() {
+        let root = tempfile::tempdir().unwrap();
+        let keys = Arc::new(MemoryCacheKeyStore::default());
+        let device = TrustedCheckpointDevice {
+            device_id: uuid::Uuid::new_v4(),
+            public_key: Base64UrlUnpadded::encode_string(&[9u8; 32]),
+            revoked: false,
+        };
+        persisted_cache("personal", &root, keys.clone())
+            .record_trusted_checkpoint_device(&device)
+            .unwrap();
+
+        assert_eq!(
+            persisted_cache("personal", &root, keys)
+                .trusted_checkpoint_devices()
+                .unwrap(),
+            vec![device]
+        );
+    }
+
+    #[test]
+    fn checkpoint_quarantine_survives_persistent_cache_reopen() {
+        let root = tempfile::tempdir().unwrap();
+        let keys = Arc::new(MemoryCacheKeyStore::default());
+        let vault_id = uuid::Uuid::new_v4();
+        let mut cache = persisted_cache("personal", &root, keys.clone());
+        cache
+            .quarantine_transport_failure(vault_id, 7, "invalid-checkpoint", "invalid_signature")
+            .unwrap();
+        drop(cache);
+
+        assert!(
+            persisted_cache("personal", &root, keys)
+                .is_sync_unsafe(vault_id)
+                .unwrap()
+        );
     }
 
     #[test]
