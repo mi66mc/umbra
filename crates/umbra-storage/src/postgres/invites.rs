@@ -92,6 +92,8 @@ impl PostgresStorage {
         .await?
         .ok_or(StorageError::NotFound)?;
         let invite = vault_invite_from_row(invite_row)?;
+        let (wrapping_type, envelope, key_generation, device_id) =
+            invite_device_wrapping(&invite.vault_key_wrapping, input.device_id)?;
 
         let member_row = sqlx::query(
             r#"
@@ -116,16 +118,17 @@ impl PostgresStorage {
                 id, vault_id, user_id, device_id, wrapping_type, envelope, key_generation
             )
             VALUES (
-                $1, $2, $3, $4, 'user_public_key', $5,
-                (SELECT current_key_generation FROM vaults WHERE id = $2)
+                $1, $2, $3, $4, $5, $6, $7
             )
             "#,
         )
         .bind(Uuid::new_v4())
         .bind(invite.vault_id)
         .bind(input.user_id)
-        .bind(input.device_id)
-        .bind(invite.vault_key_wrapping)
+        .bind(device_id)
+        .bind(wrapping_type)
+        .bind(envelope)
+        .bind(key_generation)
         .execute(&mut *tx)
         .await?;
 
@@ -166,6 +169,37 @@ impl PostgresStorage {
 
         vault_invite_from_row(row)
     }
+}
+
+fn invite_device_wrapping(
+    value: &serde_json::Value,
+    device_id: Option<Uuid>,
+) -> Result<(String, serde_json::Value, i64, Option<Uuid>), StorageError> {
+    let Some(entries) = value.get("device_wrappings").and_then(|v| v.as_array()) else {
+        return Ok(("user_public_key".to_owned(), value.clone(), 1, device_id));
+    };
+    let device_id = device_id.ok_or(StorageError::NotFound)?;
+    let expected = device_id.to_string();
+    let entry = entries
+        .iter()
+        .find(|entry| entry.get("device_id").and_then(|id| id.as_str()) == Some(expected.as_str()))
+        .ok_or(StorageError::NotFound)?;
+    Ok((
+        entry
+            .get("wrapping_type")
+            .and_then(|v| v.as_str())
+            .ok_or(StorageError::NotFound)?
+            .to_owned(),
+        entry
+            .get("envelope")
+            .cloned()
+            .ok_or(StorageError::NotFound)?,
+        entry
+            .get("key_generation")
+            .and_then(|v| v.as_i64())
+            .ok_or(StorageError::NotFound)?,
+        Some(device_id),
+    ))
 }
 
 fn vault_invite_from_row(row: sqlx::postgres::PgRow) -> Result<VaultInviteRecord, StorageError> {

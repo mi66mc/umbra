@@ -1045,7 +1045,23 @@ async fn create_vault_invite(
     ensure_vault_admin(&state, vault_id, user_id).await?;
     let vault = state.storage.find_vault_by_id(vault_id).await?;
     let email = request.email.to_ascii_lowercase();
-    state.storage.find_user_by_email(&email).await?;
+    let invited = state.storage.find_user_by_email(&email).await?;
+    let status = state.storage.rotation_status(vault_id).await?;
+    for wrapping in &request.vault_key_wrappings {
+        validate_new_member_wrapping(
+            &state,
+            wrapping,
+            vault_id,
+            invited.id,
+            status.current_key_generation,
+        )
+        .await?;
+    }
+    let vault_key_wrapping = if request.vault_key_wrappings.is_empty() {
+        request.vault_key_wrapping
+    } else {
+        json!({"version": 3, "device_wrappings": request.vault_key_wrappings})
+    };
 
     let invite = state
         .storage
@@ -1056,7 +1072,7 @@ async fn create_vault_invite(
             email,
             role: request.role,
             invited_by: Some(user_id),
-            vault_key_wrapping: request.vault_key_wrapping,
+            vault_key_wrapping,
             expires_at: Some(Utc::now() + Duration::days(7)),
         })
         .await?;
