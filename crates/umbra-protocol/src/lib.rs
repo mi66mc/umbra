@@ -131,6 +131,8 @@ pub struct DeviceResponse {
     pub device_id: DeviceId,
     pub name: String,
     pub public_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encryption_public_key: Option<String>,
     pub fingerprint: String,
     pub state: DeviceState,
     pub created_at: String,

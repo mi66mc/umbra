@@ -233,6 +233,7 @@ fn device_response(device: DeviceRecord) -> DeviceResponse {
         device_id: device.id,
         name: device.name,
         public_key: device.public_key,
+        encryption_public_key: device.encryption_public_key,
         fingerprint: device.fingerprint,
         state: device.state,
         created_at: device.created_at.to_rfc3339(),

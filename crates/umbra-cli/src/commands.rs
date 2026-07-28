@@ -4569,6 +4569,7 @@ mod tests {
             device_id: Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap(),
             name: "Laptop".to_owned(),
             public_key: Some("device-public-key".to_owned()),
+            encryption_public_key: Some("device-encryption-public-key".to_owned()),
             fingerprint: "SHA256:test".to_owned(),
             state: umbra_core::DeviceState::Trusted,
             created_at: "2026-01-01T00:00:00Z".to_owned(),
