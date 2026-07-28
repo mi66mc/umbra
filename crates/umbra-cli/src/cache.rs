@@ -1,9 +1,12 @@
+use std::cell::RefCell;
 use std::ffi::OsStr;
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use base64ct::{Base64UrlUnpadded, Encoding};
 use ed25519_dalek::SigningKey;
+use fs4::fs_std::FileExt;
 use rusqlite::{Connection, DatabaseName, OptionalExtension, params, params_from_iter};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -66,6 +69,8 @@ impl CacheKeyStore for KeyringCacheKeyStore {
 
 struct CachePersistence {
     encrypted_path: PathBuf,
+    lock_path: PathBuf,
+    expected_snapshot_hash: RefCell<Option<[u8; 32]>>,
     key_store: Arc<dyn CacheKeyStore>,
 }
 
@@ -201,6 +206,7 @@ impl LocalCache {
             ));
         }
         let mut connection = Connection::open_in_memory()?;
+        let expected_snapshot_hash = snapshot_hash(&encrypted_path)?;
         if encrypted_path.exists() {
             let Some(key) = key_store.get(profile)? else {
                 return Err(CliError::Input(
@@ -222,7 +228,9 @@ impl LocalCache {
             connection,
             profile: profile.to_owned(),
             persistence: Some(CachePersistence {
+                lock_path: encrypted_path.with_file_name("cache.lock"),
                 encrypted_path,
+                expected_snapshot_hash: RefCell::new(expected_snapshot_hash),
                 key_store,
             }),
         };
@@ -1243,6 +1251,19 @@ impl LocalCache {
         let Some(persistence) = &self.persistence else {
             return Ok(());
         };
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&persistence.lock_path)?;
+        lock.lock_exclusive()?;
+        let current_hash = snapshot_hash(&persistence.encrypted_path)?;
+        if current_hash != *persistence.expected_snapshot_hash.borrow() {
+            return Err(CliError::Input(
+                "local cache changed by another process; rerun the command",
+            ));
+        }
         let existing_key = persistence.key_store.get(&self.profile)?;
         let key = existing_key
             .clone()
@@ -1257,6 +1278,7 @@ impl LocalCache {
             envelope,
         })?;
         write_atomic(&persistence.encrypted_path, &bytes)?;
+        *persistence.expected_snapshot_hash.borrow_mut() = Some(snapshot_bytes_hash(&bytes));
         Ok(())
     }
 
@@ -1923,6 +1945,18 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
     Ok(())
 }
 
+fn snapshot_hash(path: &Path) -> Result<Option<[u8; 32]>, CliError> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(snapshot_bytes_hash(&bytes))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn snapshot_bytes_hash(bytes: &[u8]) -> [u8; 32] {
+    Sha256::digest(bytes).into()
+}
+
 fn cached_vault_from_row(row: &rusqlite::Row<'_>) -> Result<CachedVault, rusqlite::Error> {
     Ok(CachedVault {
         vault_id: parse_uuid(row.get::<_, String>(0)?)?,
@@ -2187,6 +2221,31 @@ mod tests {
             .unwrap();
         drop(cache);
 
+        assert!(
+            persisted_cache("personal", &root, keys)
+                .is_sync_unsafe(vault_id)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn stale_writer_cannot_overwrite_persisted_quarantine() {
+        let root = tempfile::tempdir().unwrap();
+        let keys = Arc::new(MemoryCacheKeyStore::default());
+        let vault_id = uuid::Uuid::new_v4();
+        let stale_cache = persisted_cache("personal", &root, keys.clone());
+        let mut detecting_cache = persisted_cache("personal", &root, keys.clone());
+
+        detecting_cache
+            .quarantine_transport_failure(vault_id, 7, "invalid-checkpoint", "invalid_signature")
+            .unwrap();
+        let result = stale_cache.record_trusted_checkpoint_device(&TrustedCheckpointDevice {
+            device_id: uuid::Uuid::new_v4(),
+            public_key: Base64UrlUnpadded::encode_string(&[3u8; 32]),
+            revoked: false,
+        });
+
+        assert!(result.is_err());
         assert!(
             persisted_cache("personal", &root, keys)
                 .is_sync_unsafe(vault_id)

@@ -246,6 +246,8 @@ The cache contains encrypted envelopes, key wrappings, sync cursors, and metadat
 
 If the OS keychain entry is unavailable, the encrypted file is corrupt, or authentication fails, Umbra refuses to open the cache and keeps it for recovery; it never silently replaces it with an empty cache. A pre-encryption `cache.db` is likewise preserved and refused: back it up offline, remove it intentionally, then sync again. The server remains authoritative, so this recovery discards only the local acceleration/offline copy. Use `umbra cache clear` to intentionally remove `cache.enc` and its keychain key before re-syncing.
 
+Snapshot updates use an interprocess lock and reject a command that opened an older snapshot while another command committed first. Re-run the rejected command; Umbra never lets that stale process overwrite newer local integrity state.
+
 Normal online read/write commands first try the local unlock state. If the selected vault key is not unlocked, the CLI falls back to the master-password prompt and unwraps the vault key from the cached wrapping.
 
 Useful commands:
