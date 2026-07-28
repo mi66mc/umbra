@@ -4171,6 +4171,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn emergency_kit_export_command_writes_active_profile_kit() {
         let inactive_crypto = crate::crypto_state::NewAccountCrypto::generate(
             &MasterPassword::new("inactive profile password"),
@@ -4215,6 +4216,9 @@ mod tests {
         };
         let temp = tempfile::tempdir().unwrap();
         let output = temp.path().join("umbra-emergency-kit.json");
+        // This command consults checkpoint trust anchors from the local cache.
+        // Keep the test independent of the interactive user's data directory.
+        unsafe { std::env::set_var("UMBRA_CACHE_DIR", temp.path()) };
 
         run(
             Command::EmergencyKit(EmergencyKitCommand::Export {
@@ -4238,6 +4242,7 @@ mod tests {
         assert!(!kit.contains(&inactive_crypto.public_key.to_base64url()));
         assert!(!kit.contains("encrypted_private_key"));
         assert!(!kit.contains("private_key"));
+        unsafe { std::env::remove_var("UMBRA_CACHE_DIR") };
     }
 
     #[test]
