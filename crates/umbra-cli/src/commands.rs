@@ -486,10 +486,13 @@ pub async fn run(
                 .await?;
             }
 
-            let password = rpassword::prompt_password("Master password: ")?;
-            let unlocked = crate::crypto_state::load_unlocked_profile(
-                profile,
-                &MasterPassword::new(password.into_bytes()),
+            let device_private_key = UserPrivateKey::from_base64url(
+                profile
+                    .device_encryption_private_key
+                    .as_deref()
+                    .ok_or(CliError::Input(
+                        "profile has no device encryption key; re-enroll this device",
+                    ))?,
             )?;
             let mut vault_keys = BTreeMap::new();
             for vault_id in vault_ids {
@@ -498,8 +501,12 @@ pub async fn run(
                     .ok_or(CliError::MissingVaultKeyWrapping(vault_id))?;
                 let envelope: VaultKeyWrappingEnvelopeV1 =
                     serde_json::from_value(wrapping.envelope)?;
-                let aad = AadV1::vault_key_wrapping(vault_id.to_string());
-                let vault_key = unwrap_vault_key(&unlocked.private_key, &aad, &envelope)?;
+                let aad = AadV1::device_vault_key_wrapping(
+                    vault_id.to_string(),
+                    device_id.to_string(),
+                    wrapping.key_generation,
+                );
+                let vault_key = unwrap_vault_key(&device_private_key, &aad, &envelope)?;
                 vault_keys.insert(vault_id, vault_key);
             }
 
@@ -508,7 +515,7 @@ pub async fn run(
                 user_id,
                 device_id,
                 chrono::Utc::now() + chrono::Duration::minutes(ttl_minutes),
-                unlocked.private_key,
+                device_private_key,
                 vault_keys,
             );
             crate::unlock_store::UnlockStore::open(&profile_name, profile.device_id)
@@ -3332,18 +3339,24 @@ fn unlock_vault_key(
     let user_id = profile.user_id.ok_or(CliError::Input(
         "profile has no user id; run `umbra login` first",
     ))?;
-    let password = rpassword::prompt_password("Master password: ")?;
-    let unlocked = crate::crypto_state::load_unlocked_profile(
-        profile,
-        &MasterPassword::new(password.into_bytes()),
-    )?;
+    let device_id = profile.device_id.ok_or(CliError::Input(
+        "profile has no device id; run `umbra register` first",
+    ))?;
+    let device_private_key =
+        UserPrivateKey::from_base64url(profile.device_encryption_private_key.as_deref().ok_or(
+            CliError::Input("profile has no device encryption key; re-enroll this device"),
+        )?)?;
     let wrapping = cache
         .latest_key_wrapping(vault_id, user_id)?
         .ok_or(CliError::MissingVaultKeyWrapping(vault_id))?;
     let envelope: VaultKeyWrappingEnvelopeV1 = serde_json::from_value(wrapping.envelope)?;
-    let aad = AadV1::vault_key_wrapping(vault_id.to_string());
+    let aad = AadV1::device_vault_key_wrapping(
+        vault_id.to_string(),
+        device_id.to_string(),
+        wrapping.key_generation,
+    );
 
-    unwrap_vault_key(&unlocked.private_key, &aad, &envelope).map_err(CliError::from)
+    unwrap_vault_key(&device_private_key, &aad, &envelope).map_err(CliError::from)
 }
 
 fn save_rotated_vault_key_to_unlock_store(
