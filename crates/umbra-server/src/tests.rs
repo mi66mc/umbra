@@ -25,16 +25,17 @@ use umbra_protocol::{
     AcceptInviteRequest, AddVaultMemberRequest, ApprovalLookupRequest, ApproveDeviceRequest,
     CreateItemRequest, CreateOrgRequest, CreateSyncCheckpointRequest, CreateVaultRequest,
     DeleteItemRequest, DeviceBootstrapResponse, DeviceRegisterRequest, DeviceResponse,
-    InviteMemberRequest, InviteResponse, ItemConflictResponse, ItemRevisionResponse,
-    OpaqueLoginFinishRequest, OpaqueLoginFinishResponse, OpaqueLoginStartRequest,
-    OpaqueLoginStartResponse, OpaqueRegisterFinishRequest, OpaqueRegisterStartRequest,
-    OpaqueRegisterStartResponse, OrgResponse, PROTOCOL_VERSION, PendingDeviceRequest,
-    PendingDeviceSummary, PendingInviteResponse, RecoverTrustRequest, RecoverTrustResponse,
-    RecoveryChallengeStartRequest, RecoveryChallengeStartResponse, RegisterResponse,
-    RejectInviteRequest, ResolveItemConflictRequest, RotateVaultKeyRequest, RotationStatusResponse,
-    RotationVaultKeyWrapping, SYNC_INTEGRITY_PROTOCOL_VERSION, SyncCheckpoint, SyncRequest,
-    SyncResponse, SyncStatusRequest, SyncStatusResponse, UpdateItemRequest, UserLookupRequest,
-    UserLookupResponse, VaultMemberResponse, VaultResponse, VaultStatusCursor, VaultSyncCursor,
+    DeviceVaultKeyWrappingRequest, InviteMemberRequest, InviteResponse, ItemConflictResponse,
+    ItemRevisionResponse, OpaqueLoginFinishRequest, OpaqueLoginFinishResponse,
+    OpaqueLoginStartRequest, OpaqueLoginStartResponse, OpaqueRegisterFinishRequest,
+    OpaqueRegisterStartRequest, OpaqueRegisterStartResponse, OrgResponse, PROTOCOL_VERSION,
+    PendingDeviceRequest, PendingDeviceSummary, PendingInviteResponse, RecoverTrustRequest,
+    RecoverTrustResponse, RecoveryChallengeStartRequest, RecoveryChallengeStartResponse,
+    RegisterResponse, RejectInviteRequest, ResolveItemConflictRequest, RotateVaultKeyRequest,
+    RotationStatusResponse, RotationVaultKeyWrapping, SYNC_INTEGRITY_PROTOCOL_VERSION,
+    SyncCheckpoint, SyncRequest, SyncResponse, SyncStatusRequest, SyncStatusResponse,
+    UpdateItemRequest, UserLookupRequest, UserLookupResponse, VaultMemberResponse, VaultResponse,
+    VaultStatusCursor, VaultSyncCursor,
 };
 use umbra_storage::Storage;
 use uuid::Uuid;
@@ -294,6 +295,11 @@ async fn signed_user_lookup_returns_public_key() {
     assert_eq!(response.user_id, target.user_id);
     assert_eq!(response.email, "lookup-target@example.com");
     assert_eq!(response.public_key, "target-public-key");
+    assert_eq!(response.trusted_devices.len(), 1);
+    assert_eq!(
+        response.trusted_devices[0].encryption_public_key,
+        "target-device-public-key"
+    );
 }
 
 #[tokio::test]
@@ -342,10 +348,18 @@ async fn vault_members_endpoint_lists_active_members() {
         &format!("/api/v1/vaults/{}/members", vault.vault_id),
         owner.auth("vault-members-add"),
         &AddVaultMemberRequest {
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: 3,
             user_id: member.user_id,
             role: VaultRole::Viewer,
             vault_key_wrapping: json!({"viewer": "wrapping"}),
+            vault_key_wrappings: vec![DeviceVaultKeyWrappingRequest {
+                vault_id: vault.vault_id,
+                user_id: member.user_id,
+                device_id: member.device_id,
+                wrapping_type: "device_public_key".to_owned(),
+                envelope: json!({"ciphertext": "viewer-device"}),
+                key_generation: vault.current_key_generation,
+            }],
         },
     )
     .await;
@@ -430,6 +444,7 @@ async fn signed_rotation_endpoint_accepts_client_side_wrappings() {
             user_id: member.user_id,
             role: VaultRole::Editor,
             vault_key_wrapping: json!({"member": "wrapping-v1"}),
+            vault_key_wrappings: vec![],
         },
     )
     .await;
@@ -532,6 +547,7 @@ async fn viewer_cannot_create_item() {
             user_id: viewer_user_id,
             role: VaultRole::Viewer,
             vault_key_wrapping: json!({"viewer": true}),
+            vault_key_wrappings: vec![],
         },
     )
     .await;
@@ -603,6 +619,7 @@ async fn invited_user_can_list_accept_and_sync_vault() {
             email: "INVITE-RECIPIENT@example.com".to_owned(),
             role: VaultRole::Editor,
             vault_key_wrapping: json!({"wrapped": "for-recipient"}),
+            vault_key_wrappings: vec![],
         },
     )
     .await;
@@ -712,6 +729,7 @@ async fn invited_user_can_reject_invite() {
             email: "reject-recipient@example.com".to_owned(),
             role: VaultRole::Viewer,
             vault_key_wrapping: json!({"wrapped": "reject"}),
+            vault_key_wrappings: vec![],
         },
     )
     .await;
@@ -1134,6 +1152,7 @@ async fn two_devices_converge_after_conflict_resolution() {
             user_id: device_b.user_id,
             role: VaultRole::Editor,
             vault_key_wrapping: json!({"ciphertext": "device-b-wrapping"}),
+            vault_key_wrappings: vec![],
         },
     )
     .await;
@@ -1409,6 +1428,7 @@ async fn conflict_authorization_delete_contract_and_sync_convergence() {
                 user_id: member.user_id,
                 role,
                 vault_key_wrapping: json!({"wrapped": "member"}),
+                vault_key_wrappings: vec![],
             },
         )
         .await;
@@ -2419,7 +2439,7 @@ async fn trusted_device_approves_pending_device_and_pending_downloads_bootstrap(
     let Some(storage) = fresh_test_storage().await else {
         return;
     };
-    let app = router(test_state_with_storage(storage));
+    let app = router(test_state_with_storage(storage.clone()));
     let trusted = register_and_signed_login(
         app.clone(),
         "approval-flow@example.com",
@@ -2450,6 +2470,22 @@ async fn trusted_device_approves_pending_device_and_pending_downloads_bootstrap(
     assert_eq!(summary.device_id, pending.device_id);
     assert_eq!(summary.bootstrap_public_key, pending.bootstrap_public_key);
 
+    let (status, vault): (StatusCode, VaultResponse) = signed_json_request(
+        app.clone(),
+        Method::POST,
+        "/api/v1/vaults",
+        trusted.auth("approval-create-vault"),
+        &CreateVaultRequest {
+            protocol_version: 3,
+            vault_id: None,
+            name: "Approval device envelopes".to_owned(),
+            kind: VaultKind::Personal,
+            initial_key_wrapping: json!({"ciphertext": "owner"}),
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
     let bootstrap_bundle = json!({"encrypted": "bootstrap-bundle"});
     let (status, approved): (StatusCode, DeviceResponse) = signed_json_request(
         app.clone(),
@@ -2457,15 +2493,32 @@ async fn trusted_device_approves_pending_device_and_pending_downloads_bootstrap(
         &format!("/api/v1/devices/{}/approve", pending.device_id),
         trusted.auth("approve-device"),
         &ApproveDeviceRequest {
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: 3,
             approval_code: pending.approval_code.clone(),
             bootstrap_bundle: bootstrap_bundle.clone(),
+            vault_key_wrappings: vec![DeviceVaultKeyWrappingRequest {
+                vault_id: vault.vault_id,
+                user_id: trusted.user_id,
+                device_id: pending.device_id,
+                wrapping_type: "device_public_key".to_owned(),
+                envelope: json!({"ciphertext": "pending-device"}),
+                key_generation: vault.current_key_generation,
+            }],
         },
     )
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(approved.device_id, pending.device_id);
     assert_eq!(approved.state, DeviceState::Trusted);
+    let wrappings = storage
+        .list_key_wrappings_for_device_vault(trusted.user_id, pending.device_id, vault.vault_id)
+        .await
+        .unwrap();
+    assert_eq!(wrappings.len(), 1);
+    assert_eq!(
+        wrappings[0].envelope,
+        json!({"ciphertext": "pending-device"})
+    );
 
     let (status, bootstrap): (StatusCode, DeviceBootstrapResponse) = json_request(
         app,
