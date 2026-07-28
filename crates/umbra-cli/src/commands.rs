@@ -2282,6 +2282,7 @@ fn profile_public_key(profile: &crate::config::ProfileConfig) -> Result<UserPubl
     Ok(UserPublicKey::from_base64url(public_key)?)
 }
 
+#[cfg(test)]
 fn emergency_kit_json_from_profile(
     profile: &crate::config::ProfileConfig,
 ) -> Result<String, CliError> {
