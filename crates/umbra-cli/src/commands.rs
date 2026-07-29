@@ -21,13 +21,14 @@ use umbra_crypto::{
 use umbra_protocol::{
     AcceptInviteRequest, AddOrgMemberRequest, AddVaultMemberRequest, ApprovalLookupRequest,
     ApproveDeviceRequest, CreateItemRequest, CreateOrgRequest, CreateOrgVaultRequest,
-    CreateVaultRequest, DeleteItemRequest, DeviceBootstrapResponse, DeviceResponse,
-    InviteMemberRequest, InviteResponse, ItemRevisionResponse, OrgMemberResponse, OrgResponse,
-    PROTOCOL_VERSION, PendingDeviceSummary, PendingInviteResponse, RecoverTrustRequest,
-    RecoverTrustResponse, RecoveryChallengeStartRequest, RecoveryChallengeStartResponse,
-    RejectInviteRequest, ResolveItemConflictRequest, ResolveItemConflictResponse,
-    RotateVaultKeyRequest, RotationItemRevision, RotationStatusResponse, RotationVaultKeyWrapping,
-    SYNC_INTEGRITY_PROTOCOL_VERSION, SyncRequest, SyncResponse, UpdateItemRequest,
+    CreateVaultRequest, DEVICE_SCOPED_WRAPPING_PROTOCOL_VERSION, DeleteItemRequest,
+    DeviceBootstrapResponse, DeviceEncryptionKeyResponse, DeviceResponse,
+    DeviceVaultKeyWrappingRequest, InviteMemberRequest, InviteResponse, ItemRevisionResponse,
+    OrgMemberResponse, OrgResponse, PROTOCOL_VERSION, PendingDeviceSummary, PendingInviteResponse,
+    RecoverTrustRequest, RecoverTrustResponse, RecoveryChallengeStartRequest,
+    RecoveryChallengeStartResponse, RejectInviteRequest, ResolveItemConflictRequest,
+    ResolveItemConflictResponse, RotateVaultKeyRequest, RotationItemRevision,
+    RotationStatusResponse, RotationVaultKeyWrapping, SyncRequest, SyncResponse, UpdateItemRequest,
     UserLookupRequest, UserLookupResponse, VaultMemberResponse, VaultResponse, VaultSyncCursor,
 };
 use uuid::Uuid;
@@ -334,6 +335,7 @@ pub async fn run(
                     .interact_text()?,
             };
             let device_key = DeviceSigningKey::generate();
+            let device_encryption_key = umbra_crypto::generate_user_keypair();
             let account_crypto = crate::crypto_state::NewAccountCrypto::generate(
                 &umbra_crypto::MasterPassword::new(password.as_bytes().to_vec()),
             )?;
@@ -353,6 +355,7 @@ pub async fn run(
                 crate::opaque::AccountRegistrationMaterial {
                     public_key: account_public_key.clone(),
                     encrypted_private_key: encrypted_user_private_key.clone(),
+                    device_encryption_public_key: device_encryption_key.public_key.to_base64url(),
                 },
             )
             .await?;
@@ -362,6 +365,8 @@ pub async fn run(
             profile_config.user_id = Some(response.user_id);
             profile_config.device_id = Some(response.device_id);
             profile_config.device_private_key = Some(device_key.to_base64url());
+            profile_config.device_encryption_private_key =
+                Some(device_encryption_key.private_key.to_base64url());
             profile_config.client_public_key = Some(account_public_key);
             profile_config.encrypted_user_private_key = Some(encrypted_user_private_key);
             profile_config.kdf_params = Some(kdf_params);
@@ -481,20 +486,27 @@ pub async fn run(
                 .await?;
             }
 
-            let password = rpassword::prompt_password("Master password: ")?;
-            let unlocked = crate::crypto_state::load_unlocked_profile(
-                profile,
-                &MasterPassword::new(password.into_bytes()),
+            let device_private_key = UserPrivateKey::from_base64url(
+                profile
+                    .device_encryption_private_key
+                    .as_deref()
+                    .ok_or(CliError::Input(
+                        "profile has no device encryption key; re-enroll this device",
+                    ))?,
             )?;
             let mut vault_keys = BTreeMap::new();
             for vault_id in vault_ids {
                 let wrapping = cache
-                    .latest_key_wrapping(vault_id, user_id)?
+                    .latest_device_key_wrapping(vault_id, user_id, device_id)?
                     .ok_or(CliError::MissingVaultKeyWrapping(vault_id))?;
                 let envelope: VaultKeyWrappingEnvelopeV1 =
                     serde_json::from_value(wrapping.envelope)?;
-                let aad = AadV1::vault_key_wrapping(vault_id.to_string());
-                let vault_key = unwrap_vault_key(&unlocked.private_key, &aad, &envelope)?;
+                let aad = AadV1::device_vault_key_wrapping(
+                    vault_id.to_string(),
+                    device_id.to_string(),
+                    wrapping.key_generation,
+                );
+                let vault_key = unwrap_vault_key(&device_private_key, &aad, &envelope)?;
                 vault_keys.insert(vault_id, vault_key);
             }
 
@@ -503,7 +515,7 @@ pub async fn run(
                 user_id,
                 device_id,
                 chrono::Utc::now() + chrono::Duration::minutes(ttl_minutes),
-                unlocked.private_key,
+                device_private_key,
                 vault_keys,
             );
             crate::unlock_store::UnlockStore::open(&profile_name, profile.device_id)
@@ -626,7 +638,7 @@ pub async fn run(
             {
                 return Err(CliError::Input("approval code belongs to another device"));
             }
-            let cache = crate::cache::LocalCache::open(&config.active_profile)?;
+            let mut cache = crate::cache::LocalCache::open(&config.active_profile)?;
             crate::sync::record_local_trust_anchor(profile, &cache)?;
             let devices: Vec<DeviceResponse> = client.get("/api/v1/devices").await?;
             let pending_device = devices
@@ -643,6 +655,30 @@ pub async fn run(
             {
                 trusted_checkpoint_devices.push(pending_anchor.clone());
             }
+            let pending_encryption_key =
+                pending_device
+                    .encryption_public_key
+                    .as_deref()
+                    .ok_or(CliError::Input(
+                        "pending device has no encryption public key",
+                    ))?;
+            for vault_id in cache.cached_vault_ids()? {
+                crate::sync::ensure_vault_synced(
+                    profile,
+                    &mut cache,
+                    vault_id,
+                    crate::sync::SyncMode::IfChanged,
+                )
+                .await?;
+                refresh_cached_vault_metadata(&client, &cache, vault_id).await?;
+            }
+            let vault_key_wrappings = pending_device_vault_key_wrappings(
+                &config.active_profile,
+                profile,
+                &cache,
+                pending.device_id,
+                pending_encryption_key,
+            )?;
             let bootstrap_bundle = if let Some(raw) = bootstrap_bundle_json {
                 serde_json::from_str(&raw)?
             } else {
@@ -663,6 +699,7 @@ pub async fn run(
                         protocol_version: PROTOCOL_VERSION,
                         approval_code,
                         bootstrap_bundle,
+                        vault_key_wrappings,
                     },
                 )
                 .await?;
@@ -729,6 +766,11 @@ pub async fn run(
                 .map(|id| Uuid::parse_str(&id))
                 .transpose()
                 .map_err(|_| CliError::Input("invalid default vault id in bootstrap bundle"))?;
+            // The pending-device bootstrap key is the device's X25519 keypair.
+            // Preserve its private half locally before clearing the pending
+            // marker, otherwise envelopes addressed during approval cannot be
+            // opened after bootstrap.
+            profile.device_encryption_private_key = Some(bootstrap_private_key.to_owned());
             profile.pending_bootstrap_private_key = None;
             profile.pending_approval_code = None;
             save_config(&config)?;
@@ -933,7 +975,7 @@ pub async fn run(
                 .post(
                     "/api/v1/sync",
                     &SyncRequest {
-                        protocol_version: SYNC_INTEGRITY_PROTOCOL_VERSION,
+                        protocol_version: DEVICE_SCOPED_WRAPPING_PROTOCOL_VERSION,
                         device_id,
                         vaults: vec![VaultSyncCursor {
                             vault_id,
@@ -942,7 +984,7 @@ pub async fn run(
                     },
                 )
                 .await?;
-            if full_sync.protocol_version != SYNC_INTEGRITY_PROTOCOL_VERSION {
+            if full_sync.protocol_version != DEVICE_SCOPED_WRAPPING_PROTOCOL_VERSION {
                 cache.quarantine_transport_failure(
                     vault_id,
                     0,
@@ -1051,9 +1093,24 @@ pub async fn run(
             let initial_key_wrapping = match wrapping_json {
                 Some(value) => serde_json::from_str(&value)?,
                 None => {
-                    let public_key = profile_public_key(profile)?;
+                    let device_id = profile.device_id.ok_or(CliError::Input(
+                        "profile has no device id; run `umbra register` first",
+                    ))?;
+                    let private_key = UserPrivateKey::from_base64url(
+                        profile
+                            .device_encryption_private_key
+                            .as_deref()
+                            .ok_or(CliError::Input(
+                                "profile has no device encryption key; re-enroll this device",
+                            ))?,
+                    )?;
+                    let public_key = private_key.public_key();
                     let vault_key = generate_vault_key();
-                    let aad = AadV1::vault_key_wrapping(requested_vault_id.to_string());
+                    let aad = AadV1::device_vault_key_wrapping(
+                        requested_vault_id.to_string(),
+                        device_id.to_string(),
+                        1,
+                    );
                     let wrapping = wrap_vault_key_for_user(&public_key, &vault_key, aad)?;
                     serde_json::to_value(wrapping)?
                 }
@@ -1063,7 +1120,7 @@ pub async fn run(
                     .post(
                         &vault_create_path(Some(org_id)),
                         &CreateOrgVaultRequest {
-                            protocol_version: PROTOCOL_VERSION,
+                            protocol_version: DEVICE_SCOPED_WRAPPING_PROTOCOL_VERSION,
                             vault_id: Some(requested_vault_id),
                             name,
                             kind,
@@ -1076,7 +1133,7 @@ pub async fn run(
                     .post(
                         &vault_create_path(None),
                         &CreateVaultRequest {
-                            protocol_version: PROTOCOL_VERSION,
+                            protocol_version: DEVICE_SCOPED_WRAPPING_PROTOCOL_VERSION,
                             vault_id: Some(requested_vault_id),
                             name,
                             kind,
@@ -1128,20 +1185,26 @@ pub async fn run(
                 crate::sync::SyncMode::IfChanged,
             )
             .await?;
+            refresh_cached_vault_metadata(&client, &cache, vault_id).await?;
             let user = lookup_user_by_email(&client, &email).await?;
-            let target_public_key = UserPublicKey::from_base64url(&user.public_key)?;
             let vault_key = unlock_vault_key(&config.active_profile, profile, &cache, vault_id)?;
-            let vault_key_wrapping =
-                wrap_vault_key_for_member(&target_public_key, &vault_key, vault_id)?;
+            let vault_key_wrappings = wrap_vault_key_for_devices(
+                vault_id,
+                user.user_id,
+                cached_vault_key_generation(&cache, vault_id)?,
+                &vault_key,
+                &user.trusted_devices,
+            )?;
             let invite: InviteResponse = client
                 .post(
                     &format!("/api/v1/vaults/{vault_id}/invites"),
                     &InviteMemberRequest {
-                        protocol_version: PROTOCOL_VERSION,
+                        protocol_version: DEVICE_SCOPED_WRAPPING_PROTOCOL_VERSION,
                         vault_id,
                         email,
                         role,
-                        vault_key_wrapping,
+                        vault_key_wrapping: Value::Null,
+                        vault_key_wrappings,
                     },
                 )
                 .await?;
@@ -1160,6 +1223,7 @@ pub async fn run(
             let vault_id =
                 resolve_vault_id_for_output(profile, &cache, vault_id, vault.as_deref(), output)?;
             let client = UmbraHttpClient::new(profile)?;
+            refresh_cached_vault_metadata(&client, &cache, vault_id).await?;
             let looked_up = match email.as_deref() {
                 Some(email) => Some(lookup_user_by_email(&client, email).await?),
                 None => None,
@@ -1169,25 +1233,31 @@ pub async fn run(
                 looked_up.as_ref().map(|user| user.user_id),
                 email.as_deref(),
             )?;
-            let target_public_key = match looked_up {
-                Some(user) => UserPublicKey::from_base64url(&user.public_key)?,
+            let target_devices = match looked_up {
+                Some(user) => user.trusted_devices,
                 None => {
                     return Err(CliError::Input(
-                        "vault add-member requires --email so the CLI can fetch the target public key",
+                        "vault add-member requires --email so the CLI can fetch trusted target devices",
                     ));
                 }
             };
             let vault_key = unlock_vault_key(&config.active_profile, profile, &cache, vault_id)?;
-            let vault_key_wrapping =
-                wrap_vault_key_for_member(&target_public_key, &vault_key, vault_id)?;
+            let vault_key_wrappings = wrap_vault_key_for_devices(
+                vault_id,
+                target_user_id,
+                cached_vault_key_generation(&cache, vault_id)?,
+                &vault_key,
+                &target_devices,
+            )?;
             let member: VaultMemberResponse = client
                 .post(
                     &format!("/api/v1/vaults/{vault_id}/members"),
                     &AddVaultMemberRequest {
-                        protocol_version: PROTOCOL_VERSION,
+                        protocol_version: DEVICE_SCOPED_WRAPPING_PROTOCOL_VERSION,
                         user_id: target_user_id,
                         role,
-                        vault_key_wrapping,
+                        vault_key_wrapping: Value::Null,
+                        vault_key_wrappings,
                     },
                 )
                 .await?;
@@ -1859,7 +1929,7 @@ pub async fn run(
                 .post(
                     "/api/v1/sync",
                     &SyncRequest {
-                        protocol_version: SYNC_INTEGRITY_PROTOCOL_VERSION,
+                        protocol_version: DEVICE_SCOPED_WRAPPING_PROTOCOL_VERSION,
                         device_id,
                         vaults: vec![VaultSyncCursor {
                             vault_id,
@@ -1868,7 +1938,7 @@ pub async fn run(
                     },
                 )
                 .await?;
-            if response.protocol_version != SYNC_INTEGRITY_PROTOCOL_VERSION {
+            if response.protocol_version != DEVICE_SCOPED_WRAPPING_PROTOCOL_VERSION {
                 cache.quarantine_transport_failure(
                     vault_id,
                     since_vault_revision,
@@ -2280,6 +2350,7 @@ fn selected_unlock_vaults(
     )?])
 }
 
+#[cfg(test)]
 fn profile_public_key(profile: &crate::config::ProfileConfig) -> Result<UserPublicKey, CliError> {
     let public_key = profile.client_public_key.as_deref().ok_or(CliError::Input(
         "profile has no account public key; run `umbra register` for this profile",
@@ -3319,18 +3390,24 @@ fn unlock_vault_key(
     let user_id = profile.user_id.ok_or(CliError::Input(
         "profile has no user id; run `umbra login` first",
     ))?;
-    let password = rpassword::prompt_password("Master password: ")?;
-    let unlocked = crate::crypto_state::load_unlocked_profile(
-        profile,
-        &MasterPassword::new(password.into_bytes()),
-    )?;
+    let device_id = profile.device_id.ok_or(CliError::Input(
+        "profile has no device id; run `umbra register` first",
+    ))?;
+    let device_private_key =
+        UserPrivateKey::from_base64url(profile.device_encryption_private_key.as_deref().ok_or(
+            CliError::Input("profile has no device encryption key; re-enroll this device"),
+        )?)?;
     let wrapping = cache
-        .latest_key_wrapping(vault_id, user_id)?
+        .latest_device_key_wrapping(vault_id, user_id, device_id)?
         .ok_or(CliError::MissingVaultKeyWrapping(vault_id))?;
     let envelope: VaultKeyWrappingEnvelopeV1 = serde_json::from_value(wrapping.envelope)?;
-    let aad = AadV1::vault_key_wrapping(vault_id.to_string());
+    let aad = AadV1::device_vault_key_wrapping(
+        vault_id.to_string(),
+        device_id.to_string(),
+        wrapping.key_generation,
+    );
 
-    unwrap_vault_key(&unlocked.private_key, &aad, &envelope).map_err(CliError::from)
+    unwrap_vault_key(&device_private_key, &aad, &envelope).map_err(CliError::from)
 }
 
 fn save_rotated_vault_key_to_unlock_store(
@@ -3348,14 +3425,92 @@ fn save_rotated_vault_key_to_unlock_store(
     crate::unlock_store::UnlockStore::open(profile_name, profile.device_id).save(&state)
 }
 
-fn wrap_vault_key_for_member(
-    recipient_public_key: &UserPublicKey,
-    vault_key: &VaultKey,
+/// Produces ciphertext-only vault-key envelopes, one for each trusted recipient
+/// device. The AAD makes an envelope non-transferable between devices or key
+/// generations even when both devices belong to the same account.
+fn wrap_vault_key_for_devices(
     vault_id: VaultId,
-) -> Result<Value, CliError> {
-    let aad = AadV1::vault_key_wrapping(vault_id.to_string());
-    let wrapping = wrap_vault_key_for_user(recipient_public_key, vault_key, aad)?;
-    serde_json::to_value(wrapping).map_err(CliError::from)
+    user_id: UserId,
+    key_generation: RevisionId,
+    vault_key: &VaultKey,
+    devices: &[DeviceEncryptionKeyResponse],
+) -> Result<Vec<DeviceVaultKeyWrappingRequest>, CliError> {
+    if key_generation < 1 {
+        return Err(CliError::Input("vault key generation must be positive"));
+    }
+    if devices.is_empty() {
+        return Err(CliError::Input(
+            "target user has no trusted device encryption keys",
+        ));
+    }
+    let mut seen = BTreeSet::new();
+    let mut wrappings = Vec::with_capacity(devices.len());
+    for device in devices {
+        if !seen.insert(device.device_id) {
+            return Err(CliError::Input(
+                "target user returned duplicate device encryption keys",
+            ));
+        }
+        let public_key = UserPublicKey::from_base64url(&device.encryption_public_key)?;
+        let aad = AadV1::device_vault_key_wrapping(
+            vault_id.to_string(),
+            device.device_id.to_string(),
+            key_generation,
+        );
+        let envelope = wrap_vault_key_for_user(&public_key, vault_key, aad)?;
+        wrappings.push(DeviceVaultKeyWrappingRequest {
+            vault_id,
+            user_id,
+            device_id: device.device_id,
+            wrapping_type: "device_public_key".to_owned(),
+            envelope: serde_json::to_value(envelope)?,
+            key_generation,
+        });
+    }
+    Ok(wrappings)
+}
+
+fn cached_vault_key_generation(
+    cache: &crate::cache::LocalCache,
+    vault_id: VaultId,
+) -> Result<RevisionId, CliError> {
+    cache
+        .list_vaults()?
+        .into_iter()
+        .find(|vault| vault.vault_id == vault_id)
+        .map(|vault| vault.current_key_generation)
+        .filter(|generation| *generation >= 1)
+        .ok_or(CliError::Input(
+            "selected vault has no valid key generation; sync and retry",
+        ))
+}
+
+fn pending_device_vault_key_wrappings(
+    profile_name: &str,
+    profile: &crate::config::ProfileConfig,
+    cache: &crate::cache::LocalCache,
+    pending_device_id: Uuid,
+    pending_encryption_public_key: &str,
+) -> Result<Vec<DeviceVaultKeyWrappingRequest>, CliError> {
+    let user_id = profile.user_id.ok_or(CliError::Input(
+        "profile has no user id; run `umbra login` first",
+    ))?;
+    let recipient = [DeviceEncryptionKeyResponse {
+        device_id: pending_device_id,
+        encryption_public_key: pending_encryption_public_key.to_owned(),
+    }];
+    let mut wrappings = Vec::new();
+    for vault in cache.list_vaults()? {
+        let vault_key = unlock_vault_key(profile_name, profile, cache, vault.vault_id)?;
+        wrappings.extend(wrap_vault_key_for_devices(
+            vault.vault_id,
+            user_id,
+            vault.current_key_generation,
+            &vault_key,
+            &recipient,
+        )?);
+    }
+    Ok(wrappings)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -3427,17 +3582,6 @@ fn build_rotation_request(
         ));
     }
 
-    let mut new_wrappings = Vec::with_capacity(active_members.len());
-    for member in active_members {
-        let public_key = UserPublicKey::from_base64url(&member.public_key)?;
-        new_wrappings.push(RotationVaultKeyWrapping {
-            user_id: member.user_id,
-            device_id: None,
-            wrapping_type: "user_public_key".to_owned(),
-            envelope: wrap_vault_key_for_member(&public_key, new_vault_key, vault_id)?,
-        });
-    }
-
     let mut reencrypted_revisions = Vec::with_capacity(current_revisions.len());
     for revision in current_revisions {
         if revision.key_generation != from_generation {
@@ -3462,8 +3606,27 @@ fn build_rotation_request(
         });
     }
 
+    let mut new_wrappings = Vec::new();
+    for member in active_members {
+        let device_wrappings = wrap_vault_key_for_devices(
+            vault_id,
+            member.user_id,
+            to_generation,
+            new_vault_key,
+            &member.encryption_devices,
+        )?;
+        new_wrappings.extend(device_wrappings.into_iter().map(|wrapping| {
+            RotationVaultKeyWrapping {
+                user_id: wrapping.user_id,
+                device_id: Some(wrapping.device_id),
+                wrapping_type: wrapping.wrapping_type,
+                envelope: wrapping.envelope,
+            }
+        }));
+    }
+
     Ok(RotateVaultKeyRequest {
-        protocol_version: PROTOCOL_VERSION,
+        protocol_version: DEVICE_SCOPED_WRAPPING_PROTOCOL_VERSION,
         from_generation,
         to_generation,
         new_wrappings,
@@ -3868,17 +4031,40 @@ mod tests {
     }
 
     #[test]
-    fn member_vault_key_wrapping_roundtrips_for_target_user() {
-        let target = generate_user_keypair();
+    fn device_vault_key_wrappings_only_open_for_the_addressed_device() {
+        let vault_id = Uuid::from_u128(1);
+        let user_id = Uuid::from_u128(2);
+        let recipient = generate_user_keypair();
         let vault_key = generate_vault_key();
-        let vault_id = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+        let device_id = Uuid::from_u128(3);
+        let wrappings = wrap_vault_key_for_devices(
+            vault_id,
+            user_id,
+            7,
+            &vault_key,
+            &[DeviceEncryptionKeyResponse {
+                device_id,
+                encryption_public_key: recipient.public_key.to_base64url(),
+            }],
+        )
+        .unwrap();
 
-        let wrapping = wrap_vault_key_for_member(&target.public_key, &vault_key, vault_id).unwrap();
-        let envelope: VaultKeyWrappingEnvelopeV1 = serde_json::from_value(wrapping).unwrap();
-        let aad = AadV1::vault_key_wrapping(vault_id.to_string());
-        let opened = unwrap_vault_key(&target.private_key, &aad, &envelope).unwrap();
-
-        assert_eq!(opened, vault_key);
+        assert_eq!(wrappings.len(), 1);
+        assert_eq!(wrappings[0].device_id, device_id);
+        assert_eq!(wrappings[0].wrapping_type, "device_public_key");
+        let envelope: VaultKeyWrappingEnvelopeV1 =
+            serde_json::from_value(wrappings[0].envelope.clone()).unwrap();
+        let aad = AadV1::device_vault_key_wrapping(vault_id.to_string(), device_id.to_string(), 7);
+        assert_eq!(
+            unwrap_vault_key(&recipient.private_key, &aad, &envelope).unwrap(),
+            vault_key
+        );
+        let wrong_aad = AadV1::device_vault_key_wrapping(
+            vault_id.to_string(),
+            Uuid::from_u128(4).to_string(),
+            7,
+        );
+        assert!(unwrap_vault_key(&recipient.private_key, &wrong_aad, &envelope).is_err());
     }
 
     #[test]
@@ -3927,6 +4113,10 @@ mod tests {
             role: VaultRole::Editor,
             state: MemberState::Active,
             public_key: member_keys.public_key.to_base64url(),
+            encryption_devices: vec![DeviceEncryptionKeyResponse {
+                device_id: Uuid::from_u128(4),
+                encryption_public_key: member_keys.public_key.to_base64url(),
+            }],
         };
 
         let request = build_rotation_request(
@@ -3944,13 +4134,18 @@ mod tests {
         assert_eq!(request.to_generation, 2);
         assert_eq!(request.new_wrappings.len(), 1);
         assert_eq!(request.new_wrappings[0].user_id, member_id);
-        assert_eq!(request.new_wrappings[0].wrapping_type, "user_public_key");
+        assert_eq!(request.new_wrappings[0].device_id, Some(Uuid::from_u128(4)));
+        assert_eq!(request.new_wrappings[0].wrapping_type, "device_public_key");
         assert_eq!(request.reencrypted_revisions.len(), 1);
         assert_eq!(request.reencrypted_revisions[0].expected_revision, 1);
 
         let wrapping: VaultKeyWrappingEnvelopeV1 =
             serde_json::from_value(request.new_wrappings[0].envelope.clone()).unwrap();
-        let wrapping_aad = AadV1::vault_key_wrapping(vault_id.to_string());
+        let wrapping_aad = AadV1::device_vault_key_wrapping(
+            vault_id.to_string(),
+            Uuid::from_u128(4).to_string(),
+            2,
+        );
         let opened = unwrap_vault_key(&member_keys.private_key, &wrapping_aad, &wrapping).unwrap();
         assert_eq!(opened, new_vault_key);
 
@@ -3976,6 +4171,7 @@ mod tests {
             role: VaultRole::Editor,
             state: MemberState::Active,
             public_key: member_keys.public_key.to_base64url(),
+            encryption_devices: vec![],
         };
 
         let result = build_rotation_request(
@@ -4036,6 +4232,7 @@ mod tests {
             role: VaultRole::Editor,
             state: MemberState::Active,
             public_key: member_keys.public_key.to_base64url(),
+            encryption_devices: vec![],
         };
 
         let result = build_rotation_request(
@@ -4095,6 +4292,7 @@ mod tests {
             role: VaultRole::Editor,
             state: MemberState::Active,
             public_key: member_keys.public_key.to_base64url(),
+            encryption_devices: vec![],
         };
 
         let result = build_rotation_request(
@@ -4565,6 +4763,7 @@ mod tests {
             device_id: Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap(),
             name: "Laptop".to_owned(),
             public_key: Some("device-public-key".to_owned()),
+            encryption_public_key: Some("device-encryption-public-key".to_owned()),
             fingerprint: "SHA256:test".to_owned(),
             state: umbra_core::DeviceState::Trusted,
             created_at: "2026-01-01T00:00:00Z".to_owned(),

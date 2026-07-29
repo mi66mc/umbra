@@ -24,12 +24,13 @@ use umbra_core::{DeviceState, VaultKind, VaultRole};
 use umbra_protocol::{
     AcceptInviteRequest, AddVaultMemberRequest, ApprovalLookupRequest, ApproveDeviceRequest,
     CreateItemRequest, CreateOrgRequest, CreateSyncCheckpointRequest, CreateVaultRequest,
-    DeleteItemRequest, DeviceBootstrapResponse, DeviceRegisterRequest, DeviceResponse,
-    InviteMemberRequest, InviteResponse, ItemConflictResponse, ItemRevisionResponse,
-    OpaqueLoginFinishRequest, OpaqueLoginFinishResponse, OpaqueLoginStartRequest,
-    OpaqueLoginStartResponse, OpaqueRegisterFinishRequest, OpaqueRegisterStartRequest,
-    OpaqueRegisterStartResponse, OrgResponse, PROTOCOL_VERSION, PendingDeviceRequest,
-    PendingDeviceSummary, PendingInviteResponse, RecoverTrustRequest, RecoverTrustResponse,
+    DEVICE_SCOPED_WRAPPING_PROTOCOL_VERSION, DeleteItemRequest, DeviceBootstrapResponse,
+    DeviceRegisterRequest, DeviceResponse, DeviceVaultKeyWrappingRequest, InviteMemberRequest,
+    InviteResponse, ItemConflictResponse, ItemRevisionResponse, OpaqueLoginFinishRequest,
+    OpaqueLoginFinishResponse, OpaqueLoginStartRequest, OpaqueLoginStartResponse,
+    OpaqueRegisterFinishRequest, OpaqueRegisterStartRequest, OpaqueRegisterStartResponse,
+    OrgResponse, PROTOCOL_VERSION, PendingDeviceRequest, PendingDeviceSummary,
+    PendingInviteResponse, RecoverTrustRequest, RecoverTrustResponse,
     RecoveryChallengeStartRequest, RecoveryChallengeStartResponse, RegisterResponse,
     RejectInviteRequest, ResolveItemConflictRequest, RotateVaultKeyRequest, RotationStatusResponse,
     RotationVaultKeyWrapping, SYNC_INTEGRITY_PROTOCOL_VERSION, SyncCheckpoint, SyncRequest,
@@ -204,7 +205,7 @@ async fn opaque_legacy_bearer_cannot_access_account_apis() {
         "/api/v1/vaults",
         Some(&token),
         &CreateVaultRequest {
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: 3,
             vault_id: None,
             name: "Personal".to_owned(),
             kind: VaultKind::Personal,
@@ -237,7 +238,7 @@ async fn create_vault_returns_client_supplied_id() {
         "/api/v1/vaults",
         login.auth("create-vault-client-id"),
         &CreateVaultRequest {
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: 3,
             vault_id: Some(requested_vault_id),
             name: "Bound Vault".to_owned(),
             kind: VaultKind::Personal,
@@ -294,6 +295,11 @@ async fn signed_user_lookup_returns_public_key() {
     assert_eq!(response.user_id, target.user_id);
     assert_eq!(response.email, "lookup-target@example.com");
     assert_eq!(response.public_key, "target-public-key");
+    assert_eq!(response.trusted_devices.len(), 1);
+    assert_eq!(
+        response.trusted_devices[0].encryption_public_key,
+        "target-device-public-key"
+    );
 }
 
 #[tokio::test]
@@ -328,7 +334,7 @@ async fn vault_members_endpoint_lists_active_members() {
         "/api/v1/vaults",
         owner.auth("vault-members-create"),
         &CreateVaultRequest {
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: 3,
             vault_id: Some(vault_id),
             name: "Team".to_owned(),
             kind: VaultKind::Shared,
@@ -342,10 +348,18 @@ async fn vault_members_endpoint_lists_active_members() {
         &format!("/api/v1/vaults/{}/members", vault.vault_id),
         owner.auth("vault-members-add"),
         &AddVaultMemberRequest {
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: 3,
             user_id: member.user_id,
             role: VaultRole::Viewer,
             vault_key_wrapping: json!({"viewer": "wrapping"}),
+            vault_key_wrappings: vec![DeviceVaultKeyWrappingRequest {
+                vault_id: vault.vault_id,
+                user_id: member.user_id,
+                device_id: member.device_id,
+                wrapping_type: "device_public_key".to_owned(),
+                envelope: json!({"ciphertext": "viewer-device"}),
+                key_generation: vault.current_key_generation,
+            }],
         },
     )
     .await;
@@ -410,7 +424,7 @@ async fn signed_rotation_endpoint_accepts_client_side_wrappings() {
         "/api/v1/vaults",
         owner.auth("rotation-create-vault"),
         &CreateVaultRequest {
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: 3,
             vault_id: Some(vault_id),
             name: "Rotation".to_owned(),
             kind: VaultKind::Shared,
@@ -426,14 +440,43 @@ async fn signed_rotation_endpoint_accepts_client_side_wrappings() {
         &format!("/api/v1/vaults/{}/members", vault.vault_id),
         owner.auth("rotation-add-member"),
         &AddVaultMemberRequest {
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: 3,
             user_id: member.user_id,
             role: VaultRole::Editor,
             vault_key_wrapping: json!({"member": "wrapping-v1"}),
+            vault_key_wrappings: vec![DeviceVaultKeyWrappingRequest {
+                vault_id,
+                user_id: member.user_id,
+                device_id: member.device_id,
+                wrapping_type: "device_public_key".to_owned(),
+                envelope: json!({"member": "wrapping-v1"}),
+                key_generation: vault.current_key_generation,
+            }],
         },
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+
+    let (status, _body): (StatusCode, serde_json::Value) = signed_json_request(
+        app.clone(),
+        Method::POST,
+        &format!("/api/v1/vaults/{}/rotate-key", vault.vault_id),
+        owner.auth("rotation-missing-member-device"),
+        &RotateVaultKeyRequest {
+            protocol_version: 3,
+            from_generation: 1,
+            to_generation: 2,
+            new_wrappings: vec![RotationVaultKeyWrapping {
+                user_id: owner.user_id,
+                device_id: Some(owner.device_id),
+                wrapping_type: "device_public_key".to_owned(),
+                envelope: json!({"owner": "wrapping-v2"}),
+            }],
+            reencrypted_revisions: vec![],
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 
     let (status, _removed): (StatusCode, serde_json::Value) = signed_json_request(
         app.clone(),
@@ -467,13 +510,13 @@ async fn signed_rotation_endpoint_accepts_client_side_wrappings() {
         &format!("/api/v1/vaults/{}/rotate-key", vault.vault_id),
         owner.auth("rotation-finish"),
         &RotateVaultKeyRequest {
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: 3,
             from_generation: 1,
             to_generation: 2,
             new_wrappings: vec![RotationVaultKeyWrapping {
                 user_id: owner.user_id,
-                device_id: None,
-                wrapping_type: "user_public_key".to_owned(),
+                device_id: Some(owner.device_id),
+                wrapping_type: "device_public_key".to_owned(),
                 envelope: json!({"owner": "wrapping-v2"}),
             }],
             reencrypted_revisions: vec![],
@@ -512,7 +555,7 @@ async fn viewer_cannot_create_item() {
         "/api/v1/vaults",
         owner.auth("owner-create-shared-vault"),
         &CreateVaultRequest {
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: 3,
             vault_id: None,
             name: "Shared".to_owned(),
             kind: VaultKind::Shared,
@@ -528,10 +571,18 @@ async fn viewer_cannot_create_item() {
         &format!("/api/v1/vaults/{}/members", owner_vault.vault_id),
         owner.auth("owner-add-viewer"),
         &AddVaultMemberRequest {
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: 3,
             user_id: viewer_user_id,
             role: VaultRole::Viewer,
             vault_key_wrapping: json!({"viewer": true}),
+            vault_key_wrappings: vec![DeviceVaultKeyWrappingRequest {
+                vault_id: owner_vault.vault_id,
+                user_id: viewer_user_id,
+                device_id: viewer.device_id,
+                wrapping_type: "device_public_key".to_owned(),
+                envelope: json!({"viewer": true}),
+                key_generation: owner_vault.current_key_generation,
+            }],
         },
     )
     .await;
@@ -583,7 +634,7 @@ async fn invited_user_can_list_accept_and_sync_vault() {
         "/api/v1/vaults",
         owner.auth("invite-create-vault"),
         &CreateVaultRequest {
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: 3,
             vault_id: None,
             name: "Invite Vault".to_owned(),
             kind: VaultKind::Shared,
@@ -598,15 +649,24 @@ async fn invited_user_can_list_accept_and_sync_vault() {
         &format!("/api/v1/vaults/{}/invites", vault.vault_id),
         owner.auth("invite-create"),
         &InviteMemberRequest {
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: DEVICE_SCOPED_WRAPPING_PROTOCOL_VERSION,
             vault_id: vault.vault_id,
             email: "INVITE-RECIPIENT@example.com".to_owned(),
             role: VaultRole::Editor,
             vault_key_wrapping: json!({"wrapped": "for-recipient"}),
+            vault_key_wrappings: vec![DeviceVaultKeyWrappingRequest {
+                vault_id: vault.vault_id,
+                user_id: recipient.user_id,
+                device_id: recipient.device_id,
+                wrapping_type: "device_public_key".to_owned(),
+                envelope: json!({"wrapped": "for-recipient"}),
+                key_generation: vault.current_key_generation,
+            }],
         },
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    assert_ne!(invite.invite_id, Uuid::nil());
     assert_eq!(invite.email, "invite-recipient@example.com");
     assert_eq!(invite.state, "pending");
 
@@ -629,7 +689,7 @@ async fn invited_user_can_list_accept_and_sync_vault() {
         &format!("/api/v1/invites/{}/accept", invite.invite_id),
         recipient.auth("invite-accept"),
         &AcceptInviteRequest {
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: DEVICE_SCOPED_WRAPPING_PROTOCOL_VERSION,
             invite_id: invite.invite_id,
             device_id: recipient.device_id,
         },
@@ -646,7 +706,7 @@ async fn invited_user_can_list_accept_and_sync_vault() {
         "/api/v1/sync",
         recipient.auth("invite-sync"),
         &SyncRequest {
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: DEVICE_SCOPED_WRAPPING_PROTOCOL_VERSION,
             device_id: recipient.device_id,
             vaults: vec![VaultSyncCursor {
                 vault_id: vault.vault_id,
@@ -692,7 +752,7 @@ async fn invited_user_can_reject_invite() {
         "/api/v1/vaults",
         owner.auth("reject-create-vault"),
         &CreateVaultRequest {
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: 3,
             vault_id: None,
             name: "Reject Vault".to_owned(),
             kind: VaultKind::Shared,
@@ -701,20 +761,30 @@ async fn invited_user_can_reject_invite() {
     )
     .await;
 
-    let (_status, invite): (StatusCode, InviteResponse) = signed_json_request(
+    let (status, invite): (StatusCode, InviteResponse) = signed_json_request(
         app.clone(),
         Method::POST,
         &format!("/api/v1/vaults/{}/invites", vault.vault_id),
         owner.auth("reject-create"),
         &InviteMemberRequest {
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: DEVICE_SCOPED_WRAPPING_PROTOCOL_VERSION,
             vault_id: vault.vault_id,
             email: "reject-recipient@example.com".to_owned(),
             role: VaultRole::Viewer,
             vault_key_wrapping: json!({"wrapped": "reject"}),
+            vault_key_wrappings: vec![DeviceVaultKeyWrappingRequest {
+                vault_id: vault.vault_id,
+                user_id: recipient.user_id,
+                device_id: recipient.device_id,
+                wrapping_type: "device_public_key".to_owned(),
+                envelope: json!({"wrapped": "reject"}),
+                key_generation: vault.current_key_generation,
+            }],
         },
     )
     .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_ne!(invite.invite_id, Uuid::nil());
 
     let (status, rejected): (StatusCode, InviteResponse) = signed_json_request(
         app.clone(),
@@ -759,7 +829,7 @@ async fn owner_can_create_update_and_sync_item_revisions() {
         "/api/v1/vaults",
         login.auth("items-create-vault"),
         &CreateVaultRequest {
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: 3,
             vault_id: None,
             name: "Personal".to_owned(),
             kind: VaultKind::Personal,
@@ -862,7 +932,7 @@ async fn stale_update_returns_encrypted_conflict_candidate() {
         "/api/v1/vaults",
         login.auth("conflict-update-create-vault"),
         &CreateVaultRequest {
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: 3,
             vault_id: None,
             name: "Conflict Update".to_owned(),
             kind: VaultKind::Personal,
@@ -958,7 +1028,7 @@ async fn conflict_audit_metadata_omits_envelopes_and_plaintext() {
         "/api/v1/vaults",
         login.auth("conflict-audit-create-vault"),
         &CreateVaultRequest {
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: 3,
             vault_id: None,
             name: "Conflict Audit".to_owned(),
             kind: VaultKind::Personal,
@@ -1114,7 +1184,7 @@ async fn two_devices_converge_after_conflict_resolution() {
         "/api/v1/vaults",
         device_a.auth("convergence-create-vault"),
         &CreateVaultRequest {
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: 3,
             vault_id: None,
             name: "Convergence".to_owned(),
             kind: VaultKind::Shared,
@@ -1130,10 +1200,18 @@ async fn two_devices_converge_after_conflict_resolution() {
         &format!("/api/v1/vaults/{}/members", vault.vault_id),
         device_a.auth("convergence-add-device-b"),
         &AddVaultMemberRequest {
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: 3,
             user_id: device_b.user_id,
             role: VaultRole::Editor,
             vault_key_wrapping: json!({"ciphertext": "device-b-wrapping"}),
+            vault_key_wrappings: vec![DeviceVaultKeyWrappingRequest {
+                vault_id: vault.vault_id,
+                user_id: device_b.user_id,
+                device_id: device_b.device_id,
+                wrapping_type: "device_public_key".to_owned(),
+                envelope: json!({"ciphertext": "device-b-wrapping"}),
+                key_generation: vault.current_key_generation,
+            }],
         },
     )
     .await;
@@ -1385,7 +1463,7 @@ async fn conflict_authorization_delete_contract_and_sync_convergence() {
         "/api/v1/vaults",
         owner.auth("conflict-access-create-vault"),
         &CreateVaultRequest {
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: 3,
             vault_id: None,
             name: "Conflict Access".to_owned(),
             kind: VaultKind::Shared,
@@ -1405,10 +1483,18 @@ async fn conflict_authorization_delete_contract_and_sync_convergence() {
             &format!("/api/v1/vaults/{}/members", vault.vault_id),
             owner.auth(nonce),
             &AddVaultMemberRequest {
-                protocol_version: PROTOCOL_VERSION,
+                protocol_version: 3,
                 user_id: member.user_id,
                 role,
                 vault_key_wrapping: json!({"wrapped": "member"}),
+                vault_key_wrappings: vec![DeviceVaultKeyWrappingRequest {
+                    vault_id: vault.vault_id,
+                    user_id: member.user_id,
+                    device_id: member.device_id,
+                    wrapping_type: "device_public_key".to_owned(),
+                    envelope: json!({"wrapped": "member"}),
+                    key_generation: vault.current_key_generation,
+                }],
             },
         )
         .await;
@@ -1658,7 +1744,7 @@ async fn checkpoint_endpoint_requires_v2_and_a_signed_writer_device() {
         "/api/v1/vaults",
         writer.auth("checkpoint-create-vault"),
         &CreateVaultRequest {
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: 3,
             vault_id: None,
             name: "Checkpoint vault".to_owned(),
             kind: VaultKind::Personal,
@@ -1758,6 +1844,24 @@ async fn checkpoint_endpoint_requires_v2_and_a_signed_writer_device() {
     assert!(!transport.contains("wrapped-key"));
     assert!(!transport.contains("plaintext"));
 
+    let (status, v3_sync): (StatusCode, SyncResponse) = signed_json_request(
+        app.clone(),
+        Method::POST,
+        "/api/v1/sync",
+        writer.auth("checkpoint-v3-sync"),
+        &SyncRequest {
+            protocol_version: 3,
+            device_id: writer.device_id,
+            vaults: vec![VaultSyncCursor {
+                vault_id: vault.vault_id,
+                since_vault_revision: 0,
+            }],
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v3_sync.checkpoints, vec![checkpoint.clone()]);
+
     let (status, _): (StatusCode, serde_json::Value) = signed_json_request(
         app.clone(),
         Method::POST,
@@ -1822,7 +1926,7 @@ async fn owner_can_delete_item_and_sync_deleted_item_id() {
         "/api/v1/vaults",
         login.auth("delete-create-vault"),
         &CreateVaultRequest {
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: 3,
             vault_id: Some(vault_id),
             name: "Delete".to_owned(),
             kind: VaultKind::Personal,
@@ -1913,7 +2017,7 @@ async fn sync_status_reports_item_changes() {
         "/api/v1/vaults",
         login.auth("sync-status-create-vault"),
         &CreateVaultRequest {
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: 3,
             vault_id: None,
             name: "Status".to_owned(),
             kind: VaultKind::Personal,
@@ -2018,7 +2122,7 @@ async fn create_item_returns_client_supplied_id() {
         "/api/v1/vaults",
         login.auth("item-id-create-vault"),
         &CreateVaultRequest {
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: 3,
             vault_id: None,
             name: "Personal".to_owned(),
             kind: VaultKind::Personal,
@@ -2102,6 +2206,7 @@ async fn signed_login_can_create_org_and_rejects_nonce_replay() {
             initial_device: DeviceRegisterRequest {
                 name: "signed laptop".to_owned(),
                 public_key: verifying_key_to_b64(&signing_key.verifying_key()),
+                encryption_public_key: None,
                 fingerprint: "signed-device-fingerprint".to_owned(),
             },
             registration_upload: encode_b64(registration_finish.message.serialize().as_slice()),
@@ -2250,6 +2355,7 @@ async fn signed_login_rejects_revoked_device_state() {
             initial_device: DeviceRegisterRequest {
                 name: "revoked laptop".to_owned(),
                 public_key: verifying_key_to_b64(&signing_key.verifying_key()),
+                encryption_public_key: None,
                 fingerprint: "revoked-device-fingerprint".to_owned(),
             },
             registration_upload: encode_b64(registration_finish.message.serialize().as_slice()),
@@ -2417,7 +2523,7 @@ async fn trusted_device_approves_pending_device_and_pending_downloads_bootstrap(
     let Some(storage) = fresh_test_storage().await else {
         return;
     };
-    let app = router(test_state_with_storage(storage));
+    let app = router(test_state_with_storage(storage.clone()));
     let trusted = register_and_signed_login(
         app.clone(),
         "approval-flow@example.com",
@@ -2448,6 +2554,22 @@ async fn trusted_device_approves_pending_device_and_pending_downloads_bootstrap(
     assert_eq!(summary.device_id, pending.device_id);
     assert_eq!(summary.bootstrap_public_key, pending.bootstrap_public_key);
 
+    let (status, vault): (StatusCode, VaultResponse) = signed_json_request(
+        app.clone(),
+        Method::POST,
+        "/api/v1/vaults",
+        trusted.auth("approval-create-vault"),
+        &CreateVaultRequest {
+            protocol_version: 3,
+            vault_id: None,
+            name: "Approval device envelopes".to_owned(),
+            kind: VaultKind::Personal,
+            initial_key_wrapping: json!({"ciphertext": "owner"}),
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
     let bootstrap_bundle = json!({"encrypted": "bootstrap-bundle"});
     let (status, approved): (StatusCode, DeviceResponse) = signed_json_request(
         app.clone(),
@@ -2455,15 +2577,78 @@ async fn trusted_device_approves_pending_device_and_pending_downloads_bootstrap(
         &format!("/api/v1/devices/{}/approve", pending.device_id),
         trusted.auth("approve-device"),
         &ApproveDeviceRequest {
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: 3,
             approval_code: pending.approval_code.clone(),
             bootstrap_bundle: bootstrap_bundle.clone(),
+            vault_key_wrappings: vec![DeviceVaultKeyWrappingRequest {
+                vault_id: vault.vault_id,
+                user_id: trusted.user_id,
+                device_id: pending.device_id,
+                wrapping_type: "device_public_key".to_owned(),
+                envelope: json!({"ciphertext": "pending-device"}),
+                key_generation: vault.current_key_generation,
+            }],
         },
     )
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(approved.device_id, pending.device_id);
     assert_eq!(approved.state, DeviceState::Trusted);
+    let wrappings = storage
+        .list_key_wrappings_for_device_vault(trusted.user_id, pending.device_id, vault.vault_id)
+        .await
+        .unwrap();
+    assert_eq!(wrappings.len(), 1);
+    assert_eq!(
+        wrappings[0].envelope,
+        json!({"ciphertext": "pending-device"})
+    );
+
+    let sync_request = |device_id| SyncRequest {
+        protocol_version: 3,
+        device_id,
+        vaults: vec![VaultSyncCursor {
+            vault_id: vault.vault_id,
+            since_vault_revision: 0,
+        }],
+    };
+    let (status, owner_sync): (StatusCode, SyncResponse) = signed_json_request(
+        app.clone(),
+        Method::POST,
+        "/api/v1/sync",
+        trusted.auth("owner-device-scoped-sync"),
+        &sync_request(trusted.device_id),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, pending_sync): (StatusCode, SyncResponse) = json_request(
+        app.clone(),
+        Method::POST,
+        "/api/v1/sync",
+        Some(&pending.session_token),
+        &sync_request(pending.device_id),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(owner_sync.checkpoints, pending_sync.checkpoints);
+    assert_eq!(
+        owner_sync.vaults[0].key_wrapping_metadata,
+        pending_sync.vaults[0].key_wrapping_metadata
+    );
+    assert_eq!(owner_sync.vaults[0].key_wrapping_metadata.len(), 2);
+    assert_eq!(owner_sync.vaults[0].key_wrappings.len(), 1);
+    assert_eq!(pending_sync.vaults[0].key_wrappings.len(), 1);
+    assert_eq!(
+        owner_sync.vaults[0].key_wrappings[0].device_id,
+        Some(trusted.device_id)
+    );
+    assert_eq!(
+        pending_sync.vaults[0].key_wrappings[0].device_id,
+        Some(pending.device_id)
+    );
+    let pending_transport = serde_json::to_string(&pending_sync).unwrap();
+    assert!(!pending_transport.contains("\"ciphertext\":\"owner\""));
+    assert!(pending_transport.contains("\"ciphertext\":\"pending-device\""));
 
     let (status, bootstrap): (StatusCode, DeviceBootstrapResponse) = json_request(
         app,
@@ -2691,6 +2876,7 @@ async fn register_and_login(app: Router, email: &str, password: &[u8]) -> String
             initial_device: DeviceRegisterRequest {
                 name: "dev laptop".to_owned(),
                 public_key: "device-public-key".to_owned(),
+                encryption_public_key: None,
                 fingerprint: "device-fingerprint".to_owned(),
             },
             registration_upload: encode_b64(registration_finish.message.serialize().as_slice()),
@@ -2942,6 +3128,7 @@ async fn register_user_with_device(
             encrypted_private_key: json!({"ciphertext": "private"}),
             initial_device: DeviceRegisterRequest {
                 name: device_name.to_owned(),
+                encryption_public_key: Some(device_public_key.clone()),
                 public_key: device_public_key,
                 fingerprint: device_fingerprint,
             },

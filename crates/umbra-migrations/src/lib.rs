@@ -1,6 +1,6 @@
 use sqlx::{PgPool, SqlitePool, migrate::Migrator};
 
-pub const LATEST_MIGRATION_VERSION: i64 = 9;
+pub const LATEST_MIGRATION_VERSION: i64 = 10;
 
 pub static POSTGRES_MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 pub static SQLITE_MIGRATOR: Migrator = sqlx::migrate!("./sqlite");
@@ -95,8 +95,8 @@ mod tests {
         let migrations = POSTGRES_MIGRATOR.iter().collect::<Vec<_>>();
         let sqlite_migrations = SQLITE_MIGRATOR.iter().collect::<Vec<_>>();
 
-        assert_eq!(migrations.len(), 9);
-        assert_eq!(sqlite_migrations.len(), 9);
+        assert_eq!(migrations.len(), 10);
+        assert_eq!(sqlite_migrations.len(), 10);
         assert!(migrations.iter().any(|migration| {
             migration.version == 4 && migration.description == "vault access revision"
         }));

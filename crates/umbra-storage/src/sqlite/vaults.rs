@@ -1,5 +1,5 @@
 use sqlx::Row;
-use umbra_core::{UserId, VaultId};
+use umbra_core::{DeviceId, UserId, VaultId};
 use uuid::Uuid;
 
 use crate::convert::{member_state_to_str, vault_kind_to_str, vault_role_to_str};
@@ -187,6 +187,30 @@ impl SqliteStorage {
         .fetch_all(&self.pool)
         .await?;
 
+        rows.into_iter().map(vault_key_wrapping_from_row).collect()
+    }
+
+    pub async fn list_key_wrappings_for_device_vault(
+        &self,
+        user_id: UserId,
+        device_id: DeviceId,
+        vault_id: VaultId,
+    ) -> Result<Vec<VaultKeyWrappingRecord>, StorageError> {
+        let rows = sqlx::query(&format!("SELECT {WRAPPING_COLUMNS} FROM vault_key_wrappings w WHERE w.user_id = ?1 AND w.device_id = ?2 AND w.vault_id = ?3 AND w.revoked_at IS NULL AND w.wrapping_type = 'device_public_key' AND EXISTS (SELECT 1 FROM devices d WHERE d.id = w.device_id AND d.user_id = w.user_id AND d.state = 'trusted' AND d.revoked_at IS NULL) ORDER BY w.created_at ASC"))
+            .bind(user_id.to_string()).bind(device_id.to_string()).bind(vault_id.to_string()).fetch_all(&self.pool).await?;
+        rows.into_iter().map(vault_key_wrapping_from_row).collect()
+    }
+
+    pub async fn list_active_key_wrappings_for_vault(
+        &self,
+        vault_id: VaultId,
+    ) -> Result<Vec<VaultKeyWrappingRecord>, StorageError> {
+        let rows = sqlx::query(&format!(
+            "SELECT {WRAPPING_COLUMNS} FROM vault_key_wrappings w WHERE w.vault_id = ?1 AND w.revoked_at IS NULL AND w.wrapping_type = 'device_public_key' AND EXISTS (SELECT 1 FROM devices d WHERE d.id = w.device_id AND d.user_id = w.user_id AND d.state = 'trusted' AND d.revoked_at IS NULL) ORDER BY w.key_generation ASC, w.user_id ASC, w.device_id ASC, w.id ASC"
+        ))
+        .bind(vault_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
         rows.into_iter().map(vault_key_wrapping_from_row).collect()
     }
 

@@ -72,6 +72,7 @@ pub(crate) fn device_from_row(row: SqliteRow) -> Result<DeviceRecord, StorageErr
         user_id: parse_uuid(row.try_get("user_id")?)?,
         name: row.try_get("name")?,
         public_key: row.try_get("public_key")?,
+        encryption_public_key: row.try_get("encryption_public_key")?,
         fingerprint: row.try_get("fingerprint")?,
         state: crate::convert::str_to_device_state(row.try_get::<String, _>("state")?.as_str())?,
         approval_code_hash: row.try_get("approval_code_hash")?,

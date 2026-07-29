@@ -130,6 +130,16 @@ pub trait StorageBackend: Send + Sync {
         user_id: UserId,
         vault_id: VaultId,
     ) -> Result<Vec<VaultKeyWrappingRecord>, StorageError>;
+    async fn list_key_wrappings_for_device_vault(
+        &self,
+        user_id: UserId,
+        device_id: DeviceId,
+        vault_id: VaultId,
+    ) -> Result<Vec<VaultKeyWrappingRecord>, StorageError>;
+    async fn list_active_key_wrappings_for_vault(
+        &self,
+        vault_id: VaultId,
+    ) -> Result<Vec<VaultKeyWrappingRecord>, StorageError>;
     async fn remove_vault_member(
         &self,
         vault_id: VaultId,
@@ -441,6 +451,23 @@ impl StorageBackend for PostgresStorage {
         vault_id: VaultId,
     ) -> Result<Vec<VaultKeyWrappingRecord>, StorageError> {
         PostgresStorage::list_key_wrappings_for_user_vault(self, user_id, vault_id).await
+    }
+
+    async fn list_key_wrappings_for_device_vault(
+        &self,
+        user_id: UserId,
+        device_id: DeviceId,
+        vault_id: VaultId,
+    ) -> Result<Vec<VaultKeyWrappingRecord>, StorageError> {
+        PostgresStorage::list_key_wrappings_for_device_vault(self, user_id, device_id, vault_id)
+            .await
+    }
+
+    async fn list_active_key_wrappings_for_vault(
+        &self,
+        vault_id: VaultId,
+    ) -> Result<Vec<VaultKeyWrappingRecord>, StorageError> {
+        PostgresStorage::list_active_key_wrappings_for_vault(self, vault_id).await
     }
 
     async fn remove_vault_member(
@@ -811,6 +838,25 @@ impl StorageBackend for crate::sqlite::SqliteStorage {
     ) -> Result<Vec<VaultKeyWrappingRecord>, StorageError> {
         crate::sqlite::SqliteStorage::list_key_wrappings_for_user_vault(self, user_id, vault_id)
             .await
+    }
+
+    async fn list_key_wrappings_for_device_vault(
+        &self,
+        user_id: UserId,
+        device_id: DeviceId,
+        vault_id: VaultId,
+    ) -> Result<Vec<VaultKeyWrappingRecord>, StorageError> {
+        crate::sqlite::SqliteStorage::list_key_wrappings_for_device_vault(
+            self, user_id, device_id, vault_id,
+        )
+        .await
+    }
+
+    async fn list_active_key_wrappings_for_vault(
+        &self,
+        vault_id: VaultId,
+    ) -> Result<Vec<VaultKeyWrappingRecord>, StorageError> {
+        crate::sqlite::SqliteStorage::list_active_key_wrappings_for_vault(self, vault_id).await
     }
 
     async fn remove_vault_member(

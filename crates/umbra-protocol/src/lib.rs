@@ -6,13 +6,22 @@ use umbra_core::{
 
 pub const PROTOCOL_VERSION: u16 = 1;
 pub const SYNC_INTEGRITY_PROTOCOL_VERSION: u16 = 2;
+pub const DEVICE_SCOPED_WRAPPING_PROTOCOL_VERSION: u16 = 3;
 
 pub const fn is_supported_protocol_version(version: u16) -> bool {
-    matches!(version, PROTOCOL_VERSION | SYNC_INTEGRITY_PROTOCOL_VERSION)
+    matches!(
+        version,
+        PROTOCOL_VERSION
+            | SYNC_INTEGRITY_PROTOCOL_VERSION
+            | DEVICE_SCOPED_WRAPPING_PROTOCOL_VERSION
+    )
 }
 
 pub const fn is_sync_integrity_protocol_version(version: u16) -> bool {
-    version == SYNC_INTEGRITY_PROTOCOL_VERSION
+    matches!(
+        version,
+        SYNC_INTEGRITY_PROTOCOL_VERSION | DEVICE_SCOPED_WRAPPING_PROTOCOL_VERSION
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -108,6 +117,8 @@ pub struct LoginResponse {
 pub struct DeviceRegisterRequest {
     pub name: String,
     pub public_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encryption_public_key: Option<String>,
     pub fingerprint: String,
 }
 
@@ -123,6 +134,8 @@ pub struct DeviceResponse {
     pub device_id: DeviceId,
     pub name: String,
     pub public_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encryption_public_key: Option<String>,
     pub fingerprint: String,
     pub state: DeviceState,
     pub created_at: String,
@@ -163,6 +176,22 @@ pub struct ApproveDeviceRequest {
     pub protocol_version: u16,
     pub approval_code: String,
     pub bootstrap_bundle: serde_json::Value,
+    /// Ciphertext-only vault-key envelopes addressed to the device being
+    /// approved. Servers validate routing metadata but never inspect them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vault_key_wrappings: Vec<DeviceVaultKeyWrappingRequest>,
+}
+
+/// A vault-key envelope whose recipient is a specific trusted device.
+/// `envelope` is opaque ciphertext and must not contain plaintext key material.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceVaultKeyWrappingRequest {
+    pub vault_id: VaultId,
+    pub user_id: UserId,
+    pub device_id: DeviceId,
+    pub wrapping_type: String,
+    pub envelope: serde_json::Value,
+    pub key_generation: RevisionId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -237,6 +266,15 @@ pub struct UserLookupResponse {
     pub user_id: UserId,
     pub email: String,
     pub public_key: String,
+    /// Encryption keys for devices which may receive new vault-key envelopes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trusted_devices: Vec<DeviceEncryptionKeyResponse>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceEncryptionKeyResponse {
+    pub device_id: DeviceId,
+    pub encryption_public_key: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -254,6 +292,8 @@ pub struct VaultMemberResponse {
     pub role: VaultRole,
     pub state: MemberState,
     pub public_key: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub encryption_devices: Vec<DeviceEncryptionKeyResponse>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -291,6 +331,8 @@ pub struct AddVaultMemberRequest {
     pub user_id: UserId,
     pub role: VaultRole,
     pub vault_key_wrapping: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vault_key_wrappings: Vec<DeviceVaultKeyWrappingRequest>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -331,6 +373,8 @@ pub struct InviteMemberRequest {
     pub email: String,
     pub role: VaultRole,
     pub vault_key_wrapping: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vault_key_wrappings: Vec<DeviceVaultKeyWrappingRequest>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -448,6 +492,20 @@ pub struct VaultKeyWrappingResponse {
     pub key_generation: RevisionId,
 }
 
+/// Commitment-safe routing metadata for a vault-key envelope. The raw
+/// ciphertext is deliberately omitted so device-scoped sync can bind every
+/// active recipient without disclosing other devices' envelopes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VaultKeyWrappingMetadata {
+    pub id: uuid::Uuid,
+    pub vault_id: VaultId,
+    pub user_id: UserId,
+    pub device_id: Option<DeviceId>,
+    pub wrapping_type: String,
+    pub key_generation: RevisionId,
+    pub envelope_hash: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SyncStatusRequest {
     pub protocol_version: u16,
@@ -531,6 +589,10 @@ pub struct VaultSyncChanges {
     pub items: Vec<ItemRevisionResponse>,
     pub deleted_items: Vec<ItemId>,
     pub key_wrappings: Vec<VaultKeyWrappingResponse>,
+    /// All active envelope routing metadata, including other devices. Present
+    /// for v3; v1/v2 clients continue to derive it from raw envelopes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub key_wrapping_metadata: Vec<VaultKeyWrappingMetadata>,
     #[serde(default)]
     pub conflicts: Vec<ItemConflictResponse>,
 }
@@ -648,6 +710,13 @@ mod tests {
     }
 
     #[test]
+    fn device_scoped_protocol_keeps_sync_integrity_enabled() {
+        assert!(is_sync_integrity_protocol_version(
+            DEVICE_SCOPED_WRAPPING_PROTOCOL_VERSION
+        ));
+    }
+
+    #[test]
     fn invite_member_request_carries_encrypted_wrapping() {
         let vault_id = Uuid::parse_str("00000000-0000-0000-0000-000000000801").unwrap();
         let request = InviteMemberRequest {
@@ -656,6 +725,7 @@ mod tests {
             email: "ana@example.com".to_owned(),
             role: VaultRole::Editor,
             vault_key_wrapping: json!({"version": 1, "ciphertext": "wrapped-vault-key"}),
+            vault_key_wrappings: vec![],
         };
 
         let encoded = serde_json::to_value(&request).unwrap();
@@ -783,6 +853,7 @@ mod tests {
                     envelope: json!({"wrapped": true}),
                     key_generation: 1,
                 }],
+                key_wrapping_metadata: vec![],
                 conflicts: vec![],
             }],
             checkpoints: vec![],
@@ -847,6 +918,7 @@ mod tests {
             user_id: Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap(),
             email: "ana@example.com".to_owned(),
             public_key: "ana-public-key".to_owned(),
+            trusted_devices: vec![],
         };
         let encoded = serde_json::to_value(&lookup).unwrap();
         assert_eq!(encoded["email"], json!("ana@example.com"));
@@ -868,6 +940,7 @@ mod tests {
             role: VaultRole::Viewer,
             state: MemberState::Active,
             public_key: "ana-public-key".to_owned(),
+            encryption_devices: vec![],
         };
         let encoded = serde_json::to_value(&vault_member).unwrap();
         assert_eq!(encoded["role"], json!("viewer"));

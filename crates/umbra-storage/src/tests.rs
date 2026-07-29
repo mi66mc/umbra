@@ -104,6 +104,7 @@ async fn sqlite_concurrent_duplicate_sync_checkpoints_are_idempotent() {
             user_id: user.id,
             name: "concurrent checkpoint device".to_owned(),
             public_key: Some("concurrent-device-public-key".to_owned()),
+            encryption_public_key: None,
             fingerprint: "SHA256:checkpoint-concurrent".to_owned(),
             state: DeviceState::Trusted,
             approval_code_hash: None,
@@ -175,6 +176,7 @@ async fn sqlite_users_devices_and_sessions_flow() {
             user_id: user.id,
             name: "sqlite laptop".to_owned(),
             public_key: Some("device-public-key".to_owned()),
+            encryption_public_key: None,
             fingerprint: "SHA256:sqlite".to_owned(),
             state: DeviceState::Trusted,
             approval_code_hash: None,
@@ -266,6 +268,60 @@ async fn sqlite_vault_item_and_rotation_flow() {
             .has_active_vault_membership(vault.id, user.id)
             .await
             .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn sqlite_revoking_device_marks_users_active_vaults_for_rotation() {
+    let storage = crate::sqlite::SqliteStorage::connect("sqlite::memory:", 1)
+        .await
+        .unwrap();
+    umbra_migrations::run_sqlite(storage.pool()).await.unwrap();
+    let user = create_test_user_on(&storage, "sqlite-device-revoke@example.com").await;
+    let vault = storage
+        .create_vault(CreateVault {
+            id: None,
+            org_id: None,
+            name: "Rotate after revoke".to_owned(),
+            kind: VaultKind::Personal,
+            created_by: Some(user.id),
+            crypto_policy: serde_json::json!({}),
+        })
+        .await
+        .unwrap();
+    storage
+        .upsert_vault_member(UpsertVaultMember {
+            vault_id: vault.id,
+            user_id: user.id,
+            role: VaultRole::Owner,
+            state: MemberState::Active,
+        })
+        .await
+        .unwrap();
+    let device = storage
+        .create_device(CreateDevice {
+            id: None,
+            user_id: user.id,
+            name: "revoked laptop".to_owned(),
+            public_key: Some("device-public-key".to_owned()),
+            encryption_public_key: Some("encryption-public-key".to_owned()),
+            fingerprint: "sqlite-revoked-device".to_owned(),
+            state: DeviceState::Trusted,
+            approval_code_hash: None,
+            approval_expires_at: None,
+            bootstrap_public_key: None,
+        })
+        .await
+        .unwrap();
+
+    storage.revoke_device(device.id).await.unwrap();
+
+    assert!(
+        storage
+            .rotation_status(vault.id)
+            .await
+            .unwrap()
+            .needs_key_rotation
     );
 }
 
@@ -622,6 +678,7 @@ async fn postgres_signed_sessions_reject_nonce_replay() {
             user_id: user.id,
             name: "signed laptop".to_owned(),
             public_key: Some("device-public-key".to_owned()),
+            encryption_public_key: None,
             fingerprint: "signed-device".to_owned(),
             state: DeviceState::Trusted,
             approval_code_hash: None,
@@ -669,6 +726,7 @@ async fn postgres_revoke_sessions_for_device_revokes_active_session() {
             user_id: user.id,
             name: "session laptop".to_owned(),
             public_key: Some("device-public-key".to_owned()),
+            encryption_public_key: None,
             fingerprint: "session-device".to_owned(),
             state: DeviceState::Trusted,
             approval_code_hash: None,
@@ -718,6 +776,7 @@ async fn postgres_devices_support_pending_trust_and_revoke() {
             user_id: user.id,
             name: "new laptop".to_owned(),
             public_key: Some("device-public-key".to_owned()),
+            encryption_public_key: None,
             fingerprint: "device-fingerprint".to_owned(),
             state: DeviceState::Pending,
             approval_code_hash: Some("approval-hash".to_owned()),
@@ -764,10 +823,38 @@ async fn postgres_devices_support_pending_trust_and_revoke() {
     assert_eq!(approved.bootstrap_bundle, Some(bundle));
     assert!(approved.trusted_at.is_some());
 
+    let vault = storage
+        .create_vault(CreateVault {
+            id: None,
+            org_id: None,
+            name: "Postgres revoke rotation".to_owned(),
+            kind: VaultKind::Personal,
+            created_by: Some(user.id),
+            crypto_policy: serde_json::json!({}),
+        })
+        .await
+        .unwrap();
+    storage
+        .upsert_vault_member(UpsertVaultMember {
+            vault_id: vault.id,
+            user_id: user.id,
+            role: VaultRole::Owner,
+            state: MemberState::Active,
+        })
+        .await
+        .unwrap();
+
     storage.revoke_device(approved.id).await.unwrap();
     let revoked = storage.find_device_by_id(approved.id).await.unwrap();
     assert_eq!(revoked.state, DeviceState::Revoked);
     assert!(revoked.revoked_at.is_some());
+    assert!(
+        storage
+            .rotation_status(vault.id)
+            .await
+            .unwrap()
+            .needs_key_rotation
+    );
 }
 
 #[tokio::test]
@@ -783,6 +870,7 @@ async fn postgres_recovery_challenge_consumes_once() {
             user_id: user.id,
             name: "recovering laptop".to_owned(),
             public_key: Some("device-public-key".to_owned()),
+            encryption_public_key: None,
             fingerprint: "recovery-device".to_owned(),
             state: DeviceState::Pending,
             approval_code_hash: None,
@@ -1150,6 +1238,21 @@ async fn item_deletion_flow_on<S: StorageBackend + ?Sized>(storage: &S) {
 async fn vault_invite_lifecycle_on<S: StorageBackend + ?Sized>(storage: &S) {
     let owner = create_test_user_on(storage, "invite-owner@example.com").await;
     let recipient = create_test_user_on(storage, "invite-recipient@example.com").await;
+    let recipient_device = storage
+        .create_device(CreateDevice {
+            id: None,
+            user_id: recipient.id,
+            name: "invite recipient device".to_owned(),
+            public_key: Some("invite-recipient-signing-key".to_owned()),
+            encryption_public_key: Some("invite-recipient-encryption-key".to_owned()),
+            fingerprint: "invite-recipient-device".to_owned(),
+            state: DeviceState::Trusted,
+            approval_code_hash: None,
+            approval_expires_at: None,
+            bootstrap_public_key: None,
+        })
+        .await
+        .unwrap();
     let vault = storage
         .create_vault(CreateVault {
             id: None,
@@ -1179,7 +1282,15 @@ async fn vault_invite_lifecycle_on<S: StorageBackend + ?Sized>(storage: &S) {
             email: "INVITE-RECIPIENT@example.com".to_owned(),
             role: VaultRole::Editor,
             invited_by: Some(owner.id),
-            vault_key_wrapping: serde_json::json!({"wrapped": "vault-key"}),
+            vault_key_wrapping: serde_json::json!({
+                "version": 3,
+                "device_wrappings": [{
+                    "device_id": recipient_device.id.to_string(),
+                    "wrapping_type": "device_public_key",
+                    "key_generation": 1,
+                    "envelope": {"wrapped": "vault-key"}
+                }]
+            }),
             expires_at: None,
         })
         .await
@@ -1202,7 +1313,7 @@ async fn vault_invite_lifecycle_on<S: StorageBackend + ?Sized>(storage: &S) {
         .accept_vault_invite(AcceptVaultInvite {
             invite_id: invite.id,
             user_id: recipient.id,
-            device_id: None,
+            device_id: Some(recipient_device.id),
         })
         .await
         .unwrap();
@@ -1220,6 +1331,8 @@ async fn vault_invite_lifecycle_on<S: StorageBackend + ?Sized>(storage: &S) {
         wrappings[0].envelope,
         serde_json::json!({"wrapped": "vault-key"})
     );
+    assert_eq!(wrappings[0].device_id, Some(recipient_device.id));
+    assert_eq!(wrappings[0].wrapping_type, "device_public_key");
 
     let pending_after_accept = storage
         .list_pending_vault_invites_for_email("invite-recipient@example.com")
@@ -1231,10 +1344,40 @@ async fn vault_invite_lifecycle_on<S: StorageBackend + ?Sized>(storage: &S) {
         .accept_vault_invite(AcceptVaultInvite {
             invite_id: invite.id,
             user_id: recipient.id,
-            device_id: None,
+            device_id: Some(recipient_device.id),
         })
         .await;
     assert!(matches!(second_accept, Err(StorageError::NotFound)));
+
+    let legacy_invite = storage
+        .create_vault_invite(CreateVaultInvite {
+            id: None,
+            vault_id: vault.id,
+            org_id: None,
+            email: "invite-recipient@example.com".to_owned(),
+            role: VaultRole::Editor,
+            invited_by: Some(owner.id),
+            vault_key_wrapping: serde_json::json!({"wrapped": "legacy-user-key"}),
+            expires_at: None,
+        })
+        .await
+        .unwrap();
+    let legacy_accept = storage
+        .accept_vault_invite(AcceptVaultInvite {
+            invite_id: legacy_invite.id,
+            user_id: recipient.id,
+            device_id: Some(recipient_device.id),
+        })
+        .await;
+    assert!(matches!(legacy_accept, Err(StorageError::NotFound)));
+    assert!(
+        storage
+            .list_pending_vault_invites_for_email("invite-recipient@example.com")
+            .await
+            .unwrap()
+            .iter()
+            .any(|invite| invite.id == legacy_invite.id)
+    );
 }
 
 async fn sync_checkpoint_persistence_on<S: StorageBackend + ?Sized>(storage: &S) {
@@ -1256,6 +1399,7 @@ async fn sync_checkpoint_persistence_on<S: StorageBackend + ?Sized>(storage: &S)
             user_id: user.id,
             name: "checkpoint device".to_owned(),
             public_key: Some("checkpoint-device-public-key".to_owned()),
+            encryption_public_key: None,
             fingerprint: "SHA256:checkpoint".to_owned(),
             state: DeviceState::Trusted,
             approval_code_hash: None,

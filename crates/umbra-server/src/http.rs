@@ -14,6 +14,7 @@ use opaque_ke::{
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use tower_http::trace::TraceLayer;
 use umbra_core::{DeviceState, MemberState, OrgRole, VaultKind, VaultRole};
 use umbra_crypto::{AadV1, UserPublicKey, checkpoints::checkpoint_hash};
@@ -21,18 +22,19 @@ use umbra_migrations::MigrationStatus;
 use umbra_protocol::{
     AcceptInviteRequest, AddOrgMemberRequest, AddVaultMemberRequest, ApprovalLookupRequest,
     ApproveDeviceRequest, CreateItemRequest, CreateOrgRequest, CreateOrgVaultRequest,
-    CreateSyncCheckpointRequest, CreateVaultRequest, DeleteItemRequest, DeviceBootstrapResponse,
-    DeviceResponse, InviteMemberRequest, InviteResponse, ItemConflictResponse,
-    ItemRevisionResponse, OpaqueLoginFinishRequest, OpaqueLoginFinishResponse,
-    OpaqueLoginStartRequest, OpaqueLoginStartResponse, OpaqueRegisterFinishRequest,
-    OpaqueRegisterStartRequest, OpaqueRegisterStartResponse, OrgMemberResponse, OrgResponse,
-    PendingDeviceResponse, PendingDeviceSummary, PendingInviteResponse, RecoverTrustRequest,
-    RecoverTrustResponse, RecoveryChallengeStartRequest, RecoveryChallengeStartResponse,
-    RejectInviteRequest, ResolveItemConflictRequest, ResolveItemConflictResponse,
-    RotateVaultKeyRequest, RotationStatusResponse, SYNC_INTEGRITY_PROTOCOL_VERSION, SyncCheckpoint,
-    SyncRequest, SyncResponse, SyncStatusRequest, SyncStatusResponse, UpdateItemRequest,
-    UserLookupRequest, UserLookupResponse, VaultKeyWrappingResponse, VaultMemberResponse,
-    VaultResponse, VaultStatus, VaultSyncChanges,
+    CreateSyncCheckpointRequest, CreateVaultRequest, DEVICE_SCOPED_WRAPPING_PROTOCOL_VERSION,
+    DeleteItemRequest, DeviceBootstrapResponse, DeviceEncryptionKeyResponse, DeviceResponse,
+    InviteMemberRequest, InviteResponse, ItemConflictResponse, ItemRevisionResponse,
+    OpaqueLoginFinishRequest, OpaqueLoginFinishResponse, OpaqueLoginStartRequest,
+    OpaqueLoginStartResponse, OpaqueRegisterFinishRequest, OpaqueRegisterStartRequest,
+    OpaqueRegisterStartResponse, OrgMemberResponse, OrgResponse, PendingDeviceResponse,
+    PendingDeviceSummary, PendingInviteResponse, RecoverTrustRequest, RecoverTrustResponse,
+    RecoveryChallengeStartRequest, RecoveryChallengeStartResponse, RejectInviteRequest,
+    ResolveItemConflictRequest, ResolveItemConflictResponse, RotateVaultKeyRequest,
+    RotationStatusResponse, SyncCheckpoint, SyncRequest, SyncResponse, SyncStatusRequest,
+    SyncStatusResponse, UpdateItemRequest, UserLookupRequest, UserLookupResponse,
+    VaultKeyWrappingMetadata, VaultKeyWrappingResponse, VaultMemberResponse, VaultResponse,
+    VaultStatus, VaultSyncChanges,
 };
 use umbra_storage::{
     AcceptVaultInvite, AppendAuditLog, ApprovePendingDevice, CreateDevice, CreateEncryptedItem,
@@ -233,6 +235,7 @@ fn device_response(device: DeviceRecord) -> DeviceResponse {
         device_id: device.id,
         name: device.name,
         public_key: device.public_key,
+        encryption_public_key: device.encryption_public_key,
         fingerprint: device.fingerprint,
         state: device.state,
         created_at: device.created_at.to_rfc3339(),
@@ -328,6 +331,7 @@ async fn auth_register_finish(
             user_id: user.id,
             name: request.initial_device.name,
             public_key: Some(request.initial_device.public_key),
+            encryption_public_key: request.initial_device.encryption_public_key,
             fingerprint: request.initial_device.fingerprint,
             state: DeviceState::Trusted,
             approval_code_hash: None,
@@ -423,6 +427,7 @@ async fn auth_login_finish(
                 user_id: user.id,
                 name: pending_request.name,
                 public_key: Some(pending_request.public_key),
+                encryption_public_key: Some(pending_request.bootstrap_public_key.clone()),
                 fingerprint: pending_request.fingerprint,
                 state: DeviceState::Pending,
                 approval_code_hash: Some(hmac_secret(&state, "device-approval", &approval_code)),
@@ -559,6 +564,11 @@ async fn approve_device(
     if pending.id != device_id {
         return Err(ServerError::BadRequest("device id mismatch"));
     }
+    // Validate every routing claim before transitioning the pending device.
+    // The ciphertext remains opaque to the server.
+    for wrapping in &request.vault_key_wrappings {
+        validate_device_wrapping(&state, wrapping, user_id, device_id, true).await?;
+    }
     let approved = state
         .storage
         .approve_pending_device(ApprovePendingDevice {
@@ -566,6 +576,20 @@ async fn approve_device(
             bootstrap_bundle: request.bootstrap_bundle,
         })
         .await?;
+    for wrapping in request.vault_key_wrappings {
+        state
+            .storage
+            .create_vault_key_wrapping(CreateVaultKeyWrapping {
+                id: None,
+                vault_id: wrapping.vault_id,
+                user_id: wrapping.user_id,
+                device_id: Some(wrapping.device_id),
+                wrapping_type: wrapping.wrapping_type,
+                envelope: wrapping.envelope,
+                key_generation: wrapping.key_generation,
+            })
+            .await?;
+    }
     state
         .storage
         .append_audit_log(AppendAuditLog {
@@ -713,10 +737,12 @@ async fn lookup_user(
     ensure_protocol(request.protocol_version)?;
     authenticate_trusted_context(&state, &headers).await?;
     let user = state.storage.find_user_by_email(&request.email).await?;
+    let trusted_devices = encryption_devices_for_user(&state, user.id).await?;
     Ok(Json(UserLookupResponse {
         user_id: user.id,
         email: user.email,
         public_key: user.public_key,
+        trusted_devices,
     }))
 }
 
@@ -726,9 +752,8 @@ async fn create_org(
     Json(request): Json<CreateOrgRequest>,
 ) -> Result<Json<OrgResponse>, ServerError> {
     ensure_protocol(request.protocol_version)?;
-    let user_id = authenticate_trusted_context(&state, &headers)
-        .await?
-        .user_id;
+    let context = authenticate_trusted_context(&state, &headers).await?;
+    let user_id = context.user_id;
     let org = state
         .storage
         .create_org(CreateOrg {
@@ -830,7 +855,9 @@ async fn create_personal_vault(
     headers: HeaderMap,
     Json(request): Json<CreateVaultRequest>,
 ) -> Result<Json<VaultResponse>, ServerError> {
+    authenticate_trusted_context(&state, &headers).await?;
     ensure_protocol(request.protocol_version)?;
+    ensure_device_scoped_wrapping_protocol(request.protocol_version)?;
     create_vault_inner(
         state,
         headers,
@@ -849,7 +876,9 @@ async fn create_org_vault(
     Path(org_id): Path<Uuid>,
     Json(request): Json<CreateOrgVaultRequest>,
 ) -> Result<Json<VaultResponse>, ServerError> {
+    authenticate_trusted_context(&state, &headers).await?;
     ensure_protocol(request.protocol_version)?;
+    ensure_device_scoped_wrapping_protocol(request.protocol_version)?;
     create_vault_inner(
         state,
         headers,
@@ -871,9 +900,9 @@ async fn create_vault_inner(
     kind: VaultKind,
     initial_key_wrapping: Value,
 ) -> Result<Json<VaultResponse>, ServerError> {
-    let user_id = authenticate_trusted_context(&state, &headers)
-        .await?
-        .user_id;
+    let context = authenticate_trusted_context(&state, &headers).await?;
+    let user_id = context.user_id;
+    let device_id = context.device_id.ok_or(ServerError::Forbidden)?;
     if let Some(org_id) = org_id {
         ensure_org_vault_creator(&state, org_id, user_id).await?;
     }
@@ -903,8 +932,8 @@ async fn create_vault_inner(
             id: None,
             vault_id: vault.id,
             user_id,
-            device_id: None,
-            wrapping_type: "user_public_key".to_owned(),
+            device_id: Some(device_id),
+            wrapping_type: "device_public_key".to_owned(),
             envelope: initial_key_wrapping,
             key_generation: vault.current_key_generation,
         })
@@ -947,12 +976,28 @@ async fn add_vault_member(
     Path(vault_id): Path<Uuid>,
     Json(request): Json<AddVaultMemberRequest>,
 ) -> Result<Json<VaultMemberResponse>, ServerError> {
-    ensure_protocol(request.protocol_version)?;
     let user_id = authenticate_trusted_context(&state, &headers)
         .await?
         .user_id;
     ensure_vault_admin(&state, vault_id, user_id).await?;
+    ensure_protocol(request.protocol_version)?;
+    ensure_device_scoped_wrapping_protocol(request.protocol_version)?;
+    if request.vault_key_wrappings.is_empty() {
+        return Err(ServerError::BadRequest(
+            "device-scoped vault key wrappings are required",
+        ));
+    }
     let status = state.storage.rotation_status(vault_id).await?;
+    for wrapping in &request.vault_key_wrappings {
+        validate_new_member_wrapping(
+            &state,
+            wrapping,
+            vault_id,
+            request.user_id,
+            status.current_key_generation,
+        )
+        .await?;
+    }
     let member = state
         .storage
         .upsert_vault_member(UpsertVaultMember {
@@ -962,18 +1007,20 @@ async fn add_vault_member(
             state: MemberState::Active,
         })
         .await?;
-    state
-        .storage
-        .create_vault_key_wrapping(CreateVaultKeyWrapping {
-            id: None,
-            vault_id,
-            user_id: request.user_id,
-            device_id: None,
-            wrapping_type: "user_public_key".to_owned(),
-            envelope: request.vault_key_wrapping,
-            key_generation: status.current_key_generation,
-        })
-        .await?;
+    for wrapping in request.vault_key_wrappings {
+        state
+            .storage
+            .create_vault_key_wrapping(CreateVaultKeyWrapping {
+                id: None,
+                vault_id,
+                user_id: wrapping.user_id,
+                device_id: Some(wrapping.device_id),
+                wrapping_type: wrapping.wrapping_type,
+                envelope: wrapping.envelope,
+                key_generation: wrapping.key_generation,
+            })
+            .await?;
+    }
     Ok(Json(vault_member_response(&state, member).await?))
 }
 
@@ -983,18 +1030,35 @@ async fn create_vault_invite(
     Path(vault_id): Path<Uuid>,
     Json(request): Json<InviteMemberRequest>,
 ) -> Result<Json<InviteResponse>, ServerError> {
-    ensure_protocol(request.protocol_version)?;
-    if request.vault_id != vault_id {
-        return Err(ServerError::BadRequest("vault id mismatch"));
-    }
-
     let user_id = authenticate_trusted_context(&state, &headers)
         .await?
         .user_id;
     ensure_vault_admin(&state, vault_id, user_id).await?;
+    ensure_protocol(request.protocol_version)?;
+    ensure_device_scoped_wrapping_protocol(request.protocol_version)?;
+    if request.vault_key_wrappings.is_empty() {
+        return Err(ServerError::BadRequest(
+            "device-scoped vault key wrappings are required",
+        ));
+    }
+    if request.vault_id != vault_id {
+        return Err(ServerError::BadRequest("vault id mismatch"));
+    }
     let vault = state.storage.find_vault_by_id(vault_id).await?;
     let email = request.email.to_ascii_lowercase();
-    state.storage.find_user_by_email(&email).await?;
+    let invited = state.storage.find_user_by_email(&email).await?;
+    let status = state.storage.rotation_status(vault_id).await?;
+    for wrapping in &request.vault_key_wrappings {
+        validate_new_member_wrapping(
+            &state,
+            wrapping,
+            vault_id,
+            invited.id,
+            status.current_key_generation,
+        )
+        .await?;
+    }
+    let vault_key_wrapping = json!({"version": 3, "device_wrappings": request.vault_key_wrappings});
 
     let invite = state
         .storage
@@ -1005,7 +1069,7 @@ async fn create_vault_invite(
             email,
             role: request.role,
             invited_by: Some(user_id),
-            vault_key_wrapping: request.vault_key_wrapping,
+            vault_key_wrapping,
             expires_at: Some(Utc::now() + Duration::days(7)),
         })
         .await?;
@@ -1404,7 +1468,7 @@ async fn sync(
 ) -> Result<Json<SyncResponse>, ServerError> {
     ensure_protocol(request.protocol_version)?;
     let context = authenticate_trusted_context(&state, &headers).await?;
-    if request.protocol_version == SYNC_INTEGRITY_PROTOCOL_VERSION
+    if umbra_protocol::is_sync_integrity_protocol_version(request.protocol_version)
         && context.device_id != Some(request.device_id)
     {
         return Err(ServerError::BadRequest("sync device id mismatch"));
@@ -1424,13 +1488,32 @@ async fn sync(
             .into_iter()
             .map(item_revision_response)
             .collect();
-        let key_wrappings = state
-            .storage
-            .list_key_wrappings_for_user_vault(user_id, cursor.vault_id)
-            .await?
-            .into_iter()
-            .map(vault_key_wrapping_response)
-            .collect();
+        let key_wrappings = if request.protocol_version >= 3 {
+            let device_id = context.device_id.ok_or(ServerError::Forbidden)?;
+            state
+                .storage
+                .list_key_wrappings_for_device_vault(user_id, device_id, cursor.vault_id)
+                .await?
+        } else {
+            state
+                .storage
+                .list_key_wrappings_for_user_vault(user_id, cursor.vault_id)
+                .await?
+        }
+        .into_iter()
+        .map(vault_key_wrapping_response)
+        .collect();
+        let key_wrapping_metadata = if request.protocol_version >= 3 {
+            state
+                .storage
+                .list_active_key_wrappings_for_vault(cursor.vault_id)
+                .await?
+                .into_iter()
+                .map(vault_key_wrapping_metadata)
+                .collect()
+        } else {
+            Vec::new()
+        };
         let deleted_items = state
             .storage
             .list_deleted_item_ids_since(cursor.vault_id, cursor.since_vault_revision)
@@ -1446,7 +1529,7 @@ async fn sync(
             .map(item_conflict_response)
             .collect();
 
-        if request.protocol_version == SYNC_INTEGRITY_PROTOCOL_VERSION {
+        if umbra_protocol::is_sync_integrity_protocol_version(request.protocol_version) {
             checkpoints.extend(
                 state
                     .storage
@@ -1464,6 +1547,7 @@ async fn sync(
             items,
             deleted_items,
             key_wrappings,
+            key_wrapping_metadata,
             conflicts,
         });
     }
@@ -1533,12 +1617,16 @@ async fn rotate_key(
     Path(vault_id): Path<Uuid>,
     Json(request): Json<RotateVaultKeyRequest>,
 ) -> Result<Json<RotationStatusResponse>, ServerError> {
-    ensure_protocol(request.protocol_version)?;
     let user_id = authenticate_trusted_context(&state, &headers)
         .await?
         .user_id;
     ensure_vault_admin(&state, vault_id, user_id).await?;
+    ensure_protocol(request.protocol_version)?;
     let to_generation = request.to_generation;
+    for wrapping in &request.new_wrappings {
+        validate_rotation_wrapping(&state, wrapping, vault_id, to_generation).await?;
+    }
+    validate_complete_rotation_wrapping_set(&state, vault_id, &request.new_wrappings).await?;
     let status = state
         .storage
         .finish_vault_key_rotation(FinishVaultKeyRotation {
@@ -1616,13 +1704,191 @@ async fn vault_member_response(
     member: umbra_storage::VaultMemberRecord,
 ) -> Result<VaultMemberResponse, ServerError> {
     let user = state.storage.find_user_by_id(member.user_id).await?;
+    let encryption_devices = encryption_devices_for_user(state, member.user_id).await?;
     Ok(VaultMemberResponse {
         vault_id: member.vault_id,
         user_id: member.user_id,
         role: member.role,
         state: member.state,
         public_key: user.public_key,
+        encryption_devices,
     })
+}
+
+/// Expose only keys eligible for future envelope delivery. Pending and revoked
+/// devices deliberately never cross this protocol boundary.
+async fn encryption_devices_for_user(
+    state: &AppState,
+    user_id: Uuid,
+) -> Result<Vec<DeviceEncryptionKeyResponse>, ServerError> {
+    Ok(state
+        .storage
+        .list_devices_for_user(user_id)
+        .await?
+        .into_iter()
+        .filter(|device| device.state == DeviceState::Trusted && device.revoked_at.is_none())
+        .filter_map(|device| {
+            device
+                .encryption_public_key
+                .map(|encryption_public_key| DeviceEncryptionKeyResponse {
+                    device_id: device.id,
+                    encryption_public_key,
+                })
+        })
+        .collect())
+}
+
+/// Authorize envelope routing metadata without inspecting ciphertext.  A
+/// device-targeted envelope can only be written for an active vault member's
+/// trusted device and its current key generation. During approval the target
+/// is still pending, but must be exactly the device transitioned by this
+/// request; all other deliveries require an already trusted target.
+async fn validate_device_wrapping(
+    state: &AppState,
+    wrapping: &umbra_protocol::DeviceVaultKeyWrappingRequest,
+    expected_user_id: Uuid,
+    expected_device_id: Uuid,
+    allow_pending_target: bool,
+) -> Result<(), ServerError> {
+    if wrapping.user_id != expected_user_id
+        || wrapping.device_id != expected_device_id
+        || wrapping.wrapping_type != "device_public_key"
+    {
+        return Err(ServerError::Forbidden);
+    }
+    let device = state.storage.find_device_by_id(wrapping.device_id).await?;
+    let allowed_state = device.state == DeviceState::Trusted
+        || (allow_pending_target && device.state == DeviceState::Pending);
+    if device.user_id != wrapping.user_id
+        || !allowed_state
+        || device.revoked_at.is_some()
+        || device.encryption_public_key.is_none()
+    {
+        return Err(ServerError::Forbidden);
+    }
+    if !state
+        .storage
+        .has_active_vault_membership(wrapping.vault_id, wrapping.user_id)
+        .await?
+    {
+        return Err(ServerError::Forbidden);
+    }
+    let status = state.storage.rotation_status(wrapping.vault_id).await?;
+    if wrapping.key_generation != status.current_key_generation {
+        return Err(ServerError::BadRequest("wrapping key generation mismatch"));
+    }
+    Ok(())
+}
+
+async fn validate_new_member_wrapping(
+    state: &AppState,
+    wrapping: &umbra_protocol::DeviceVaultKeyWrappingRequest,
+    vault_id: Uuid,
+    user_id: Uuid,
+    key_generation: i64,
+) -> Result<(), ServerError> {
+    if wrapping.vault_id != vault_id
+        || wrapping.user_id != user_id
+        || wrapping.wrapping_type != "device_public_key"
+        || wrapping.key_generation != key_generation
+    {
+        return Err(ServerError::BadRequest("invalid device wrapping metadata"));
+    }
+    let device = state.storage.find_device_by_id(wrapping.device_id).await?;
+    if device.user_id != user_id
+        || device.state != DeviceState::Trusted
+        || device.revoked_at.is_some()
+        || device.encryption_public_key.is_none()
+    {
+        return Err(ServerError::Forbidden);
+    }
+    Ok(())
+}
+
+async fn validate_rotation_wrapping(
+    state: &AppState,
+    wrapping: &umbra_protocol::RotationVaultKeyWrapping,
+    vault_id: Uuid,
+    to_generation: i64,
+) -> Result<(), ServerError> {
+    let Some(device_id) = wrapping.device_id else {
+        return Err(ServerError::BadRequest(
+            "device-scoped wrapping requires device id",
+        ));
+    };
+    if wrapping.wrapping_type != "device_public_key" {
+        return Err(ServerError::BadRequest(
+            "device-scoped wrapping requires device public key",
+        ));
+    }
+    let device = state.storage.find_device_by_id(device_id).await?;
+    if device.user_id != wrapping.user_id
+        || device.state != DeviceState::Trusted
+        || device.revoked_at.is_some()
+        || device.encryption_public_key.is_none()
+        || !state
+            .storage
+            .has_active_vault_membership(vault_id, wrapping.user_id)
+            .await?
+    {
+        return Err(ServerError::Forbidden);
+    }
+    // `to_generation` is deliberately accepted here rather than the current
+    // generation: these envelopes are written as the rotation transaction.
+    let _ = to_generation;
+    Ok(())
+}
+
+/// A rotation is all-or-nothing for the currently entitled device set.  The
+/// server compares only public routing metadata, never envelope contents.
+async fn validate_complete_rotation_wrapping_set(
+    state: &AppState,
+    vault_id: Uuid,
+    wrappings: &[umbra_protocol::RotationVaultKeyWrapping],
+) -> Result<(), ServerError> {
+    if wrappings.is_empty() {
+        return Err(ServerError::BadRequest(
+            "rotation requires device-scoped vault key wrappings",
+        ));
+    }
+
+    let mut delivered = HashSet::with_capacity(wrappings.len());
+    for wrapping in wrappings {
+        let device_id = wrapping.device_id.ok_or(ServerError::BadRequest(
+            "device-scoped wrapping requires device id",
+        ))?;
+        if !delivered.insert(device_id) {
+            return Err(ServerError::BadRequest("duplicate rotation device id"));
+        }
+    }
+
+    let mut expected = HashSet::new();
+    for member in state.storage.list_vault_members(vault_id).await? {
+        if member.state != MemberState::Active {
+            continue;
+        }
+        for device in state.storage.list_devices_for_user(member.user_id).await? {
+            if device.state == DeviceState::Trusted && device.revoked_at.is_none() {
+                expected.insert(device.id);
+            }
+        }
+    }
+    if expected.is_empty() || delivered != expected {
+        return Err(ServerError::BadRequest(
+            "rotation device set does not match active trusted devices",
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_device_scoped_wrapping_protocol(version: u16) -> Result<(), ServerError> {
+    if version == DEVICE_SCOPED_WRAPPING_PROTOCOL_VERSION {
+        Ok(())
+    } else {
+        Err(ServerError::BadRequest(
+            "device-scoped vault key wrapping requires protocol version 3",
+        ))
+    }
 }
 
 fn invite_response(invite: umbra_storage::VaultInviteRecord) -> InviteResponse {
@@ -1690,5 +1956,23 @@ fn vault_key_wrapping_response(
         wrapping_type: wrapping.wrapping_type,
         envelope: wrapping.envelope,
         key_generation: wrapping.key_generation,
+    }
+}
+
+fn vault_key_wrapping_metadata(
+    wrapping: umbra_storage::VaultKeyWrappingRecord,
+) -> VaultKeyWrappingMetadata {
+    // Other devices receive only this commitment-safe view; the ciphertext is
+    // never copied into their sync response or local cache.
+    let envelope_bytes = serde_json::to_vec(&wrapping.envelope)
+        .expect("vault key wrapping envelopes are JSON values");
+    VaultKeyWrappingMetadata {
+        id: wrapping.id,
+        vault_id: wrapping.vault_id,
+        user_id: wrapping.user_id,
+        device_id: wrapping.device_id,
+        wrapping_type: wrapping.wrapping_type,
+        key_generation: wrapping.key_generation,
+        envelope_hash: encode_b64(&Sha256::digest(envelope_bytes)),
     }
 }

@@ -140,7 +140,7 @@ umbra conflict resolve <conflict-id> --merge-from remote --field username=alice 
 
 `vault create` stores the first created vault as the profile default. `--vault Personal` resolves a vault name from the local cache populated by `umbra vault list` or `umbra vault create`. If a name is ambiguous, pass `--vault-id`.
 
-`umbra unlock` decrypts the account private key once, unwraps selected vault keys from the local encrypted-envelope cache, and writes an encrypted local unlock state. The random key for that unlock state is stored in the OS keychain. `umbra lock` removes both the keychain entry and the encrypted unlock state file.
+`umbra unlock` decrypts the account private key once, unwraps selected vault keys from the local encrypted-envelope cache with the profile's device encryption private key, and writes an encrypted local unlock state. The random key for that unlock state is stored in the OS keychain. `umbra lock` removes both the keychain entry and the encrypted unlock state file.
 
 The CLI uses signed HTTP sessions by default after `umbra login`. Normal CLI requests do not send a reusable bearer token. The server still stores only encrypted envelopes. The `--envelope-json` item escape hatch remains available for low-level protocol testing.
 
@@ -169,6 +169,16 @@ umbra login --profile laptop-2
 ```
 
 `device approve` encrypts a bootstrap bundle locally for the pending device. The server stores that encrypted bundle but cannot decrypt the user secret key, account private key, vault keys, or item data.
+
+### Device-scoped vault envelopes (protocol v3)
+
+Protocol v3 introduces a distinct X25519 encryption keypair for each device. The private half is generated and retained only in that device profile; the server stores the public half as non-secret device metadata. A newly created vault stores its initial `device_public_key` wrapping for the authenticated device, and protocol-v3 sync returns only wrappings addressed to the authenticated trusted device. The wrapping AAD binds the vault ID, recipient device ID, and key generation, so an envelope copied between devices or generations cannot be used to unlock a vault.
+
+This migration is deliberately fail-closed for unlock and cache selection: a client must find a `device_public_key` wrapping for its own device and generation. It does not fall back to the account private key or to a legacy user-scoped wrapping. A legacy vault therefore requires distribution of a device-scoped envelope by a trusted device before a newly enrolled device can unlock it.
+
+The server remains zero-knowledge: it authorizes device state and membership and persists opaque JSON envelopes, but never decrypts, rewraps, logs, or audits vault keys, device private keys, or raw envelope bodies. The server-side filtering cannot erase material a revoked device already downloaded or decrypted. Revoke a lost/compromised device immediately, then rotate every affected vault key and the real secrets that device may have seen.
+
+Protocol v3 distributes approval, invite/member, and rotation material as one envelope per intended trusted device. Sync returns a device only its own ciphertext, plus redacted routing metadata and envelope hashes for all active recipients so every device can verify the same checkpoint commitment. Pending and revoked devices receive neither a ciphertext nor new routing metadata. See [operations guidance](docs/operations.md) and [the verification matrix](docs/device-scoped-vault-wrapping-tests.md).
 
 Useful device commands:
 
@@ -212,7 +222,7 @@ umbra invite list
 umbra invite accept <invite-id>
 ```
 
-`vault invite` resolves the target user's account public key, unwraps the vault key locally, wraps the vault key to that public key, and sends only the encrypted wrapping to the server inside a pending invite. The server never receives the vault key in plaintext. When the recipient runs `invite accept`, the server activates the membership and stores that already-encrypted wrapping for future sync.
+Current invite and direct-member flows use account-public-key wrappings. They remain legacy paths during the device-envelope migration and must not be relied on to provision a new device under protocol v3. The completed migration will have the inviting client create one opaque wrapping for each trusted device of the recipient; the server will authorize and store the records without receiving a vault key in plaintext.
 
 Removing a vault member stops future sync for that user and revokes their active wrapping, but it does not erase secrets already seen. Rotate the vault key and real third-party secrets after sensitive removals.
 
@@ -226,7 +236,7 @@ umbra crypto rotate-vault-key --vault Platform --dry-run
 umbra crypto rotate-vault-key --vault Platform --yes
 ```
 
-The CLI downloads the latest encrypted item revisions, unlocks the current vault key locally, generates a fresh vault key, reencrypts each latest item revision, wraps the new vault key for every active vault member public key, and uploads only encrypted envelopes to the server.
+The CLI downloads the latest encrypted item revisions, unlocks the current vault key locally, generates a fresh vault key, reencrypts each latest item revision, and uploads only encrypted envelopes to the server. Legacy rotation wraps to active member account public keys. The device-scoped rollout must replace this with exactly one wrapping per active recipient device; until then, rotate after revocation/removal as a defense-in-depth response but do not claim that rotation has excluded every previously provisioned device under v3.
 
 After removing a member, also rotate any real external credential the removed member may have seen, such as GitHub tokens, API keys, SSH keys, or database passwords. Vault key rotation prevents future Umbra sync access; it cannot erase knowledge already copied.
 

@@ -96,6 +96,8 @@ impl SqliteStorage {
         .await?
         .ok_or(StorageError::NotFound)?;
         let invite = vault_invite_from_row(invite_row)?;
+        let (wrapping_type, envelope, key_generation, device_id) =
+            invite_device_wrapping(&invite.vault_key_wrapping, input.device_id)?;
 
         let member_row = sqlx::query(
             r#"
@@ -121,16 +123,17 @@ impl SqliteStorage {
                 id, vault_id, user_id, device_id, wrapping_type, envelope, key_generation
             )
             VALUES (
-                ?1, ?2, ?3, ?4, 'user_public_key', ?5,
-                (SELECT current_key_generation FROM vaults WHERE id = ?2)
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7
             )
             "#,
         )
         .bind(Uuid::new_v4().to_string())
         .bind(invite.vault_id.to_string())
         .bind(input.user_id.to_string())
-        .bind(input.device_id.map(|id| id.to_string()))
-        .bind(invite.vault_key_wrapping.to_string())
+        .bind(device_id.map(|id| id.to_string()))
+        .bind(wrapping_type)
+        .bind(envelope.to_string())
+        .bind(key_generation)
         .execute(&mut *tx)
         .await?;
 
@@ -170,6 +173,41 @@ impl SqliteStorage {
 
         vault_invite_from_row(row)
     }
+}
+
+fn invite_device_wrapping(
+    value: &serde_json::Value,
+    device_id: Option<Uuid>,
+) -> Result<(String, serde_json::Value, i64, Option<Uuid>), StorageError> {
+    let Some(entries) = value.get("device_wrappings").and_then(|v| v.as_array()) else {
+        // User-scoped invite envelopes cannot be safely assigned to a single
+        // trusted device. Leave the legacy invite pending for explicit
+        // re-issuance instead of silently recreating a user-key wrapping.
+        return Err(StorageError::NotFound);
+    };
+    let device_id = device_id.ok_or(StorageError::NotFound)?;
+    let entry = entries
+        .iter()
+        .find(|entry| {
+            entry.get("device_id").and_then(|id| id.as_str()) == Some(&device_id.to_string())
+        })
+        .ok_or(StorageError::NotFound)?;
+    Ok((
+        entry
+            .get("wrapping_type")
+            .and_then(|v| v.as_str())
+            .ok_or(StorageError::NotFound)?
+            .to_owned(),
+        entry
+            .get("envelope")
+            .cloned()
+            .ok_or(StorageError::NotFound)?,
+        entry
+            .get("key_generation")
+            .and_then(|v| v.as_i64())
+            .ok_or(StorageError::NotFound)?,
+        Some(device_id),
+    ))
 }
 
 fn vault_invite_from_row(row: sqlx::sqlite::SqliteRow) -> Result<VaultInviteRecord, StorageError> {

@@ -2,7 +2,7 @@ use umbra_core::{DeviceId, DeviceState, UserId};
 use uuid::Uuid;
 
 use crate::convert::device_state_to_str;
-use crate::error::{ensure_rows_affected, map_sqlx_error};
+use crate::error::map_sqlx_error;
 use crate::sqlite::SqliteStorage;
 use crate::sqlite::convert::{device_from_row, recovery_challenge_from_row};
 use crate::{
@@ -10,7 +10,7 @@ use crate::{
     RecoveryChallengeRecord, StorageError,
 };
 
-const DEVICE_COLUMNS: &str = "id, user_id, name, public_key, fingerprint, state, approval_code_hash, approval_expires_at, bootstrap_public_key, bootstrap_bundle, created_at, trusted_at, last_seen_at, revoked_at";
+const DEVICE_COLUMNS: &str = "id, user_id, name, public_key, encryption_public_key, fingerprint, state, approval_code_hash, approval_expires_at, bootstrap_public_key, bootstrap_bundle, created_at, trusted_at, last_seen_at, revoked_at";
 
 impl SqliteStorage {
     pub async fn create_device(&self, input: CreateDevice) -> Result<DeviceRecord, StorageError> {
@@ -19,11 +19,11 @@ impl SqliteStorage {
         let row = sqlx::query(&format!(
             r#"
             INSERT INTO devices (
-                id, user_id, name, public_key, fingerprint, trusted, state,
+                id, user_id, name, public_key, encryption_public_key, fingerprint, trusted, state,
                 approval_code_hash, approval_expires_at, bootstrap_public_key, trusted_at
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
-                    CASE WHEN ?7 = 'trusted' THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now') ELSE NULL END)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
+                    CASE WHEN ?8 = 'trusted' THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now') ELSE NULL END)
             RETURNING {DEVICE_COLUMNS}
             "#
         ))
@@ -31,6 +31,7 @@ impl SqliteStorage {
         .bind(input.user_id.to_string())
         .bind(input.name)
         .bind(input.public_key)
+        .bind(input.encryption_public_key)
         .bind(input.fingerprint)
         .bind(matches!(input.state, DeviceState::Trusted) as i64)
         .bind(state)
@@ -180,20 +181,41 @@ impl SqliteStorage {
     }
 
     pub async fn revoke_device(&self, device_id: DeviceId) -> Result<(), StorageError> {
-        let result = sqlx::query(
+        let mut tx = self.pool.begin().await?;
+        let user_id: Option<String> = sqlx::query_scalar(
             r#"
             UPDATE devices
             SET state = 'revoked',
                 trusted = 0,
                 revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
             WHERE id = ?1
+            RETURNING user_id
             "#,
         )
         .bind(device_id.to_string())
-        .execute(&self.pool)
+        .fetch_optional(&mut *tx)
         .await?;
+        let user_id = user_id.ok_or(StorageError::NotFound)?;
 
-        ensure_rows_affected(result.rows_affected())
+        sqlx::query(
+            r#"
+            UPDATE vaults
+            SET needs_key_rotation = 1,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+            WHERE EXISTS (
+                SELECT 1
+                FROM vault_members vm
+                WHERE vm.vault_id = vaults.id
+                  AND vm.user_id = ?1
+                  AND vm.state = 'active'
+            )
+            "#,
+        )
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
     }
 
     pub async fn create_recovery_challenge(

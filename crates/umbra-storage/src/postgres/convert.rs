@@ -36,6 +36,7 @@ pub(crate) fn device_from_row(row: sqlx::postgres::PgRow) -> Result<DeviceRecord
         user_id: row.try_get("user_id")?,
         name: row.try_get("name")?,
         public_key: row.try_get("public_key")?,
+        encryption_public_key: row.try_get("encryption_public_key")?,
         fingerprint: row.try_get("fingerprint")?,
         state: str_to_device_state(&state)?,
         approval_code_hash: row.try_get("approval_code_hash")?,

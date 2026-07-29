@@ -143,6 +143,10 @@ impl UserPrivateKey {
         encode_b64(&self.0)
     }
 
+    pub fn public_key(&self) -> UserPublicKey {
+        UserPublicKey(PublicKey::from(&self.static_secret()).to_bytes())
+    }
+
     pub fn from_base64url(encoded: &str) -> Result<Self, CryptoError> {
         Ok(Self(decode_array(encoded)?))
     }
@@ -388,6 +392,22 @@ impl AadV1 {
             vault_id: vault_id.into(),
             item_id: None,
             revision: None,
+            kind: None,
+        }
+    }
+
+    pub fn device_vault_key_wrapping(
+        vault_id: impl Into<String>,
+        device_id: impl Into<String>,
+        generation: i64,
+    ) -> Self {
+        Self {
+            app: "umbra".to_owned(),
+            purpose: "device_vault_key_wrapping".to_owned(),
+            schema: 1,
+            vault_id: vault_id.into(),
+            item_id: Some(device_id.into()),
+            revision: Some(generation),
             kind: None,
         }
     }
@@ -1147,6 +1167,24 @@ mod tests {
         let unwrapped = unwrap_vault_key(&keypair.private_key, &aad, &envelope).unwrap();
 
         assert_eq!(unwrapped, vault_key);
+    }
+
+    #[test]
+    fn device_wrapping_aad_binds_device_and_generation() {
+        assert_ne!(
+            AadV1::device_vault_key_wrapping("vault", "device-a", 1),
+            AadV1::device_vault_key_wrapping("vault", "device-b", 1)
+        );
+        assert_ne!(
+            AadV1::device_vault_key_wrapping("vault", "device-a", 1),
+            AadV1::device_vault_key_wrapping("vault", "device-a", 2)
+        );
+    }
+
+    #[test]
+    fn device_private_key_derives_its_registered_public_key() {
+        let keypair = generate_user_keypair();
+        assert_eq!(keypair.private_key.public_key(), keypair.public_key);
     }
 
     #[test]

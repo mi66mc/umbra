@@ -10,6 +10,27 @@ All API requests use explicit protocol versioning.
 
 An HTTP header such as `Umbra-Protocol-Version: 1` may also be supported later, but body-level versioning is the initial contract.
 
+## Protocol v3: device-scoped vault-key wrapping
+
+Version 3 is supported alongside versions 1 and 2. It introduces a non-secret `encryption_public_key` on a device and uses `device_public_key` wrappings addressed to `device_id`. The matching X25519 private key is client-only. Initial v3 vault creation stores a wrapping for the authenticated trusted device; a v3 sync response filters wrapping records to the authenticated trusted device and the requested vault.
+
+The opaque wrapping record includes only routing metadata plus the encrypted envelope:
+
+```json
+{
+  "vault_id": "<uuid>",
+  "user_id": "<uuid>",
+  "device_id": "<uuid>",
+  "wrapping_type": "device_public_key",
+  "key_generation": 1,
+  "envelope": { "version": 1, "wrapping": { "method": "device_public_key" } }
+}
+```
+
+The server treats `envelope` as opaque JSON. It authorizes the caller and recipient device state but must not decrypt, normalize, log, audit, or include raw envelope bytes in checkpoint/integrity evidence. Clients bind encryption/decryption to domain-separated AAD containing the vault ID, recipient device ID, and key generation. They must reject an absent, wrong-device, wrong-generation, or non-`device_public_key` wrapping rather than using an account-key fallback.
+
+Version 3 requires recipient-device routing for approved-device bootstrap, invite/member grants, and rotation. The server rejects absent, duplicate, inactive, pending, revoked, or incomplete recipients. Sync carries only the authenticated device's opaque envelope and separately carries sorted recipient-device metadata plus a SHA-256 hash of each opaque envelope. Checkpoints are supported in v3 and commit this metadata/hash set, enabling equal integrity verification on devices with different ciphertext visibility.
+
 ## Initial Endpoints
 
 ```txt

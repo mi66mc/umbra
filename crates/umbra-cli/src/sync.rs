@@ -5,9 +5,9 @@ use crate::http::UmbraHttpClient;
 use serde::Serialize;
 use umbra_core::{RevisionId, VaultId};
 use umbra_protocol::{
-    CreateSyncCheckpointRequest, SYNC_INTEGRITY_PROTOCOL_VERSION, SyncCheckpoint, SyncRequest,
-    SyncResponse, SyncStatusRequest, SyncStatusResponse, VaultStatus, VaultStatusCursor,
-    VaultSyncChanges, VaultSyncCursor,
+    CreateSyncCheckpointRequest, DEVICE_SCOPED_WRAPPING_PROTOCOL_VERSION, SyncCheckpoint,
+    SyncRequest, SyncResponse, SyncStatusRequest, SyncStatusResponse, VaultStatus,
+    VaultStatusCursor, VaultSyncChanges, VaultSyncCursor,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -69,7 +69,7 @@ pub async fn ensure_vault_synced(
                 .post(
                     "/api/v1/sync/status",
                     &SyncStatusRequest {
-                        protocol_version: SYNC_INTEGRITY_PROTOCOL_VERSION,
+                        protocol_version: DEVICE_SCOPED_WRAPPING_PROTOCOL_VERSION,
                         vaults: vec![VaultStatusCursor {
                             vault_id,
                             known_vault_revision: integrity_cursor_revision,
@@ -78,7 +78,7 @@ pub async fn ensure_vault_synced(
                     },
                 )
                 .await?;
-            if response.protocol_version != SYNC_INTEGRITY_PROTOCOL_VERSION {
+            if response.protocol_version != DEVICE_SCOPED_WRAPPING_PROTOCOL_VERSION {
                 cache.quarantine_transport_failure(
                     vault_id,
                     integrity_cursor_revision,
@@ -146,7 +146,7 @@ async fn sync_vault(
         .post(
             "/api/v1/sync",
             &SyncRequest {
-                protocol_version: SYNC_INTEGRITY_PROTOCOL_VERSION,
+                protocol_version: DEVICE_SCOPED_WRAPPING_PROTOCOL_VERSION,
                 device_id,
                 vaults: vec![VaultSyncCursor {
                     vault_id,
@@ -156,7 +156,7 @@ async fn sync_vault(
         )
         .await?;
 
-    if response.protocol_version != SYNC_INTEGRITY_PROTOCOL_VERSION {
+    if response.protocol_version != DEVICE_SCOPED_WRAPPING_PROTOCOL_VERSION {
         cache.quarantine_transport_failure(
             vault_id,
             since_vault_revision,
@@ -226,7 +226,7 @@ pub async fn publish_checkpoint_after_mutation(
         .post(
             "/api/v1/sync",
             &SyncRequest {
-                protocol_version: SYNC_INTEGRITY_PROTOCOL_VERSION,
+                protocol_version: DEVICE_SCOPED_WRAPPING_PROTOCOL_VERSION,
                 device_id,
                 vaults: vec![VaultSyncCursor {
                     vault_id,
@@ -235,7 +235,7 @@ pub async fn publish_checkpoint_after_mutation(
             },
         )
         .await?;
-    if response.protocol_version != SYNC_INTEGRITY_PROTOCOL_VERSION {
+    if response.protocol_version != DEVICE_SCOPED_WRAPPING_PROTOCOL_VERSION {
         cache.quarantine_transport_failure(
             vault_id,
             since_vault_revision,
@@ -302,7 +302,7 @@ async fn apply_or_publish_checkpoint(
         .post(
             &format!("/api/v1/vaults/{}/checkpoints", changes.vault_id),
             &CreateSyncCheckpointRequest {
-                protocol_version: SYNC_INTEGRITY_PROTOCOL_VERSION,
+                protocol_version: DEVICE_SCOPED_WRAPPING_PROTOCOL_VERSION,
                 checkpoint: candidate.clone(),
             },
         )
