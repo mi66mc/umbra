@@ -855,6 +855,7 @@ async fn create_personal_vault(
     headers: HeaderMap,
     Json(request): Json<CreateVaultRequest>,
 ) -> Result<Json<VaultResponse>, ServerError> {
+    authenticate_trusted_context(&state, &headers).await?;
     ensure_protocol(request.protocol_version)?;
     ensure_device_scoped_wrapping_protocol(request.protocol_version)?;
     create_vault_inner(
@@ -875,6 +876,7 @@ async fn create_org_vault(
     Path(org_id): Path<Uuid>,
     Json(request): Json<CreateOrgVaultRequest>,
 ) -> Result<Json<VaultResponse>, ServerError> {
+    authenticate_trusted_context(&state, &headers).await?;
     ensure_protocol(request.protocol_version)?;
     ensure_device_scoped_wrapping_protocol(request.protocol_version)?;
     create_vault_inner(
@@ -974,6 +976,10 @@ async fn add_vault_member(
     Path(vault_id): Path<Uuid>,
     Json(request): Json<AddVaultMemberRequest>,
 ) -> Result<Json<VaultMemberResponse>, ServerError> {
+    let user_id = authenticate_trusted_context(&state, &headers)
+        .await?
+        .user_id;
+    ensure_vault_admin(&state, vault_id, user_id).await?;
     ensure_protocol(request.protocol_version)?;
     ensure_device_scoped_wrapping_protocol(request.protocol_version)?;
     if request.vault_key_wrappings.is_empty() {
@@ -981,10 +987,6 @@ async fn add_vault_member(
             "device-scoped vault key wrappings are required",
         ));
     }
-    let user_id = authenticate_trusted_context(&state, &headers)
-        .await?
-        .user_id;
-    ensure_vault_admin(&state, vault_id, user_id).await?;
     let status = state.storage.rotation_status(vault_id).await?;
     for wrapping in &request.vault_key_wrappings {
         validate_new_member_wrapping(
@@ -1028,6 +1030,10 @@ async fn create_vault_invite(
     Path(vault_id): Path<Uuid>,
     Json(request): Json<InviteMemberRequest>,
 ) -> Result<Json<InviteResponse>, ServerError> {
+    let user_id = authenticate_trusted_context(&state, &headers)
+        .await?
+        .user_id;
+    ensure_vault_admin(&state, vault_id, user_id).await?;
     ensure_protocol(request.protocol_version)?;
     ensure_device_scoped_wrapping_protocol(request.protocol_version)?;
     if request.vault_key_wrappings.is_empty() {
@@ -1038,11 +1044,6 @@ async fn create_vault_invite(
     if request.vault_id != vault_id {
         return Err(ServerError::BadRequest("vault id mismatch"));
     }
-
-    let user_id = authenticate_trusted_context(&state, &headers)
-        .await?
-        .user_id;
-    ensure_vault_admin(&state, vault_id, user_id).await?;
     let vault = state.storage.find_vault_by_id(vault_id).await?;
     let email = request.email.to_ascii_lowercase();
     let invited = state.storage.find_user_by_email(&email).await?;
@@ -1616,11 +1617,11 @@ async fn rotate_key(
     Path(vault_id): Path<Uuid>,
     Json(request): Json<RotateVaultKeyRequest>,
 ) -> Result<Json<RotationStatusResponse>, ServerError> {
-    ensure_protocol(request.protocol_version)?;
     let user_id = authenticate_trusted_context(&state, &headers)
         .await?
         .user_id;
     ensure_vault_admin(&state, vault_id, user_id).await?;
+    ensure_protocol(request.protocol_version)?;
     let to_generation = request.to_generation;
     for wrapping in &request.new_wrappings {
         validate_rotation_wrapping(&state, wrapping, vault_id, to_generation).await?;

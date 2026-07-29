@@ -24,18 +24,18 @@ use umbra_core::{DeviceState, VaultKind, VaultRole};
 use umbra_protocol::{
     AcceptInviteRequest, AddVaultMemberRequest, ApprovalLookupRequest, ApproveDeviceRequest,
     CreateItemRequest, CreateOrgRequest, CreateSyncCheckpointRequest, CreateVaultRequest,
-    DeleteItemRequest, DeviceBootstrapResponse, DeviceRegisterRequest, DeviceResponse,
-    DeviceVaultKeyWrappingRequest, InviteMemberRequest, InviteResponse, ItemConflictResponse,
-    ItemRevisionResponse, OpaqueLoginFinishRequest, OpaqueLoginFinishResponse,
-    OpaqueLoginStartRequest, OpaqueLoginStartResponse, OpaqueRegisterFinishRequest,
-    OpaqueRegisterStartRequest, OpaqueRegisterStartResponse, OrgResponse, PROTOCOL_VERSION,
-    PendingDeviceRequest, PendingDeviceSummary, PendingInviteResponse, RecoverTrustRequest,
-    RecoverTrustResponse, RecoveryChallengeStartRequest, RecoveryChallengeStartResponse,
-    RegisterResponse, RejectInviteRequest, ResolveItemConflictRequest, RotateVaultKeyRequest,
-    RotationStatusResponse, RotationVaultKeyWrapping, SYNC_INTEGRITY_PROTOCOL_VERSION,
-    SyncCheckpoint, SyncRequest, SyncResponse, SyncStatusRequest, SyncStatusResponse,
-    UpdateItemRequest, UserLookupRequest, UserLookupResponse, VaultMemberResponse, VaultResponse,
-    VaultStatusCursor, VaultSyncCursor,
+    DEVICE_SCOPED_WRAPPING_PROTOCOL_VERSION, DeleteItemRequest, DeviceBootstrapResponse,
+    DeviceRegisterRequest, DeviceResponse, DeviceVaultKeyWrappingRequest, InviteMemberRequest,
+    InviteResponse, ItemConflictResponse, ItemRevisionResponse, OpaqueLoginFinishRequest,
+    OpaqueLoginFinishResponse, OpaqueLoginStartRequest, OpaqueLoginStartResponse,
+    OpaqueRegisterFinishRequest, OpaqueRegisterStartRequest, OpaqueRegisterStartResponse,
+    OrgResponse, PROTOCOL_VERSION, PendingDeviceRequest, PendingDeviceSummary,
+    PendingInviteResponse, RecoverTrustRequest, RecoverTrustResponse,
+    RecoveryChallengeStartRequest, RecoveryChallengeStartResponse, RegisterResponse,
+    RejectInviteRequest, ResolveItemConflictRequest, RotateVaultKeyRequest, RotationStatusResponse,
+    RotationVaultKeyWrapping, SYNC_INTEGRITY_PROTOCOL_VERSION, SyncCheckpoint, SyncRequest,
+    SyncResponse, SyncStatusRequest, SyncStatusResponse, UpdateItemRequest, UserLookupRequest,
+    UserLookupResponse, VaultMemberResponse, VaultResponse, VaultStatusCursor, VaultSyncCursor,
 };
 use umbra_storage::Storage;
 use uuid::Uuid;
@@ -649,16 +649,24 @@ async fn invited_user_can_list_accept_and_sync_vault() {
         &format!("/api/v1/vaults/{}/invites", vault.vault_id),
         owner.auth("invite-create"),
         &InviteMemberRequest {
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: DEVICE_SCOPED_WRAPPING_PROTOCOL_VERSION,
             vault_id: vault.vault_id,
             email: "INVITE-RECIPIENT@example.com".to_owned(),
             role: VaultRole::Editor,
             vault_key_wrapping: json!({"wrapped": "for-recipient"}),
-            vault_key_wrappings: vec![],
+            vault_key_wrappings: vec![DeviceVaultKeyWrappingRequest {
+                vault_id: vault.vault_id,
+                user_id: recipient.user_id,
+                device_id: recipient.device_id,
+                wrapping_type: "device_public_key".to_owned(),
+                envelope: json!({"wrapped": "for-recipient"}),
+                key_generation: vault.current_key_generation,
+            }],
         },
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    assert_ne!(invite.invite_id, Uuid::nil());
     assert_eq!(invite.email, "invite-recipient@example.com");
     assert_eq!(invite.state, "pending");
 
@@ -681,7 +689,7 @@ async fn invited_user_can_list_accept_and_sync_vault() {
         &format!("/api/v1/invites/{}/accept", invite.invite_id),
         recipient.auth("invite-accept"),
         &AcceptInviteRequest {
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: DEVICE_SCOPED_WRAPPING_PROTOCOL_VERSION,
             invite_id: invite.invite_id,
             device_id: recipient.device_id,
         },
@@ -698,7 +706,7 @@ async fn invited_user_can_list_accept_and_sync_vault() {
         "/api/v1/sync",
         recipient.auth("invite-sync"),
         &SyncRequest {
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: DEVICE_SCOPED_WRAPPING_PROTOCOL_VERSION,
             device_id: recipient.device_id,
             vaults: vec![VaultSyncCursor {
                 vault_id: vault.vault_id,
@@ -753,21 +761,30 @@ async fn invited_user_can_reject_invite() {
     )
     .await;
 
-    let (_status, invite): (StatusCode, InviteResponse) = signed_json_request(
+    let (status, invite): (StatusCode, InviteResponse) = signed_json_request(
         app.clone(),
         Method::POST,
         &format!("/api/v1/vaults/{}/invites", vault.vault_id),
         owner.auth("reject-create"),
         &InviteMemberRequest {
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: DEVICE_SCOPED_WRAPPING_PROTOCOL_VERSION,
             vault_id: vault.vault_id,
             email: "reject-recipient@example.com".to_owned(),
             role: VaultRole::Viewer,
             vault_key_wrapping: json!({"wrapped": "reject"}),
-            vault_key_wrappings: vec![],
+            vault_key_wrappings: vec![DeviceVaultKeyWrappingRequest {
+                vault_id: vault.vault_id,
+                user_id: recipient.user_id,
+                device_id: recipient.device_id,
+                wrapping_type: "device_public_key".to_owned(),
+                envelope: json!({"wrapped": "reject"}),
+                key_generation: vault.current_key_generation,
+            }],
         },
     )
     .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_ne!(invite.invite_id, Uuid::nil());
 
     let (status, rejected): (StatusCode, InviteResponse) = signed_json_request(
         app.clone(),
