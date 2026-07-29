@@ -1781,6 +1781,39 @@ fn state_commitment_transaction(
             state
         ]))?);
     }
+
+    // Key envelopes are ciphertext, but their routing metadata is security
+    // relevant: omitting an envelope or substituting its recipient must change
+    // the signed checkpoint just like changing an item ciphertext does.
+    let mut wrappings = tx.prepare(
+        "SELECT id, user_id, device_id, wrapping_type, key_generation, envelope_json
+         FROM vault_key_wrappings WHERE vault_id = ?1
+         ORDER BY key_generation ASC, user_id ASC, device_id ASC, id ASC",
+    )?;
+    let wrapping_rows = wrappings.query_map(params![vault_id.to_string()], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, Option<String>>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, i64>(4)?,
+            row.get::<_, String>(5)?,
+        ))
+    })?;
+    for row in wrapping_rows {
+        let (id, user_id, device_id, wrapping_type, key_generation, envelope) = row?;
+        let envelope: serde_json::Value = serde_json::from_str(&envelope)?;
+        entries.push(serde_json::to_vec(&serde_json::json!([
+            "key_wrapping",
+            vault_id,
+            id,
+            user_id,
+            device_id,
+            wrapping_type,
+            key_generation,
+            hash_json(&envelope)?
+        ]))?);
+    }
     Ok(umbra_crypto::checkpoints::state_commitment(entries))
 }
 
@@ -2817,6 +2850,33 @@ mod tests {
                     .unwrap()
                     .checkpoint,
                 second
+            );
+        }
+
+        #[test]
+        fn checkpoint_commitment_binds_device_targeted_wrapping_metadata() {
+            let mut cache = LocalCache::open_in_memory("checkpoint-device-wrapping").unwrap();
+            let vault_id = uuid::Uuid::from_u128(1);
+            let user_id = uuid::Uuid::from_u128(2);
+            let first_device = uuid::Uuid::from_u128(3);
+            let second_device = uuid::Uuid::from_u128(4);
+            let mut first = changes(vault_id, 1, "encrypted");
+            first.key_wrappings = vec![umbra_protocol::VaultKeyWrappingResponse {
+                id: uuid::Uuid::from_u128(5),
+                vault_id,
+                user_id,
+                device_id: Some(first_device),
+                wrapping_type: "device_public_key".to_owned(),
+                envelope: serde_json::json!({"ciphertext": "first"}),
+                key_generation: 1,
+            }];
+            let mut second = first.clone();
+            second.key_wrappings[0].device_id = Some(second_device);
+
+            assert_ne!(
+                cache.projected_state_commitment(&first).unwrap(),
+                cache.projected_state_commitment(&second).unwrap(),
+                "a checkpoint must bind the intended recipient device"
             );
         }
 
