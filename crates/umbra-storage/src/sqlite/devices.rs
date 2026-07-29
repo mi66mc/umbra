@@ -2,7 +2,7 @@ use umbra_core::{DeviceId, DeviceState, UserId};
 use uuid::Uuid;
 
 use crate::convert::device_state_to_str;
-use crate::error::{ensure_rows_affected, map_sqlx_error};
+use crate::error::map_sqlx_error;
 use crate::sqlite::SqliteStorage;
 use crate::sqlite::convert::{device_from_row, recovery_challenge_from_row};
 use crate::{
@@ -181,20 +181,41 @@ impl SqliteStorage {
     }
 
     pub async fn revoke_device(&self, device_id: DeviceId) -> Result<(), StorageError> {
-        let result = sqlx::query(
+        let mut tx = self.pool.begin().await?;
+        let user_id: Option<String> = sqlx::query_scalar(
             r#"
             UPDATE devices
             SET state = 'revoked',
                 trusted = 0,
                 revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
             WHERE id = ?1
+            RETURNING user_id
             "#,
         )
         .bind(device_id.to_string())
-        .execute(&self.pool)
+        .fetch_optional(&mut *tx)
         .await?;
+        let user_id = user_id.ok_or(StorageError::NotFound)?;
 
-        ensure_rows_affected(result.rows_affected())
+        sqlx::query(
+            r#"
+            UPDATE vaults
+            SET needs_key_rotation = 1,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+            WHERE EXISTS (
+                SELECT 1
+                FROM vault_members vm
+                WHERE vm.vault_id = vaults.id
+                  AND vm.user_id = ?1
+                  AND vm.state = 'active'
+            )
+            "#,
+        )
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
     }
 
     pub async fn create_recovery_challenge(

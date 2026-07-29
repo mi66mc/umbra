@@ -2,7 +2,7 @@ use umbra_core::*;
 use uuid::Uuid;
 
 use crate::convert::*;
-use crate::error::{ensure_rows_affected, map_sqlx_error};
+use crate::error::map_sqlx_error;
 use crate::models::*;
 use crate::{PostgresStorage, StorageError};
 
@@ -175,14 +175,34 @@ impl PostgresStorage {
     }
 
     pub async fn revoke_device(&self, device_id: DeviceId) -> Result<(), StorageError> {
-        let result = sqlx::query(
-            "UPDATE devices SET state = 'revoked', trusted = false, revoked_at = now() WHERE id = $1",
+        let mut tx = self.pool.begin().await?;
+        let user_id: UserId = sqlx::query_scalar(
+            "UPDATE devices SET state = 'revoked', trusted = false, revoked_at = now() WHERE id = $1 RETURNING user_id",
         )
-            .bind(device_id)
-            .execute(&self.pool)
-            .await?;
+        .bind(device_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(StorageError::NotFound)?;
 
-        ensure_rows_affected(result.rows_affected())
+        sqlx::query(
+            r#"
+            UPDATE vaults v
+            SET needs_key_rotation = true, updated_at = now()
+            WHERE EXISTS (
+                SELECT 1
+                FROM vault_members vm
+                WHERE vm.vault_id = v.id
+                  AND vm.user_id = $1
+                  AND vm.state = 'active'
+            )
+            "#,
+        )
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(())
     }
 
     pub async fn create_recovery_challenge(

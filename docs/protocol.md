@@ -29,7 +29,7 @@ The opaque wrapping record includes only routing metadata plus the encrypted env
 
 The server treats `envelope` as opaque JSON. It authorizes the caller and recipient device state but must not decrypt, normalize, log, audit, or include raw envelope bytes in checkpoint/integrity evidence. Clients bind encryption/decryption to domain-separated AAD containing the vault ID, recipient device ID, and key generation. They must reject an absent, wrong-device, wrong-generation, or non-`device_public_key` wrapping rather than using an account-key fallback.
 
-Version 3 is not yet a complete multi-recipient format. The approved-device bootstrap request, invite/member requests, and rotation request still expose legacy envelope shapes (including optional or absent recipient device routing). They require a coordinated protocol change before those operations can claim device-scoped distribution. Do not infer that protocol version 3 alone makes an invite, approval, or rotation safe for all devices. A future v3 checkpoint extension must commit sorted recipient-device metadata and hashes of opaque wrapping bytes; existing version-2 checkpoints do not do so.
+Version 3 requires recipient-device routing for approved-device bootstrap, invite/member grants, and rotation. The server rejects absent, duplicate, inactive, pending, revoked, or incomplete recipients. Sync carries only the authenticated device's opaque envelope and separately carries sorted recipient-device metadata plus a SHA-256 hash of each opaque envelope. Checkpoints are supported in v3 and commit this metadata/hash set, enabling equal integrity verification on devices with different ciphertext visibility.
 
 ## Initial Endpoints
 

@@ -14,7 +14,7 @@ use umbra_core::VaultKind;
 use umbra_crypto::{
     AadV1, CryptoEnvelopeV1, LocalUnlockKey, decrypt_local_unlock_state, encrypt_local_unlock_state,
 };
-use umbra_protocol::{SyncCheckpoint, VaultSyncChanges};
+use umbra_protocol::{SyncCheckpoint, VaultKeyWrappingMetadata, VaultSyncChanges};
 
 use crate::error::CliError;
 
@@ -1353,6 +1353,17 @@ impl LocalCache {
                 updated_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS vault_key_wrapping_metadata (
+                id TEXT PRIMARY KEY,
+                vault_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                device_id TEXT,
+                wrapping_type TEXT NOT NULL,
+                key_generation INTEGER NOT NULL,
+                envelope_hash TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS item_revisions (
                 vault_id TEXT NOT NULL,
                 item_id TEXT NOT NULL,
@@ -1643,6 +1654,78 @@ fn apply_sync_changes_transaction(
         )?;
     }
 
+    // v3 carries a complete, ciphertext-free view for the commitment. Older
+    // responses retain their existing behavior by deriving that view locally.
+    let key_wrapping_metadata = if changes.key_wrapping_metadata.is_empty() {
+        changes
+            .key_wrappings
+            .iter()
+            .map(|wrapping| {
+                Ok(VaultKeyWrappingMetadata {
+                    id: wrapping.id,
+                    vault_id: wrapping.vault_id,
+                    user_id: wrapping.user_id,
+                    device_id: wrapping.device_id,
+                    wrapping_type: wrapping.wrapping_type.clone(),
+                    key_generation: wrapping.key_generation,
+                    envelope_hash: hash_json(&wrapping.envelope)?,
+                })
+            })
+            .collect::<Result<Vec<_>, CliError>>()?
+    } else {
+        changes.key_wrapping_metadata.clone()
+    };
+    let active_metadata_ids = key_wrapping_metadata
+        .iter()
+        .map(|metadata| metadata.id.to_string())
+        .collect::<Vec<_>>();
+    if active_metadata_ids.is_empty() {
+        tx.execute(
+            "DELETE FROM vault_key_wrapping_metadata WHERE vault_id = ?1",
+            params![changes.vault_id.to_string()],
+        )?;
+    } else {
+        let placeholders = (0..active_metadata_ids.len())
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "DELETE FROM vault_key_wrapping_metadata WHERE vault_id = ? AND id NOT IN ({placeholders})"
+        );
+        let mut values = Vec::with_capacity(active_metadata_ids.len() + 1);
+        values.push(changes.vault_id.to_string());
+        values.extend(active_metadata_ids);
+        tx.execute(&sql, params_from_iter(values))?;
+    }
+    for metadata in key_wrapping_metadata {
+        tx.execute(
+            r#"
+            INSERT INTO vault_key_wrapping_metadata (
+                id, vault_id, user_id, device_id, wrapping_type,
+                key_generation, envelope_hash, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            ON CONFLICT(id) DO UPDATE SET
+                vault_id = excluded.vault_id,
+                user_id = excluded.user_id,
+                device_id = excluded.device_id,
+                wrapping_type = excluded.wrapping_type,
+                key_generation = excluded.key_generation,
+                envelope_hash = excluded.envelope_hash,
+                updated_at = excluded.updated_at
+            "#,
+            params![
+                metadata.id.to_string(),
+                metadata.vault_id.to_string(),
+                metadata.user_id.to_string(),
+                metadata.device_id.map(|id| id.to_string()),
+                metadata.wrapping_type,
+                metadata.key_generation,
+                metadata.envelope_hash,
+                now,
+            ],
+        )?;
+    }
+
     tx.execute(
         "DELETE FROM item_conflicts WHERE vault_id = ?1",
         params![changes.vault_id.to_string()],
@@ -1786,8 +1869,8 @@ fn state_commitment_transaction(
     // relevant: omitting an envelope or substituting its recipient must change
     // the signed checkpoint just like changing an item ciphertext does.
     let mut wrappings = tx.prepare(
-        "SELECT id, user_id, device_id, wrapping_type, key_generation, envelope_json
-         FROM vault_key_wrappings WHERE vault_id = ?1
+        "SELECT id, user_id, device_id, wrapping_type, key_generation, envelope_hash
+         FROM vault_key_wrapping_metadata WHERE vault_id = ?1
          ORDER BY key_generation ASC, user_id ASC, device_id ASC, id ASC",
     )?;
     let wrapping_rows = wrappings.query_map(params![vault_id.to_string()], |row| {
@@ -1801,8 +1884,7 @@ fn state_commitment_transaction(
         ))
     })?;
     for row in wrapping_rows {
-        let (id, user_id, device_id, wrapping_type, key_generation, envelope) = row?;
-        let envelope: serde_json::Value = serde_json::from_str(&envelope)?;
+        let (id, user_id, device_id, wrapping_type, key_generation, envelope_hash) = row?;
         entries.push(serde_json::to_vec(&serde_json::json!([
             "key_wrapping",
             vault_id,
@@ -1811,7 +1893,7 @@ fn state_commitment_transaction(
             device_id,
             wrapping_type,
             key_generation,
-            hash_json(&envelope)?
+            envelope_hash
         ]))?);
     }
     Ok(umbra_crypto::checkpoints::state_commitment(entries))
@@ -2487,6 +2569,7 @@ mod tests {
                     key_generation: 2,
                 },
             ],
+            key_wrapping_metadata: vec![],
             conflicts: vec![],
         };
 
@@ -2532,6 +2615,7 @@ mod tests {
                     envelope: serde_json::json!({"wrapped": "latest"}),
                     key_generation: 2,
                 }],
+                key_wrapping_metadata: vec![],
                 conflicts: vec![],
             })
             .unwrap();
@@ -2558,6 +2642,7 @@ mod tests {
                 items: vec![],
                 deleted_items: vec![],
                 key_wrappings: vec![],
+                key_wrapping_metadata: vec![],
                 conflicts: vec![],
             })
             .unwrap();
@@ -2588,6 +2673,7 @@ mod tests {
                 }],
                 deleted_items: vec![],
                 key_wrappings: vec![],
+                key_wrapping_metadata: vec![],
                 conflicts: vec![],
             })
             .unwrap();
@@ -2601,6 +2687,7 @@ mod tests {
                 items: vec![],
                 deleted_items: vec![item_id],
                 key_wrappings: vec![],
+                key_wrapping_metadata: vec![],
                 conflicts: vec![],
             })
             .unwrap();
@@ -2636,6 +2723,7 @@ mod tests {
                 items: vec![],
                 deleted_items: vec![],
                 key_wrappings: vec![],
+                key_wrapping_metadata: vec![],
                 conflicts: vec![umbra_protocol::ItemConflictResponse {
                     conflict_id: initial_conflict_id,
                     vault_id,
@@ -2658,6 +2746,7 @@ mod tests {
                 items: vec![],
                 deleted_items: vec![],
                 key_wrappings: vec![],
+                key_wrapping_metadata: vec![],
                 conflicts: vec![umbra_protocol::ItemConflictResponse {
                     conflict_id: replacement_conflict_id,
                     vault_id,
@@ -2695,6 +2784,7 @@ mod tests {
                 items: vec![],
                 deleted_items: vec![],
                 key_wrappings: vec![],
+                key_wrapping_metadata: vec![],
                 conflicts: vec![],
             })
             .unwrap();
@@ -2705,7 +2795,10 @@ mod tests {
         use ed25519_dalek::SigningKey;
         use umbra_auth::verifying_key_to_b64;
         use umbra_crypto::checkpoints::{checkpoint_hash, sign_checkpoint};
-        use umbra_protocol::{ItemRevisionResponse, SyncCheckpoint, VaultSyncChanges};
+        use umbra_protocol::{
+            ItemRevisionResponse, SyncCheckpoint, VaultKeyWrappingMetadata,
+            VaultKeyWrappingResponse, VaultSyncChanges,
+        };
 
         use super::*;
 
@@ -2732,6 +2825,7 @@ mod tests {
                 }],
                 deleted_items: vec![],
                 key_wrappings: vec![],
+                key_wrapping_metadata: vec![],
                 conflicts: vec![],
             }
         }
@@ -2877,6 +2971,88 @@ mod tests {
                 cache.projected_state_commitment(&first).unwrap(),
                 cache.projected_state_commitment(&second).unwrap(),
                 "a checkpoint must bind the intended recipient device"
+            );
+        }
+
+        #[test]
+        fn device_scoped_sync_commits_all_metadata_without_caching_peer_envelopes() {
+            let mut device_a_cache = LocalCache::open_in_memory("v3-device-a").unwrap();
+            let mut device_b_cache = LocalCache::open_in_memory("v3-device-b").unwrap();
+            let vault_id = uuid::Uuid::from_u128(1);
+            let user_id = uuid::Uuid::from_u128(2);
+            let device_a = uuid::Uuid::from_u128(3);
+            let device_b = uuid::Uuid::from_u128(4);
+            let wrapping_a = VaultKeyWrappingResponse {
+                id: uuid::Uuid::from_u128(5),
+                vault_id,
+                user_id,
+                device_id: Some(device_a),
+                wrapping_type: "device_public_key".to_owned(),
+                envelope: serde_json::json!({"ciphertext": "only-a"}),
+                key_generation: 1,
+            };
+            let wrapping_b = VaultKeyWrappingResponse {
+                id: uuid::Uuid::from_u128(6),
+                vault_id,
+                user_id,
+                device_id: Some(device_b),
+                wrapping_type: "device_public_key".to_owned(),
+                envelope: serde_json::json!({"ciphertext": "only-b"}),
+                key_generation: 1,
+            };
+            let metadata = [wrapping_a.clone(), wrapping_b.clone()]
+                .into_iter()
+                .map(|wrapping| VaultKeyWrappingMetadata {
+                    id: wrapping.id,
+                    vault_id: wrapping.vault_id,
+                    user_id: wrapping.user_id,
+                    device_id: wrapping.device_id,
+                    wrapping_type: wrapping.wrapping_type,
+                    key_generation: wrapping.key_generation,
+                    envelope_hash: hash_json(&wrapping.envelope).unwrap(),
+                })
+                .collect::<Vec<_>>();
+            let mut changes_a = changes(vault_id, 1, "shared-item");
+            changes_a.key_wrappings = vec![wrapping_a];
+            changes_a.key_wrapping_metadata = metadata.clone();
+            let mut changes_b = changes(vault_id, 1, "shared-item");
+            changes_b.key_wrappings = vec![wrapping_b];
+            changes_b.key_wrapping_metadata = metadata;
+
+            device_a_cache.apply_sync_changes(&changes_a).unwrap();
+            device_b_cache.apply_sync_changes(&changes_b).unwrap();
+
+            assert_eq!(
+                device_a_cache
+                    .projected_state_commitment(&changes_a)
+                    .unwrap(),
+                device_b_cache
+                    .projected_state_commitment(&changes_b)
+                    .unwrap()
+            );
+            let author_key = signing_key(7);
+            trust(&device_a_cache, device_a, &author_key);
+            trust(&device_b_cache, device_a, &author_key);
+            let checkpoint = device_a_cache
+                .author_checkpoint(&changes_a, &[], device_a, &author_key)
+                .unwrap();
+            device_a_cache
+                .verify_and_record_checkpoints(&changes_a, std::slice::from_ref(&checkpoint))
+                .unwrap();
+            device_b_cache
+                .verify_and_record_checkpoints(&changes_b, std::slice::from_ref(&checkpoint))
+                .unwrap();
+            assert_eq!(
+                device_a_cache.list_key_wrappings(vault_id).unwrap().len(),
+                1
+            );
+            assert_eq!(
+                device_b_cache.list_key_wrappings(vault_id).unwrap().len(),
+                1
+            );
+            assert_ne!(
+                device_a_cache.list_key_wrappings(vault_id).unwrap()[0].envelope,
+                device_b_cache.list_key_wrappings(vault_id).unwrap()[0].envelope
             );
         }
 

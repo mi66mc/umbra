@@ -178,7 +178,7 @@ This migration is deliberately fail-closed for unlock and cache selection: a cli
 
 The server remains zero-knowledge: it authorizes device state and membership and persists opaque JSON envelopes, but never decrypts, rewraps, logs, or audits vault keys, device private keys, or raw envelope bodies. The server-side filtering cannot erase material a revoked device already downloaded or decrypted. Revoke a lost/compromised device immediately, then rotate every affected vault key and the real secrets that device may have seen.
 
-The v3 rollout is incomplete for multi-recipient operations: approval distribution, invite acceptance/member grants, and rotation must all create one envelope for every intended active device. Until those routes are migrated and verified, do not treat a newly approved device, an invited member, or a rotated shared vault as covered by the v3 device-envelope guarantee. See [operations guidance](docs/operations.md) and [the verification matrix](docs/device-scoped-vault-wrapping-tests.md).
+Protocol v3 distributes approval, invite/member, and rotation material as one envelope per intended trusted device. Sync returns a device only its own ciphertext, plus redacted routing metadata and envelope hashes for all active recipients so every device can verify the same checkpoint commitment. Pending and revoked devices receive neither a ciphertext nor new routing metadata. See [operations guidance](docs/operations.md) and [the verification matrix](docs/device-scoped-vault-wrapping-tests.md).
 
 Useful device commands:
 

@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 use crate::config::AppConfig;
 use crate::error::ServerError;
 use crate::state::OpaqueCipherSuite;
-use umbra_protocol::{SYNC_INTEGRITY_PROTOCOL_VERSION, is_supported_protocol_version};
+use umbra_protocol::{is_supported_protocol_version, is_sync_integrity_protocol_version};
 
 pub(crate) fn ensure_protocol(version: u16) -> Result<(), ServerError> {
     if is_supported_protocol_version(version) {
@@ -18,11 +18,11 @@ pub(crate) fn ensure_protocol(version: u16) -> Result<(), ServerError> {
 }
 
 pub(crate) fn ensure_sync_integrity_protocol(version: u16) -> Result<(), ServerError> {
-    if version == SYNC_INTEGRITY_PROTOCOL_VERSION {
+    if is_sync_integrity_protocol_version(version) {
         Ok(())
     } else {
         Err(ServerError::BadRequest(
-            "sync checkpoints require protocol version 2",
+            "sync checkpoints require protocol version 2 or later",
         ))
     }
 }

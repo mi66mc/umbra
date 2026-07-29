@@ -28,9 +28,8 @@ use umbra_protocol::{
     RecoverTrustRequest, RecoverTrustResponse, RecoveryChallengeStartRequest,
     RecoveryChallengeStartResponse, RejectInviteRequest, ResolveItemConflictRequest,
     ResolveItemConflictResponse, RotateVaultKeyRequest, RotationItemRevision,
-    RotationStatusResponse, RotationVaultKeyWrapping, SYNC_INTEGRITY_PROTOCOL_VERSION, SyncRequest,
-    SyncResponse, UpdateItemRequest, UserLookupRequest, UserLookupResponse, VaultMemberResponse,
-    VaultResponse, VaultSyncCursor,
+    RotationStatusResponse, RotationVaultKeyWrapping, SyncRequest, SyncResponse, UpdateItemRequest,
+    UserLookupRequest, UserLookupResponse, VaultMemberResponse, VaultResponse, VaultSyncCursor,
 };
 use uuid::Uuid;
 
@@ -976,7 +975,7 @@ pub async fn run(
                 .post(
                     "/api/v1/sync",
                     &SyncRequest {
-                        protocol_version: SYNC_INTEGRITY_PROTOCOL_VERSION,
+                        protocol_version: DEVICE_SCOPED_WRAPPING_PROTOCOL_VERSION,
                         device_id,
                         vaults: vec![VaultSyncCursor {
                             vault_id,
@@ -985,7 +984,7 @@ pub async fn run(
                     },
                 )
                 .await?;
-            if full_sync.protocol_version != SYNC_INTEGRITY_PROTOCOL_VERSION {
+            if full_sync.protocol_version != DEVICE_SCOPED_WRAPPING_PROTOCOL_VERSION {
                 cache.quarantine_transport_failure(
                     vault_id,
                     0,
@@ -1930,7 +1929,7 @@ pub async fn run(
                 .post(
                     "/api/v1/sync",
                     &SyncRequest {
-                        protocol_version: SYNC_INTEGRITY_PROTOCOL_VERSION,
+                        protocol_version: DEVICE_SCOPED_WRAPPING_PROTOCOL_VERSION,
                         device_id,
                         vaults: vec![VaultSyncCursor {
                             vault_id,
@@ -1939,7 +1938,7 @@ pub async fn run(
                     },
                 )
                 .await?;
-            if response.protocol_version != SYNC_INTEGRITY_PROTOCOL_VERSION {
+            if response.protocol_version != DEVICE_SCOPED_WRAPPING_PROTOCOL_VERSION {
                 cache.quarantine_transport_failure(
                     vault_id,
                     since_vault_revision,

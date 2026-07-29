@@ -272,6 +272,60 @@ async fn sqlite_vault_item_and_rotation_flow() {
 }
 
 #[tokio::test]
+async fn sqlite_revoking_device_marks_users_active_vaults_for_rotation() {
+    let storage = crate::sqlite::SqliteStorage::connect("sqlite::memory:", 1)
+        .await
+        .unwrap();
+    umbra_migrations::run_sqlite(storage.pool()).await.unwrap();
+    let user = create_test_user_on(&storage, "sqlite-device-revoke@example.com").await;
+    let vault = storage
+        .create_vault(CreateVault {
+            id: None,
+            org_id: None,
+            name: "Rotate after revoke".to_owned(),
+            kind: VaultKind::Personal,
+            created_by: Some(user.id),
+            crypto_policy: serde_json::json!({}),
+        })
+        .await
+        .unwrap();
+    storage
+        .upsert_vault_member(UpsertVaultMember {
+            vault_id: vault.id,
+            user_id: user.id,
+            role: VaultRole::Owner,
+            state: MemberState::Active,
+        })
+        .await
+        .unwrap();
+    let device = storage
+        .create_device(CreateDevice {
+            id: None,
+            user_id: user.id,
+            name: "revoked laptop".to_owned(),
+            public_key: Some("device-public-key".to_owned()),
+            encryption_public_key: Some("encryption-public-key".to_owned()),
+            fingerprint: "sqlite-revoked-device".to_owned(),
+            state: DeviceState::Trusted,
+            approval_code_hash: None,
+            approval_expires_at: None,
+            bootstrap_public_key: None,
+        })
+        .await
+        .unwrap();
+
+    storage.revoke_device(device.id).await.unwrap();
+
+    assert!(
+        storage
+            .rotation_status(vault.id)
+            .await
+            .unwrap()
+            .needs_key_rotation
+    );
+}
+
+#[tokio::test]
 async fn sqlite_item_deletion_flow() {
     let storage = crate::sqlite::SqliteStorage::connect("sqlite::memory:", 1)
         .await
@@ -769,10 +823,38 @@ async fn postgres_devices_support_pending_trust_and_revoke() {
     assert_eq!(approved.bootstrap_bundle, Some(bundle));
     assert!(approved.trusted_at.is_some());
 
+    let vault = storage
+        .create_vault(CreateVault {
+            id: None,
+            org_id: None,
+            name: "Postgres revoke rotation".to_owned(),
+            kind: VaultKind::Personal,
+            created_by: Some(user.id),
+            crypto_policy: serde_json::json!({}),
+        })
+        .await
+        .unwrap();
+    storage
+        .upsert_vault_member(UpsertVaultMember {
+            vault_id: vault.id,
+            user_id: user.id,
+            role: VaultRole::Owner,
+            state: MemberState::Active,
+        })
+        .await
+        .unwrap();
+
     storage.revoke_device(approved.id).await.unwrap();
     let revoked = storage.find_device_by_id(approved.id).await.unwrap();
     assert_eq!(revoked.state, DeviceState::Revoked);
     assert!(revoked.revoked_at.is_some());
+    assert!(
+        storage
+            .rotation_status(vault.id)
+            .await
+            .unwrap()
+            .needs_key_rotation
+    );
 }
 
 #[tokio::test]

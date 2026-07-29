@@ -18,7 +18,10 @@ pub const fn is_supported_protocol_version(version: u16) -> bool {
 }
 
 pub const fn is_sync_integrity_protocol_version(version: u16) -> bool {
-    version == SYNC_INTEGRITY_PROTOCOL_VERSION
+    matches!(
+        version,
+        SYNC_INTEGRITY_PROTOCOL_VERSION | DEVICE_SCOPED_WRAPPING_PROTOCOL_VERSION
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -489,6 +492,20 @@ pub struct VaultKeyWrappingResponse {
     pub key_generation: RevisionId,
 }
 
+/// Commitment-safe routing metadata for a vault-key envelope. The raw
+/// ciphertext is deliberately omitted so device-scoped sync can bind every
+/// active recipient without disclosing other devices' envelopes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VaultKeyWrappingMetadata {
+    pub id: uuid::Uuid,
+    pub vault_id: VaultId,
+    pub user_id: UserId,
+    pub device_id: Option<DeviceId>,
+    pub wrapping_type: String,
+    pub key_generation: RevisionId,
+    pub envelope_hash: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SyncStatusRequest {
     pub protocol_version: u16,
@@ -572,6 +589,10 @@ pub struct VaultSyncChanges {
     pub items: Vec<ItemRevisionResponse>,
     pub deleted_items: Vec<ItemId>,
     pub key_wrappings: Vec<VaultKeyWrappingResponse>,
+    /// All active envelope routing metadata, including other devices. Present
+    /// for v3; v1/v2 clients continue to derive it from raw envelopes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub key_wrapping_metadata: Vec<VaultKeyWrappingMetadata>,
     #[serde(default)]
     pub conflicts: Vec<ItemConflictResponse>,
 }
@@ -686,6 +707,13 @@ mod tests {
         assert!(v2_json.to_string().contains("state-hash"));
         assert!(!v2_json.to_string().contains("plaintext"));
         assert!(!v2_json.to_string().contains("envelope"));
+    }
+
+    #[test]
+    fn device_scoped_protocol_keeps_sync_integrity_enabled() {
+        assert!(is_sync_integrity_protocol_version(
+            DEVICE_SCOPED_WRAPPING_PROTOCOL_VERSION
+        ));
     }
 
     #[test]
@@ -825,6 +853,7 @@ mod tests {
                     envelope: json!({"wrapped": true}),
                     key_generation: 1,
                 }],
+                key_wrapping_metadata: vec![],
                 conflicts: vec![],
             }],
             checkpoints: vec![],

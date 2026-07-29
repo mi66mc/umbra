@@ -1,10 +1,10 @@
 # Device-Scoped Vault-Wrapping Operations
 
-## Scope and current rollout state
+## Scope
 
 Umbra's target model is one opaque vault-key envelope per active, approved recipient device. The envelope is created, decrypted, and re-encrypted only on clients. The server stores and authorizes opaque envelopes plus non-secret identifiers, device state, roles, and generations.
 
-The currently implemented v3 boundary covers device encryption-key registration, initial vault creation, sync delivery, cache selection, and local unlock. It does **not** yet cover approved-device envelope distribution, invite acceptance/direct member grants, or multi-device rotation. Operators must not represent those incomplete workflows as fully protected by the device-scoped guarantee.
+The v3 boundary covers device encryption-key registration, initial vault creation, approval distribution, invite acceptance/direct member grants, multi-device rotation, sync delivery, cache selection, and local unlock. Every new envelope is addressed to one trusted device; sync withholds peer ciphertexts while providing redacted metadata needed for a common checkpoint commitment.
 
 Migration 10 is required on both PostgreSQL and SQLite. Verify it before enabling a v3-capable client:
 
@@ -20,7 +20,7 @@ PostgreSQL remains the production default and is not optional for this rollout. 
 1. Enroll a new machine with `umbra login --new-device`; it is pending.
 2. Confirm the approval code and device fingerprint out of band on an existing trusted device.
 3. Approve the device only after that comparison.
-4. Do not assume approval alone grants a device a current vault key during this rollout. A trusted client must distribute a device-addressed envelope for every vault before the new device can unlock it; that distribution workflow is not complete yet.
+4. Approval distributes a device-addressed envelope for every vault the trusted approver can unlock. The new device can unlock only after it becomes trusted and receives its own envelope.
 5. A pending device must not receive vault envelopes through sync, bootstrap, member grants, or invites. Treat any contrary observation as a security incident and preserve redacted request/audit metadata.
 
 Emergency-kit recovery creates or uses a pending device. The kit must remain offline and does not make the recovering device entitled to vault envelopes until the device is trusted and a trusted client has distributed device-targeted material. Never add a device encryption private key to an emergency kit.
@@ -37,9 +37,9 @@ Revocation blocks future server access and delivery. It cannot erase vault keys,
 
 ## Member removal and shared vaults
 
-Removing a member sets the vault rotation requirement. Until device-scoped member distribution is complete, treat current invite/direct-member and rotation wrapping as legacy user-scoped behavior. Complete the membership change, rotate the vault and external secrets, and record the residual risk that devices previously controlled by the removed member may retain old material.
+Removing a member sets the vault rotation requirement. Revoking a device also marks every vault of that user as requiring rotation. Complete the membership change, rotate the vault and external secrets, and record the residual risk that devices previously controlled by the removed member may retain old material.
 
-The completed workflow must enumerate active member devices client-side, create one envelope per device with vault/device/generation AAD, and send only opaque records. The server must reject pending/revoked targets, targets outside the member, duplicate targets, and rotations missing an active target.
+The workflow enumerates active member devices client-side, creates one envelope per device with vault/device/generation AAD, and sends only opaque records. The server rejects pending/revoked targets, targets outside the member, duplicate targets, and rotations missing an active target.
 
 ## Incident and logging hygiene
 

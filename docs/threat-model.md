@@ -6,7 +6,7 @@ The intended boundary is that every current vault-key generation is encrypted se
 
 This reduces accidental cross-device delivery and prevents a pending or revoked device from obtaining a *newly delivered* v3 envelope through the v3 sync filter. It does not revoke a vault key or plaintext already downloaded, copied, or decrypted. Device revocation and member removal require key rotation and rotation of real external credentials after suspected exposure.
 
-The rollout is not yet complete for device approval, invites/member grants, member acceptance, and rotation. Those paths still contain user-scoped or optional-device envelope contracts. They are explicitly outside the completed guarantee until they create and validate one recipient-addressed envelope for every active intended device and bind that metadata into sync integrity checkpoints. This is a release/security limitation, not a compatibility fallback: local unlock must not use an account private key to accept a legacy wrapping as if it were device scoped.
+Device approval, invites/member grants, member acceptance, and rotation create and validate one recipient-addressed envelope for every active intended device. The checkpoint commitment binds recipient metadata and hashes of opaque wrapping bytes, while sync withholds peer ciphertexts. This is not a compatibility fallback: local unlock and legacy writes fail closed rather than accepting an account-key or user-scoped wrapping as device scoped.
 
 ## Protects Against
 
