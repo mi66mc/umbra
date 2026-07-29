@@ -1,11 +1,10 @@
-use sqlx::{PgPool, SqlitePool, migrate::Migrator};
+use sqlx::{PgPool, SqlitePool};
+use sqlx_core::migrate::{Migration, MigrationType, Migrator};
+use std::borrow::Cow;
 
 pub const LATEST_MIGRATION_VERSION: i64 = 10;
 
-pub static POSTGRES_MIGRATOR: Migrator = sqlx::migrate!("./migrations");
-pub static SQLITE_MIGRATOR: Migrator = sqlx::migrate!("./sqlite");
-
-pub static MIGRATOR: &Migrator = &POSTGRES_MIGRATOR;
+include!(concat!(env!("OUT_DIR"), "/embedded_migrations.rs"));
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MigrationStatus {
@@ -19,7 +18,7 @@ pub enum MigrationError {
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
     #[error("migration error: {0}")]
-    Migrate(#[from] sqlx::migrate::MigrateError),
+    Migrate(#[from] sqlx_core::migrate::MigrateError),
 }
 
 pub async fn run(pool: &PgPool) -> Result<(), MigrationError> {
@@ -88,6 +87,7 @@ pub async fn status_sqlite(pool: &SqlitePool) -> Result<MigrationStatus, Migrati
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::{Digest, Sha384};
     use sqlx::{Executor, SqlitePool};
 
     #[test]
@@ -97,6 +97,25 @@ mod tests {
 
         assert_eq!(migrations.len(), 10);
         assert_eq!(sqlite_migrations.len(), 10);
+        assert!(
+            migrations
+                .iter()
+                .all(|migration| { !migration.sql.is_empty() && migration.checksum.len() == 48 })
+        );
+        assert!(
+            sqlite_migrations
+                .iter()
+                .all(|migration| { !migration.sql.is_empty() && migration.checksum.len() == 48 })
+        );
+        assert!(
+            migrations
+                .iter()
+                .chain(sqlite_migrations.iter())
+                .all(
+                    |migration| Sha384::digest(migration.sql.as_bytes()).as_slice()
+                        == migration.checksum.as_ref()
+                )
+        );
         assert!(migrations.iter().any(|migration| {
             migration.version == 4 && migration.description == "vault access revision"
         }));

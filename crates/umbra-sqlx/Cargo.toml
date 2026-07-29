@@ -1,0 +1,21 @@
+[package]
+name = "umbra-sqlx"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[features]
+runtime-tokio-rustls = []
+postgres = []
+sqlite = []
+uuid = []
+chrono = []
+json = []
+migrate = []
+
+[dependencies]
+sqlx-core = { workspace = true, features = ["migrate", "chrono", "json", "uuid", "_rt-tokio", "_tls-rustls-ring-webpki"] }
+sqlx-postgres = { workspace = true, features = ["migrate", "chrono", "json", "uuid"] }
+sqlx-sqlite = { workspace = true, features = ["migrate", "chrono", "json", "uuid", "bundled"] }

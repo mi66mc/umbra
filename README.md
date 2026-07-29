@@ -37,6 +37,18 @@ cargo run -p umbra-cli
 cargo run -p umbra-server
 ```
 
+Release verification (with no audit suppressions):
+
+```bash
+cargo fmt --check
+cargo build --workspace
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+cargo audit
+cargo tree -i rsa@0.9.10
+cargo tree -i sqlx-mysql
+```
+
 Generate a persistent OPAQUE server setup secret before running a non-dev server:
 
 ```bash

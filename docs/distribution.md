@@ -35,3 +35,6 @@ docker compose up -d
 - Back up PostgreSQL with `pg_dump`; restore and validate in an isolated database before promoting it. For SQLite, stop the server before copying the database or use a consistent SQLite backup.
 
 Rate limiting is in-memory per Umbra instance. It is effective for single-node deployments; put a shared gateway limiter in front of multi-instance deployments.
+# Release verification
+
+Before publishing, run the workspace format, build, test, clippy, and `cargo audit` gates documented in the README. Do not use audit ignores or allowlists. Run PostgreSQL integration tests with `UMBRA_TEST_DATABASE_URL`; SQLite coverage does not replace them. Confirm `cargo tree -i rsa@0.9.10` and `cargo tree -i sqlx-mysql` find no package.
