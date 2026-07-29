@@ -87,6 +87,7 @@ pub async fn status_sqlite(pool: &SqlitePool) -> Result<MigrationStatus, Migrati
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::{Digest, Sha384};
     use sqlx::{Executor, SqlitePool};
 
     #[test]
@@ -105,6 +106,15 @@ mod tests {
             sqlite_migrations
                 .iter()
                 .all(|migration| { !migration.sql.is_empty() && migration.checksum.len() == 48 })
+        );
+        assert!(
+            migrations
+                .iter()
+                .chain(sqlite_migrations.iter())
+                .all(
+                    |migration| Sha384::digest(migration.sql.as_bytes()).as_slice()
+                        == migration.checksum.as_ref()
+                )
         );
         assert!(migrations.iter().any(|migration| {
             migration.version == 4 && migration.description == "vault access revision"

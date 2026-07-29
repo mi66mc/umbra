@@ -21,6 +21,7 @@ fn main() {
 
 fn migrations(manifest_dir: &str, directory: &str) -> String {
     let path = Path::new(manifest_dir).join(directory);
+    println!("cargo:rerun-if-changed={}", path.display());
     let mut files = fs::read_dir(&path)
         .expect("read migration directory")
         .map(|entry| entry.expect("read migration entry"))
@@ -36,6 +37,7 @@ fn migrations(manifest_dir: &str, directory: &str) -> String {
     files
         .into_iter()
         .map(|entry| {
+            println!("cargo:rerun-if-changed={}", entry.path().display());
             migration(
                 directory,
                 &entry.file_name().to_string_lossy(),
