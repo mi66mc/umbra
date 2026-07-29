@@ -46,3 +46,6 @@ The workflow enumerates active member devices client-side, creates one envelope 
 Never paste an envelope body, vault key, device encryption private key, account private key, password, session token, or decrypted item into tickets, audit notes, logs, or integrity evidence. Diagnostics may include IDs, states, roles, generations, counts, and SHA-256 hashes of opaque bytes. Cache exports and forensic reports must remain redacted.
 
 The existing release block for `RUSTSEC-2023-0071` remains in force. Do not add an advisory ignore or exception while operating or releasing this branch.
+# Release and doctor fixture
+
+For a safe strict-doctor smoke test, use a temporary SQLite database, a generated `UMBRA__AUTH__OPAQUE__SERVER_SETUP` value, loopback bind, HTTPS public URL, `migrations.auto_migrate=false`, and `migrations.require_latest=true`. Never place the generated setup value, plaintext vault material, passwords, or private keys in a fixture or log.
