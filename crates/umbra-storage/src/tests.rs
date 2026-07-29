@@ -1156,6 +1156,21 @@ async fn item_deletion_flow_on<S: StorageBackend + ?Sized>(storage: &S) {
 async fn vault_invite_lifecycle_on<S: StorageBackend + ?Sized>(storage: &S) {
     let owner = create_test_user_on(storage, "invite-owner@example.com").await;
     let recipient = create_test_user_on(storage, "invite-recipient@example.com").await;
+    let recipient_device = storage
+        .create_device(CreateDevice {
+            id: None,
+            user_id: recipient.id,
+            name: "invite recipient device".to_owned(),
+            public_key: Some("invite-recipient-signing-key".to_owned()),
+            encryption_public_key: Some("invite-recipient-encryption-key".to_owned()),
+            fingerprint: "invite-recipient-device".to_owned(),
+            state: DeviceState::Trusted,
+            approval_code_hash: None,
+            approval_expires_at: None,
+            bootstrap_public_key: None,
+        })
+        .await
+        .unwrap();
     let vault = storage
         .create_vault(CreateVault {
             id: None,
@@ -1185,7 +1200,15 @@ async fn vault_invite_lifecycle_on<S: StorageBackend + ?Sized>(storage: &S) {
             email: "INVITE-RECIPIENT@example.com".to_owned(),
             role: VaultRole::Editor,
             invited_by: Some(owner.id),
-            vault_key_wrapping: serde_json::json!({"wrapped": "vault-key"}),
+            vault_key_wrapping: serde_json::json!({
+                "version": 3,
+                "device_wrappings": [{
+                    "device_id": recipient_device.id.to_string(),
+                    "wrapping_type": "device_public_key",
+                    "key_generation": 1,
+                    "envelope": {"wrapped": "vault-key"}
+                }]
+            }),
             expires_at: None,
         })
         .await
@@ -1208,7 +1231,7 @@ async fn vault_invite_lifecycle_on<S: StorageBackend + ?Sized>(storage: &S) {
         .accept_vault_invite(AcceptVaultInvite {
             invite_id: invite.id,
             user_id: recipient.id,
-            device_id: None,
+            device_id: Some(recipient_device.id),
         })
         .await
         .unwrap();
@@ -1226,6 +1249,8 @@ async fn vault_invite_lifecycle_on<S: StorageBackend + ?Sized>(storage: &S) {
         wrappings[0].envelope,
         serde_json::json!({"wrapped": "vault-key"})
     );
+    assert_eq!(wrappings[0].device_id, Some(recipient_device.id));
+    assert_eq!(wrappings[0].wrapping_type, "device_public_key");
 
     let pending_after_accept = storage
         .list_pending_vault_invites_for_email("invite-recipient@example.com")
@@ -1237,10 +1262,40 @@ async fn vault_invite_lifecycle_on<S: StorageBackend + ?Sized>(storage: &S) {
         .accept_vault_invite(AcceptVaultInvite {
             invite_id: invite.id,
             user_id: recipient.id,
-            device_id: None,
+            device_id: Some(recipient_device.id),
         })
         .await;
     assert!(matches!(second_accept, Err(StorageError::NotFound)));
+
+    let legacy_invite = storage
+        .create_vault_invite(CreateVaultInvite {
+            id: None,
+            vault_id: vault.id,
+            org_id: None,
+            email: "invite-recipient@example.com".to_owned(),
+            role: VaultRole::Editor,
+            invited_by: Some(owner.id),
+            vault_key_wrapping: serde_json::json!({"wrapped": "legacy-user-key"}),
+            expires_at: None,
+        })
+        .await
+        .unwrap();
+    let legacy_accept = storage
+        .accept_vault_invite(AcceptVaultInvite {
+            invite_id: legacy_invite.id,
+            user_id: recipient.id,
+            device_id: Some(recipient_device.id),
+        })
+        .await;
+    assert!(matches!(legacy_accept, Err(StorageError::NotFound)));
+    assert!(
+        storage
+            .list_pending_vault_invites_for_email("invite-recipient@example.com")
+            .await
+            .unwrap()
+            .iter()
+            .any(|invite| invite.id == legacy_invite.id)
+    );
 }
 
 async fn sync_checkpoint_persistence_on<S: StorageBackend + ?Sized>(storage: &S) {

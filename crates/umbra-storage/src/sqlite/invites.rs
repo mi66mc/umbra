@@ -180,7 +180,10 @@ fn invite_device_wrapping(
     device_id: Option<Uuid>,
 ) -> Result<(String, serde_json::Value, i64, Option<Uuid>), StorageError> {
     let Some(entries) = value.get("device_wrappings").and_then(|v| v.as_array()) else {
-        return Ok(("user_public_key".to_owned(), value.clone(), 1, device_id));
+        // User-scoped invite envelopes cannot be safely assigned to a single
+        // trusted device. Leave the legacy invite pending for explicit
+        // re-issuance instead of silently recreating a user-key wrapping.
+        return Err(StorageError::NotFound);
     };
     let device_id = device_id.ok_or(StorageError::NotFound)?;
     let entry = entries
